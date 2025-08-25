@@ -1,0 +1,71 @@
+<script>
+  // --------- UI Détection d'erreurs ----------
+let _checks = { checkDuplicates:true, checkCdpConflict:true, rules:[] };
+
+function renderChecks(){
+  $('#chkDup').checked = !!_checks.checkDuplicates;
+  $('#chkCdp').checked = !!_checks.checkCdpConflict;
+  const tb = $('#checksTable tbody'); tb.innerHTML = '';
+  (_checks.rules||[]).forEach((r,i)=>{
+    const tr = document.createElement('tr');
+    const tdA = document.createElement('td'); const sel = document.createElement('input'); sel.type='text'; sel.value = r.article||''; sel.placeholder='Nom exact (comme dans ARTICLES)'; sel.style.width='100%'; tdA.appendChild(sel);
+    const tdY = document.createElement('td'); const inp = document.createElement('input'); inp.type='text'; inp.value = r.yearsCsv||''; inp.placeholder='ex: 2013,2014,2015'; inp.style.width='100%'; tdY.appendChild(inp);
+    const tdB = document.createElement('td'); const bDel = document.createElement('button'); bDel.className='btn secondary'; bDel.textContent='Supprimer'; bDel.onclick=()=>{ _checks.rules.splice(i,1); renderChecks(); }; tdB.appendChild(bDel);
+    tr.appendChild(tdA); tr.appendChild(tdY); tr.appendChild(tdB);
+    tb.appendChild(tr);
+  });
+}
+function collectChecks(){
+  _checks.checkDuplicates = $('#chkDup').checked;
+  _checks.checkCdpConflict = $('#chkCdp').checked;
+  const rows = Array.from($('#checksTable tbody').querySelectorAll('tr'));
+  _checks.rules = rows.map(tr => {
+    const tds = tr.querySelectorAll('td');
+    return { article: tds[0].querySelector('input').value.trim(), yearsCsv: tds[1].querySelector('input').value.trim() };
+  }).filter(x => x.article);
+}
+
+function loadChecks(){
+  const sid = _activeSeasonId(); if (!sid) return;
+  $('#checksStatus').textContent = 'Chargement…';
+  google.script.run.withSuccessHandler(res=>{
+    $('#checksStatus').textContent = '';
+    if(!res.ok) return toast(res.error);
+    _checks = res.data || {checkDuplicates:true,checkCdpConflict:true,rules:[]};
+    renderChecks();
+  }).getArticleCheckConfig(sid);
+}
+
+$('#btnAddCheckRule').addEventListener('click', ()=>{ _checks.rules.push({article:'',yearsCsv:''}); renderChecks(); });
+$('#btnSaveCheckCfg').addEventListener('click', ()=>{
+  const sid = _activeSeasonId(); if (!sid) return toast('Sélectionne une saison');
+  collectChecks();
+  $('#checksStatus').textContent = 'Sauvegarde…';
+  google.script.run.withSuccessHandler(res=>{
+    $('#checksStatus').textContent = res.ok ? 'OK' : 'Erreur';
+    toast(res.ok ? 'Config sauvegardée' : res.error);
+  }).setArticleCheckConfig(sid, JSON.stringify(_checks));
+});
+
+$('#btnRunChecks').addEventListener('click', ()=>{
+  const sid = _activeSeasonId(); if (!sid) return toast('Sélectionne une saison');
+  $('#checksStatus').textContent = 'Contrôle en cours…';
+  google.script.run.withSuccessHandler(res=>{
+    $('#checksStatus').textContent = res.ok ? 'OK' : 'Erreur';
+    if(!res.ok) return toast(res.error);
+    const t = $('#checksResults'); t.innerHTML='';
+    const thead = document.createElement('thead'); const trh = document.createElement('tr'); ['Passeport #','Article','Type','Message'].forEach(h=>{ const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); }); thead.appendChild(trh); t.appendChild(thead);
+    const tbody = document.createElement('tbody'); (res.data.errors||[]).forEach(e=>{ const tr=document.createElement('tr'); [e.passport,e.fee,e.type,e.message].forEach(v=>{ const td=document.createElement('td'); td.textContent=v||''; tr.appendChild(td); }); tbody.appendChild(tr); }); t.appendChild(tbody);
+    toast(`Contrôles: ${ (res.data.errors||[]).length } erreur(s), ${ (res.data.missingCdp||[]).length } membre(s) sans CDP`);
+  }).runArticleChecks(sid, {});
+});
+
+$('#btnSendCdpWarn').addEventListener('click', ()=>{
+  const sid = _activeSeasonId(); if (!sid) return toast('Sélectionne une saison');
+  $('#checksStatus').textContent = 'Envois…';
+  google.script.run.withSuccessHandler(res=>{
+    $('#checksStatus').textContent = res.ok ? `Envoyés: ${res.data.sent}/${res.data.total}` : 'Erreur';
+    toast(res.ok ? 'Avis envoyés' : res.error);
+  }).sendMissingCdpEmails(sid, {});
+});
+</script>

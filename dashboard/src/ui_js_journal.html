@@ -1,0 +1,32 @@
+<script>
+let _logsLoadedForSeasonId = null;
+
+function loadLogsForActiveSeason(force) {
+  const sid = $('#seasonSelect').value; if (!sid) return;
+  if (!force && _logsLoadedForSeasonId === sid) return;
+  const sheet = $('#logSheet').value || 'IMPORT_LOG';
+  Busy.show('journal', 'Chargement du journal…');
+  google.script.run.withSuccessHandler(res => {
+    Busy.hide('journal');
+    if (!res.ok) return toast(res.error);
+    const t = $('#logsTable'); t.innerHTML='';
+    const thead = document.createElement('thead'); const trh = document.createElement('tr');
+    ['When','Type','Message'].forEach(h => { const th = document.createElement('th'); th.textContent = h; trh.appendChild(th); });
+    thead.appendChild(trh); t.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    (res.data||[]).forEach(x => {
+      const tr = document.createElement('tr');
+      [x.when, x.type, x.message].forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
+      tbody.appendChild(tr);
+    });
+    t.appendChild(tbody);
+    _logsLoadedForSeasonId = sid;
+  }).withFailureHandler(err => { Busy.hide('journal'); console.error('getLogs', err); toast('Erreur journal'); })
+    .getLogs(sid, sheet, 200);
+}
+$('#btnLoadLogs').addEventListener('click', () => loadLogsForActiveSeason(true));
+$('#logSheet').addEventListener('change', () => loadLogsForActiveSeason(true));
+
+window.loadLogsForActiveSeason = loadLogsForActiveSeason;
+
+</script>

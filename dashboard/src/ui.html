@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>Suivi Inscriptions – Dashboard</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 0;
+      color: #0f172a;
+    }
+
+    header {
+      padding: 12px 16px;
+      background: #0b3a75;
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    header h1 {
+      font-size: 16px;
+      margin: 0;
+      font-weight: 600;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      padding: 8px;
+      border-bottom: 1px solid #e5e7eb;
+      background: #f8fafc;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+
+    .tab {
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .tab.active {
+      background: #0b3a75;
+      color: white;
+    }
+
+    .container {
+      padding: 16px;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .card {
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 12px;
+      background: white;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+    }
+
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+      background: #0b3a75;
+      color: white;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .btn.secondary {
+      background: white;
+      color: #0b3a75;
+    }
+
+    .btn:disabled {
+      opacity: .6;
+      cursor: not-allowed;
+    }
+
+    .grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    .grid.cols-2 {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .grid.cols-3 {
+      grid-template-columns: 1fr 1fr 1fr;
+    }
+
+    label {
+      font-size: 12px;
+      color: #475569;
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+
+    textarea {
+      min-height: 220px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      border: 1px solid #e5e7eb;
+      padding: 6px 8px;
+    }
+
+    th {
+      background: #f1f5f9;
+      text-align: left;
+      position: sticky;
+      top: 0;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      background: #0b3a75;
+      color: white;
+      padding: 10px 12px;
+      border-radius: 8px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, .2);
+      display: none;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    /* Params layout amélioré */
+    .params {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      gap: 16px;
+    }
+
+    .params-nav {
+      border-right: 1px solid #e5e7eb;
+      padding-right: 8px;
+      position: sticky;
+      top: 52px;
+      align-self: start;
+    }
+
+    .params-nav button {
+      width: 100%;
+      text-align: left;
+      padding: 8px;
+      margin: 4px 0;
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+      background: white;
+      cursor: pointer;
+    }
+
+    .params-nav button.active {
+      background: #0b3a75;
+      color: white;
+    }
+
+    .section {
+      margin-bottom: 16px;
+    }
+
+    .field {
+      margin: 0 0 16px;
+      padding: 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .field h4 {
+      margin: 0 0 6px;
+      font-size: 13px;
+    }
+
+    .field small {
+      display: block;
+      color: #64748b;
+      margin-top: 6px;
+    }
+
+    .note {
+      font-size: 12px;
+      color: #64748b;
+    }
+
+    /* Mappings */
+    #mappingSheet {
+      width: auto;
+      min-width: 260px;
+    }
+
+    tr.divider td {
+      background: #f8fafc;
+      font-weight: 600;
+      border-top: 2px solid #e5e7eb;
+    }
+
+    /* Compact tools */
+    .toolbar select {
+      width: auto;
+    }
+
+    /* Busy par section (barre) */
+    .section-busy {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      background: #eef2ff;
+      border: 1px solid #c7d2fe;
+      color: #1e3a8a;
+      padding: 6px 10px;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+
+    .section-busy.show {
+      display: flex;
+    }
+
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid #93c5fd;
+      border-top-color: #1d4ed8;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* Modal simple */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+    }
+
+    .modal-backdrop[hidden] {
+      display: none !important;
+    }
+
+    .modal-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px;
+      width: min(720px, calc(100% - 32px));
+      box-shadow: 0 10px 40px rgba(0, 0, 0, .25);
+    }
+
+    .modal-card h3 {
+      margin: 0 0 8px;
+      font-size: 16px;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+
+    .help-box {
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      background: #fafafa;
+      padding: 12px;
+      font-size: 13px;
+      color: #475569;
+    }
+
+    .help-box code {
+      background: #f1f5f9;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Suivi Inscriptions – Dashboard v0.1</h1>
+    <div class="toolbar">
+      <label>Saison</label>
+      <select id="seasonSelect"></select>
+      <button class="btn secondary" id="btnSetActive">Définir active</button>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="saison">Saison</div>
+    <div class="tab" data-tab="params">Paramètres</div>
+    <div class="tab" data-tab="rules">Règles</div>
+    <div class="tab" data-tab="mappings">Mappings</div>
+    <div class="tab" data-tab="exports">Exports</div>
+    <div class="tab" data-tab="journal">Journal</div>
+  </div>
+
+  <div class="container">
+    <!-- SAISON -->
+    <section id="tab-saison">
+      <div id="busy-saison" class="section-busy">
+        <div class="spinner"></div><span class="busy-text">…</span>
+      </div>
+      <div class="row">
+        <div class="card" style="flex:1 1 360px;">
+          <h3>Cloner une saison</h3>
+          <div class="grid cols-2">
+            <div>
+              <label>Source (ID)</label>
+              <input id="cloneSrcId" placeholder="ID du classeur source" />
+            </div>
+            <div>
+              <label>Nouveau titre</label>
+              <input id="cloneNewTitle" placeholder="2025-Aut-Hiv-Saison" />
+            </div>
+          </div>
+          <div style="margin-top:8px;" class="toolbar">
+            <button class="btn" id="btnClone">Cloner</button>
+            <span class="pill" id="cloneStatus"></span>
+          </div>
+        </div>
+        <div class="card" style="flex:1 1 360px;">
+          <h3>Tests (dry-run)</h3>
+          <div class="toolbar">
+            <button class="btn" id="btnImportDry">Importer (dry)</button>
+            <button class="btn" id="btnTestRules">Tester Règles</button>
+          </div>
+          <pre id="dryOutput" style="margin-top:8px; max-height:240px; overflow:auto;"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- PARAMS -->
+    <section id="tab-params" class="hidden">
+      <div id="busy-params" class="section-busy">
+        <div class="spinner"></div><span class="busy-text">…</span>
+      </div>
+      <div class="toolbar" style="margin-bottom:8px;">
+        <button class="btn secondary" id="btnLoadParams">Recharger</button>
+        <button class="btn" id="btnSaveParams">Sauvegarder</button>
+        <input id="paramSearch" placeholder="Rechercher…" style="margin-left:auto; max-width:280px;" />
+      </div>
+      <div class="params">
+        <div class="params-nav" id="paramsNav"></div>
+        <div id="paramsContent"></div>
+      </div>
+    </section>
+
+    <!-- RULES -->
+    <section id="tab-rules" class="hidden">
+      <div id="busy-rules" class="section-busy">
+        <div class="spinner"></div><span class="busy-text">…</span>
+      </div>
+      <div class="toolbar" style="margin-bottom:8px;">
+        <button class="btn secondary" id="btnReloadRules">Recharger</button>
+        <button class="btn" id="btnSaveRules">Sauvegarder</button>
+        <button class="btn" id="btnTestRules2">Tester</button>
+        <button class="btn secondary" id="btnToggleJson">Mode JSON</button>
+        <button class="btn" id="btnOpenAddRule" style="margin-left:auto;">+ Ajouter une règle</button>
+      </div>
+
+      <div class="help-box" style="margin-bottom:12px;">
+        <b>Comment ça marche ?</b>
+        <ul style="margin:6px 0 6px 18px;">
+          <li><b>Scope</b> : <code>inscriptions</code> (feuille INSCRIPTIONS), <code>articles</code> (feuille ARTICLES),
+            <code>member</code> (vue agrégée “membre” utilisée par les exports).</li>
+          <li><b>Actions</b> :
+            <code>ignore_row</code> (exclut la ligne du flux),
+            <code>set_member_field</code> (écrit une valeur calculée côté membre),
+            <code>set_member_field_max</code> (garde le max rencontré pour ce champ).
+          </li>
+          <li><b>SI (conditions)</b> : sur une ou plusieurs colonnes (opérateurs <code>contient</code>, <code>=</code>,
+            <code>regex</code>).</li>
+          <li>Les règles sont évaluées par <i>Évaluer les règles</i> et mises à profit par les exports RétroAction. Les
+            avertissements/erreurs vont dans <code>ERREURS</code>.</li>
+        </ul>
+        <div class="note">Exemple : <code>scope=inscriptions</code> + <code>set_member_field</code> avec
+          <code>field=secteur</code>, <code>value=CDP</code>, condition <code>Nom du frais contient "CDP"</code>.</div>
+      </div>
+
+      <table id="rulesTable"></table>
+
+      <textarea id="rulesText" class="hidden" placeholder="JSON des règles" style="margin-top:10px;"></textarea>
+      <pre id="rulesStatus" style="margin-top:8px;"></pre>
+    </section>
+
+    <!-- Modal Ajouter/Éditer une règle -->
+    <div id="ruleModal" class="modal-backdrop" hidden>
+      <div class="modal-card">
+        <h3 id="rmTitle">Nouvelle règle</h3>
+        <div class="grid cols-3" style="gap:8px;">
+          <div>
+            <label>Scope</label>
+            <select id="rmScope">
+            <option value="inscriptions">inscriptions</option>
+            <option value="articles">articles</option>
+            <option value="member">member</option>
+          </select>
+          </div>
+          <div>
+            <label>Action</label>
+            <select id="rmAction">
+            <option value="ignore_row">ignore_row</option>
+            <option value="set_member_field">set_member_field</option>
+          </select>
+          </div>
+          <div>
+            <label>Champ (pour set_*_field)</label>
+            <input id="rmField" placeholder="p.ex. secteur" />
+          </div>
+        </div>
+
+        <div class="grid cols-3" style="gap:8px; margin-top:8px;">
+          <div>
+            <label>Valeur (ou max)</label>
+            <input id="rmValue" placeholder='p.ex. "CDP"' />
+          </div>
+        </div>
+
+        <div style="margin-top:12px;">
+          <label>Conditions (SI)</label>
+          <div id="rmConds"></div>
+          <button class="btn secondary" id="rmAddCond" style="margin-top:6px;">+ Ajouter une condition</button>
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn secondary" id="btnRuleCancel">Annuler</button>
+          <button class="btn" id="btnRuleSave">Ajouter</button>
+        </div>
+      </div>
+    </div>
+
+
+
+<!-- MAPPINGS -->
+<section id="tab-mappings" class="hidden">
+  <div id="busy-mappings" class="section-busy">
+    <div class="spinner"></div><span class="busy-text">…</span>
+  </div>
+
+  <div class="toolbar" style="margin-bottom:8px;">
+    <label>Feuille</label>
+    <select id="mappingSheet"></select>
+    <button class="btn secondary" id="btnReloadMapping">Recharger</button>
+    <button class="btn" id="btnSaveAllMappings">Sauvegarder</button>
+    <button class="btn secondary" id="btnExportCsv">Exporter CSV</button>
+    <label class="btn secondary" for="csvFile">Importer CSV</label>
+    <button class="btn secondary" id="btnValidateMappings">Valider mappings</button>
+
+    <input type="file" id="csvFile" accept=".csv" style="display:none" />
+    <button class="btn" id="btnAddRow">+ Ajouter</button>
+  </div>
+
+  <div id="mappingBusy" class="pill" style="display:none;margin-bottom:8px;">Chargement…</div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px;">Mappings (table unique)</h3>
+    <table id="mappingTable"></table>
+    <pre id="mapTestOutput" style="margin-top:8px; max-height:280px; overflow:auto;"></pre>
+
+  </div>
+
+  <!-- Modal (création/édition) -->
+  <div class="modal" id="mapModal" hidden>
+    <div class="modal-content">
+      <h3 id="mapModalTitle">Mapping</h3>
+      <div id="mapForm"></div>
+      <div class="modal-actions">
+        <button class="btn secondary" id="mapCancel">Annuler</button>
+        <button class="btn" id="mapSave">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+    <!-- EXPORTS -->
+<!-- EXPORTS -->
+<section id="tab-exports" class="hidden">
+  <div id="busy-exports" class="section-busy">
+    <div class="spinner"></div><span class="busy-text">…</span>
+  </div>
+  <div class="row">
+    <div class="card" style="flex:1 1 260px;">
+      <h3>Membres</h3>
+      <div class="toolbar">
+        <button class="btn" data-export="membres">Exporter XLSX</button>
+        <button class="btn secondary" data-preview="members">Aperçu (dry)</button>
+      </div>
+    </div>
+    <div class="card" style="flex:1 1 260px;">
+      <h3>Groupes</h3>
+      <div class="toolbar">
+        <button class="btn" data-export="groupes">Exporter XLSX</button>
+        <button class="btn secondary" data-preview="groupes">Aperçu (dry)</button>
+      </div>
+    </div>
+    <div class="card" style="flex:1 1 260px;">
+      <h3>Groupe Articles</h3>
+      <div class="toolbar">
+        <button class="btn" data-export="gart">Exporter XLSX</button>
+        <button class="btn secondary" data-preview="groupArticles">Aperçu (dry)</button>
+      </div>
+    </div>
+  </div>
+
+  <pre id="exportStatus" style="margin-top:8px;"></pre>
+  <pre id="exportPreview" style="margin-top:8px; max-height:260px; overflow:auto;"></pre>
+</section>
+
+
+    <!-- JOURNAL -->
+    <section id="tab-journal" class="hidden">
+      <div id="busy-journal" class="section-busy">
+        <div class="spinner"></div><span class="busy-text">…</span>
+      </div>
+      <div class="toolbar" style="margin-bottom:8px;">
+        <label>Feuille</label>
+        <select id="logSheet">
+        <option>IMPORT_LOG</option>
+        <option>MODIFS_INSCRIPTIONS</option>
+        <option>ERREURS</option>
+        <option>MAIL_OUTBOX</option>
+      </select>
+        <button class="btn secondary" id="btnLoadLogs">Recharger</button>
+      </div>
+      <div>
+        <table id="logsTable"></table>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<?!= include('ui_js_common'); ?>
+<?!= include('ui_js_params'); ?>
+<?!= include('ui_js_rules'); ?>
+<?!= include('ui_js_mappings'); ?>
+<?!= include('ui_js_journal'); ?>
+<?!= include('ui_js_boot'); ?>
+
+
+  </body>
+
+</html>

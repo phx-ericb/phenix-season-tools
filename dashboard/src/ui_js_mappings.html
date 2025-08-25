@@ -1,0 +1,245 @@
+<script>
+// ===== MAPPINGS — table unique (Type = member|article) ======================
+
+const MAP_FIELDS = [
+  {key:'Type',          kind:'enum',  opts:['member','article']},
+  {key:'AliasContains', kind:'text'},
+  {key:'Umin',          kind:'int'},
+  {key:'Umax',          kind:'int'},
+  {key:'Genre',         kind:'enum',  opts:['*','M','F']},
+  {key:'GroupeFmt',     kind:'text'},
+  {key:'CategorieFmt',  kind:'text'},
+  {key:'Exclude',       kind:'bool'},
+  {key:'Priority',      kind:'int'},
+  {key:'Code', kind:'text'},
+  {key:'ExclusiveGroup', kind:'text'}
+
+];
+
+const MAP_HEADER = MAP_FIELDS.map(f => f.key);
+
+const MUX = {
+  showBusy(msg){ const el=$('#mappingBusy'); if(el){ el.textContent=msg||'…'; el.style.display='inline-block'; } },
+  hideBusy(){ const el=$('#mappingBusy'); if(el){ el.style.display='none'; } }
+};
+
+const Model = { rows: [] }; // [{Type,AliasContains,...}]
+
+function _sid(){ return $('#seasonSelect').value; }
+function _sheet(){ return $('#mappingSheet').value || 'MAPPINGS'; }
+
+function rowFromArray(arr, header){
+  const o={}; header.forEach((h,i)=> o[h]=arr[i]==null?'':arr[i]); return o;
+}
+function rowToArray(o){ return MAP_HEADER.map(h => (o[h]==null?'':o[h])); }
+
+function parseDTO(dto){
+  const headers = (dto.headers || []).map(x => String(x || '').trim());
+  const rows    = dto.rows || [];
+
+  // Si pas d’entête → rien à afficher
+  if (!headers.length) { Model.rows = []; return; }
+
+  // Assouplir la validation : on exige la présence de toutes les clés requises,
+  // peu importe l’ordre (l’ordre des colonnes dans la feuille n’a plus besoin d’être strict).
+  const hasAll = MAP_HEADER.every(h => headers.includes(h));
+  if (!hasAll) { 
+    console.warn('MAPPINGS: entêtes manquantes ou renommées.', {expected: MAP_HEADER, got: headers});
+    Model.rows = []; 
+    return; 
+  }
+
+  // Convertir chaque ligne en objet via le VRAI header renvoyé par le serveur
+  Model.rows = rows
+    .filter(r => (r || []).some(c => String(c || '').trim() !== '')) // ignore lignes vides
+    .map(r => rowFromArray(r, headers));
+}
+
+
+function buildRows(){ return [MAP_HEADER].concat(Model.rows.map(rowToArray)); }
+
+// ---------- Rendu ----------
+function render(){
+  const tbl = $('#mappingTable'); tbl.innerHTML='';
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  MAP_HEADER.forEach(h=>{ const th=document.createElement('th'); th.textContent=h; trh.appendChild(th); });
+  const thAct=document.createElement('th'); thAct.textContent=''; trh.appendChild(thAct);
+  thead.appendChild(trh); tbl.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  Model.rows.forEach((r,idx)=>{
+    const tr=document.createElement('tr');
+    MAP_HEADER.forEach(h=>{ const td=document.createElement('td'); td.textContent=(r[h]==null?'':r[h]); tr.appendChild(td); });
+    const tdA=document.createElement('td'); tdA.style.whiteSpace='nowrap'; tdA.style.display='flex'; tdA.style.gap='6px';
+    const bE=document.createElement('button'); bE.className='btn secondary'; bE.textContent='Modifier';
+    const bD=document.createElement('button'); bD.className='btn secondary'; bD.textContent='Supprimer';
+    bE.onclick=()=> openModal(idx); bD.onclick=()=>{ Model.rows.splice(idx,1); render(); };
+    tdA.appendChild(bE); tdA.appendChild(bD); tr.appendChild(tdA);
+    tbody.appendChild(tr);
+  });
+  tbl.appendChild(tbody);
+  $('#countMappings').textContent = String(Model.rows.length);
+}
+
+// ---------- Modal add/edit ----------
+let editIndex = null;
+
+function inputFor(field, value){
+  let el;
+  if (field.kind === 'enum'){
+    el = document.createElement('select');
+    field.opts.forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; el.appendChild(o); });
+    el.value = value||field.opts[0];
+  } else if (field.kind === 'bool'){
+    el = document.createElement('input'); el.type='checkbox'; el.checked = String(value).toLowerCase()==='true';
+  } else if (field.kind === 'int'){
+    el = document.createElement('input'); el.type='number'; el.value = (value==null?'':value);
+  } else {
+    el = document.createElement('input'); el.type='text'; el.value = value==null?'':value;
+  }
+  el.dataset.key = field.key;
+  return el;
+}
+
+function openModal(index){
+  editIndex = (typeof index === 'number') ? index : null;
+  const model = editIndex==null ? {} : {...Model.rows[editIndex]};
+  const form = $('#mapForm'); form.innerHTML='';
+
+  MAP_FIELDS.forEach(f=>{
+    const wrap=document.createElement('div'); wrap.style.margin='8px 0';
+    const lab=document.createElement('label'); lab.textContent=f.key; lab.style.fontSize='12px'; lab.style.color='#475569';
+    const inp=inputFor(f, model[f.key]);
+    wrap.appendChild(lab); wrap.appendChild(inp); form.appendChild(wrap);
+  });
+
+  $('#mapModalTitle').textContent = (editIndex==null?'Ajouter':'Modifier')+' – mapping';
+  $('#mapModal').hidden = false;
+}
+
+$('#mapCancel').onclick = ()=> { $('#mapModal').hidden = true; };
+$('#mapSave').onclick = ()=>{
+  const obj={};
+  $('#mapForm').querySelectorAll('[data-key]').forEach(inp=>{
+    const k=inp.dataset.key;
+    if (inp.type==='checkbox') obj[k]=inp.checked?'TRUE':'';
+    else obj[k]=inp.value;
+  });
+  if (!obj.Type) obj.Type='member';
+  if (!obj.Priority) obj.Priority='100';
+
+  if (editIndex==null) Model.rows.push(obj); else Model.rows[editIndex]=obj;
+  $('#mapModal').hidden = true; render();
+};
+
+// ---------- I/O ----------
+function loadMapping(){
+  const sid=_sid(); if(!sid) return;
+  MUX.showBusy('Chargement…');
+  google.script.run
+    .withSuccessHandler(res=>{ MUX.hideBusy(); if(!res.ok) return toast(res.error||'Erreur lecture'); parseDTO(res.data||{}); render(); })
+    .withFailureHandler(err=>{ MUX.hideBusy(); console.error('getMappings',err); toast('Erreur serveur'); })
+    .getMappings(sid, _sheet());
+}
+function saveMapping(){
+  const sid=_sid(); if(!sid) return;
+  const rows = buildRows();
+  MUX.showBusy('Sauvegarde…');
+  google.script.run
+    .withSuccessHandler(res=>{ MUX.hideBusy(); toast(res.ok?'Mappings sauvegardés':(res.error||'Erreur sauvegarde')); })
+    .withFailureHandler(err=>{ MUX.hideBusy(); console.error('setMappings',err); toast('Erreur sauvegarde'); })
+    .setMappings(sid, _sheet(), rows);
+}
+
+// ---------- Hooks UI (boutons existants de l’onglet) ----------
+<!-- ---------- Hooks UI (boutons existants de l’onglet) ---------- -->
+// Sélection de feuille
+$('#mappingSheet').addEventListener('change', loadMapping);
+
+// ⚠️ Corrige les IDs pour matcher ui.html
+$('#btnReloadMapping').addEventListener('click', loadMapping);
+$('#btnSaveAllMappings').addEventListener('click', saveMapping);
+
+// Export CSV (inchangé)
+$('#btnExportCsv').addEventListener('click', ()=>{
+  const sid=_sid(); if(!sid) return;
+  google.script.run.withSuccessHandler(res=>{
+    if(!res.ok) return toast(res.error||'Export échoué');
+    const a=document.createElement('a');
+    a.href='data:'+(res.data.mimeType||'text/csv')+';charset=utf-8,'+encodeURIComponent(res.data.content||'');
+    a.download = (res.data.filename || 'mappings.csv');
+    a.click();
+    toast('CSV exporté');
+  }).exportMappingsCsv(sid, _sheet());
+});
+
+// Import CSV (inchangé)
+$('#csvFile').addEventListener('change', ev=>{
+  const f=ev.target.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload = e=>{
+    const sid=_sid(); MUX.showBusy('Import CSV…');
+    google.script.run.withSuccessHandler(res=>{
+      MUX.hideBusy();
+      toast(res.ok?'CSV importé':(res.error||'Import échoué'));
+      loadMapping();
+    }).withFailureHandler(err=>{
+      MUX.hideBusy(); console.error('importMappingsCsv',err); toast('Erreur import');
+    }).importMappingsCsv(sid, _sheet(), e.target.result);
+  };
+  r.readAsText(f);
+});
+
+// ➕ “+ Ajouter” ouvre le modal vide
+$('#btnAddRow').addEventListener('click', ()=> openModal(null));
+
+// Valider mappings → appelle testMappings et affiche le JSON
+document.querySelector('#btnValidateMappings')?.addEventListener('click', () => {
+  const sid = (typeof _activeSeasonId==='function') ? _activeSeasonId() : (window._sid && _sid());
+  if (!sid) return toast('Sélectionne une saison');
+
+  const out = document.querySelector('#mapTestOutput');
+  if (out) out.textContent = '… analyse des mappings';
+
+  Busy.show('mappings', 'Validation des mappings…');
+  google.script.run
+    .withSuccessHandler(res => {
+      Busy.hide('mappings');
+      if (!res || res.ok === false) { toast(res && res.error || 'Erreur testMappings'); return; }
+      if (out) out.textContent = JSON.stringify(res, null, 2);
+
+      const issues = (res.articleBuckets.noMatch.length + res.articleBuckets.multiMatch.length +
+                      res.memberBuckets.noMatch.length + res.memberBuckets.multiMatch.length +
+                      res.memberBuckets.missingFmt.length);
+      toast(issues ? (`Validation OK avec ${issues} points à corriger`) : 'Validation OK (aucune anomalie)');
+    })
+    .withFailureHandler(err => {
+      Busy.hide('mappings'); console.error('testMappings FAILED', err); toast('Erreur serveur: testMappings');
+    })
+    .testMappings(sid, { maxPreviewPerBucket: 12 });
+});
+
+
+// Au boot: liste des feuilles puis charge MAPPINGS
+function loadMappingSheetList(){
+  const sid=_sid(); if(!sid) return;
+  google.script.run.withSuccessHandler(res=>{
+    if(!res.ok) return;
+    const sel=$('#mappingSheet'); const prev=sel.value; sel.innerHTML='';
+    (res.data||[]).forEach(n=>{
+      const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o);
+    });
+    sel.value = (prev && (res.data||[]).includes(prev)) ? prev : (res.data&&res.data[0]);
+    loadMapping();
+  }).listMappingSheets(sid);
+}
+setTimeout(loadMappingSheetList, 200);
+
+// expose
+window.loadMappingList = loadMappingSheetList;
+window.autoLoadFirstMappingOnce = function(){};
+
+
+
+</script>

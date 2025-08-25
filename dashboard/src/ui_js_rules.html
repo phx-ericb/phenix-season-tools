@@ -1,0 +1,228 @@
+<script>
+// ===== RULES (table + modal “ajouter”) =====
+let _rulesCache = { inscriptions:[], articles:[], member:[] };
+let _rulesLoadedForSeasonId = null;
+let _jsonMode = false;
+
+// ------- Helpers UI -------
+function _h(tag, attrs={}, ...children) {
+  const el = document.createElement(tag);
+  Object.entries(attrs).forEach(([k,v]) => {
+    if (k === 'class') el.className = v;
+    else if (k === 'dataset') Object.assign(el.dataset, v);
+    else el.setAttribute(k, v);
+  });
+  children.forEach(c => el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  return el;
+}
+
+function condToText(c){ return `${c.col} ${c.op} ${c.val}`; }
+
+function flattenRules() {
+  const rows = [];
+  const indexMap = []; // flatIndex -> {scope, idx}
+  ['inscriptions','articles','member'].forEach(scope => {
+    (_rulesCache[scope]||[]).forEach((r, i) => {
+      rows.push({ scope, rule: r });
+      indexMap.push({ scope, idx: i });
+    });
+  });
+  return { rows, indexMap };
+}
+
+function renderRulesTable() {
+  const tbl = document.getElementById('rulesTable');
+  tbl.innerHTML = '';
+
+  const thead = _h('thead', {}, _h('tr', {},
+    _h('th', {}, 'Scope'),
+    _h('th', {}, 'Action'),
+    _h('th', {}, 'Champ'),
+    _h('th', {}, 'Valeur/Max'),
+    _h('th', {}, 'SI (col op val)'),
+    _h('th', {}, '')
+  ));
+  const tbody = _h('tbody');
+
+  const { rows, indexMap } = flattenRules();
+  rows.forEach((row, flat) => {
+    const r = row.rule;
+    const tdDel = _h('td', {}, (() => {
+      const b = _h('button', { class:'btn secondary', dataset:{flat} }, 'Supprimer');
+      b.addEventListener('click', () => deleteRuleFlat(flat));
+      return b;
+    })());
+    const when = (r.when||[]).map(condToText).join(' & ');
+
+    const tr = _h('tr', {},
+      _h('td', {}, row.scope),
+      _h('td', {}, r.action || ''),
+      _h('td', {}, r.field || ''),
+      _h('td', {}, (r.value || r.max || '')),
+      _h('td', {}, when),
+      tdDel
+    );
+    tbody.appendChild(tr);
+  });
+
+  tbl.appendChild(thead);
+  tbl.appendChild(tbody);
+}
+
+function deleteRuleFlat(flatIndex) {
+  let count = 0;
+  for (const scope of ['inscriptions','articles','member']) {
+    const arr = _rulesCache[scope] || [];
+    for (let i=0;i<arr.length;i++){
+      if (count === flatIndex) {
+        arr.splice(i,1);
+        renderRulesTable();
+        return;
+      }
+      count++;
+    }
+  }
+}
+
+// ------- Modal Add -------
+const $rm = {
+  root: document.getElementById('ruleModal'),
+  title: document.getElementById('rmTitle'),
+  scope: document.getElementById('rmScope'),
+  action: document.getElementById('rmAction'),
+  field: document.getElementById('rmField'),
+  value: document.getElementById('rmValue'),
+  condsWrap: document.getElementById('rmConds'),
+  addCond: document.getElementById('rmAddCond'),
+  save: document.getElementById('btnRuleSave'),
+  cancel: document.getElementById('btnRuleCancel'),
+};
+
+function openRuleModal() {
+  $rm.title.textContent = 'Nouvelle règle';
+  $rm.scope.value = 'inscriptions';
+  $rm.action.value = 'ignore_row';
+  $rm.field.value = '';
+  $rm.value.value = '';
+  $rm.condsWrap.innerHTML = '';
+  addCondRow();
+  $rm.root.hidden = false;      // <-- affiche
+}
+
+function closeRuleModal() {
+  $rm.root.hidden = true;       // <-- cache
+}
+
+function addCondRow(values) {
+  const row = _h('div', { class:'grid cols-3', style:'gap:6px; margin-top:6px;' },
+    (() => { const i = _h('input', { placeholder:'Colonne', value:(values?.col||'') }); i.className=''; i.dataset.role='col'; return i; })(),
+    (() => {
+      const s = _h('select', {}, _h('option', {value:'contains'}, 'contient'), _h('option', {value:'equals'}, '='), _h('option', {value:'regex'}, 'regex'));
+      s.value = values?.op || 'contains'; s.dataset.role='op'; return s;
+    })(),
+    (() => {
+      const wrap = _h('div', {style:'display:flex; gap:6px; align-items:center;'});
+      const v = _h('input', { placeholder:'… vaut', value:(values?.val||'') }); v.dataset.role='val';
+      const del = _h('button', { class:'btn secondary' }, 'Supprimer');
+      del.addEventListener('click', () => row.remove());
+      wrap.appendChild(v); wrap.appendChild(del); return wrap;
+    })()
+  );
+  $rm.condsWrap.appendChild(row);
+}
+
+$rm.addCond.addEventListener('click', () => addCondRow());
+
+$rm.cancel.addEventListener('click', closeRuleModal);
+
+$rm.save.addEventListener('click', () => {
+  const scope = $rm.scope.value;
+  const action = $rm.action.value;
+  const field = $rm.field.value.trim();
+  const value = $rm.value.value.trim();
+
+  const rule = { action };
+  if (action !== 'ignore_row') {
+    if (!field) { toast('Champ requis'); return; }
+    rule.field = field;
+    if (action === 'set_member_field') rule.value = value;
+    if (action === 'set_member_field_max') rule.max = value;
+  }
+
+  const conds = [];
+  $rm.condsWrap.querySelectorAll('.grid').forEach(g => {
+    const col = g.querySelector('[data-role="col"]')?.value.trim();
+    const op  = g.querySelector('[data-role="op"]')?.value;
+    const val = g.querySelector('[data-role="val"]')?.value.trim();
+    if (col && val) conds.push({ col, op, val });
+  });
+  if (conds.length) rule.when = conds;
+
+  _rulesCache[scope] = _rulesCache[scope] || [];
+  _rulesCache[scope].push(rule);
+
+  renderRulesTable();
+  closeRuleModal();
+});
+
+// ------- Chargement / Sauvegarde -------
+function compileRulesToJson() {
+  // Moteur attendu: { inscriptions:[], articles:[], member:[] }
+  return JSON.stringify(_rulesCache, null, 2);
+}
+function parseRulesFromJsonText(txt) {
+  let obj = {};
+  try { obj = JSON.parse(txt||'{}'); } catch(e) { obj = {}; }
+  const out = { inscriptions:[], articles:[], member:[] };
+  if (Array.isArray(obj)) {
+    obj.forEach(r => {
+      const scope = r.scope || 'inscriptions';
+      const copy = Object.assign({}, r); delete copy.scope;
+      (out[scope] = out[scope] || []).push(copy);
+    });
+  } else {
+    ['inscriptions','articles','member'].forEach(s => { if (Array.isArray(obj[s])) out[s] = obj[s]; });
+  }
+  return out;
+}
+
+function loadRulesForActiveSeason(force) {
+  const sid = document.getElementById('seasonSelect').value; if (!sid) return;
+  if (!force && _rulesLoadedForSeasonId === sid) return;
+  document.getElementById('rulesStatus').textContent = 'Chargement…';
+  google.script.run.withSuccessHandler(res => {
+    if (!res.ok) { document.getElementById('rulesStatus').textContent = res.error; return; }
+    _rulesCache = parseRulesFromJsonText(res.data.jsonText || '{}');
+    _rulesLoadedForSeasonId = sid;
+    document.getElementById('rulesStatus').textContent = '';
+    renderRulesTable();
+    document.getElementById('rulesText').value = JSON.stringify(_rulesCache, null, 2);
+  }).getRules(sid);
+}
+
+document.getElementById('btnReloadRules').addEventListener('click', () => loadRulesForActiveSeason(true));
+document.getElementById('btnSaveRules').addEventListener('click', () => {
+  const sid = document.getElementById('seasonSelect').value; if (!sid) return toast('Sélectionne une saison');
+  const json = _jsonMode ? document.getElementById('rulesText').value : compileRulesToJson();
+  google.script.run.withSuccessHandler(res => {
+    toast(res.ok ? 'Règles sauvegardées' : res.error);
+  }).setRules(sid, json);
+});
+document.getElementById('btnTestRules2').addEventListener('click', () => doTestRules());
+document.getElementById('btnToggleJson').addEventListener('click', () => {
+  _jsonMode = !_jsonMode;
+  document.getElementById('rulesTable').classList.toggle('hidden', _jsonMode);
+  document.getElementById('btnOpenAddRule').classList.toggle('hidden', _jsonMode);
+  document.getElementById('rulesText').classList.toggle('hidden', !_jsonMode);
+  if (_jsonMode) document.getElementById('rulesText').value = compileRulesToJson();
+});
+
+// Bouton “Ajouter”
+document.getElementById('btnOpenAddRule').addEventListener('click', openRuleModal);
+document.getElementById('ruleModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('ruleModal')) closeRuleModal();
+});
+
+window.loadRulesForActiveSeason = loadRulesForActiveSeason;
+
+</script>
