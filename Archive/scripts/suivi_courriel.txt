@@ -1,0 +1,276 @@
+/**************************************
+ * Fichier : suivi_courriel.gs
+ **************************************/
+
+/**
+ * Enregistre dans les propriétés du script le tableau des suivis courriel.
+ * Chaque élément est un objet contenant :
+ *  - secteur : "U-09 MASCULIN", "U-09 FEMININ", "U-10 MASCULIN", "U-10 FEMININ", etc.
+ *    (mais dans le traitement, on regroupe selon les critères définis ci-dessous)
+ *  - email : chaîne avec une ou plusieurs adresses séparées par des virgules (la première sera utilisée, le reste en CCi)
+ *  - liens : tableau d'objets { nom, url }
+ *  - message : texte du courriel
+ *  - dateButoir : date d'inscription butoir au format "AAAA-MM-JJ"
+ *  - simulation : booléen indiquant si le mode test est activé
+ *  - testEmail : adresse à utiliser en simulation
+ */
+function sauvegarderSuivisCourriel(suivis) {
+  var scriptProperties = PropertiesService.getScriptProperties();
+  scriptProperties.setProperty('suivisCourriel', JSON.stringify(suivis));
+  // Logger.log("Suivis courriel sauvegardés: " + JSON.stringify(suivis));
+  return "Suivis courriel sauvegardés avec succès.";
+}
+
+/**
+ * Récupère les suivis courriel enregistrés.
+ * Retourne un tableau d'objets ou un tableau vide.
+ */
+function getSuivisCourriel() {
+  var scriptProperties = PropertiesService.getScriptProperties();
+  var suivis = scriptProperties.getProperty('suivisCourriel');
+  // Logger.log("Récupération des suivis courriel: " + suivis);
+  if (!suivis) return [];
+  return JSON.parse(suivis);
+}
+
+/**
+ * Envoie automatiquement un courriel de suivi aux nouveaux inscrits,
+ * selon tous les suivis configurés.
+ * Pour éviter les envois multiples, un log (onglet "Suivi Courriel Log") est tenu.
+ *
+ * Pour chaque inscription, le script :
+ *  - Détermine le secteur en analysant le nom du frais (colonne L) via le regex
+ *    /^U-(\d\d)\s+(MASCULIN|FEMININ)/ qui s'assure que le nom commence par "U-XX" suivi d'un espace
+ *    et de "MASCULIN" ou "FEMININ". Si le modèle ne correspond pas, la ligne est ignorée.
+ *  - En extrayant le numéro (XX), il regroupe les inscriptions selon :
++  *       • 04 à 06 ? "U4-U6"
++  *       • 07 à 08 ? "U7-U8"
++  *       • 09 ? "U9"
+ *       • 10 ? "U10"
+ *       • 11 ? "U11"
+ *       • 12 ? "U12"
+ *       • 13 ? "U13"
+ *       • 14 ou 15 ? "U14-U15"
+ *       • 16 à 19 ? "U16-U19"
+ *  - Vérifie, via une passe globale, que la date d'inscription (colonne Z)
+ *    est postérieure à la plus petite date butoir parmi toutes les configurations.
+ *  - Pour chaque configuration dont le secteur correspond, il vérifie la date d'inscription
+ *    par rapport à la date butoir propre à cette configuration.
+ *  - Si l'inscription est valide, le courriel est envoyé (en mode simulation, le destinataire est remplacé)
+ *  - Le log est mis à jour avec une clé composite "passeport-config.secteur" pour éviter d'envoyer
+ *    plusieurs fois pour le même suivi.
+ *
+ * Le nom affiché lors de l'envoi est fixé à "Phénix des Rivières".
+ */
+function envoyerSuiviCourriel() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var inscriptionsSheet = ss.getSheetByName("Inscriptions");
+  if (!inscriptionsSheet) {
+    SpreadsheetApp.getUi().alert("Onglet 'Inscriptions' introuvable.");
+    return;
+  }
+  
+  // Récupérer la configuration des suivis courriel
+  var scriptProperties = PropertiesService.getScriptProperties();
+  var suivisJson = scriptProperties.getProperty('suivisCourriel');
+  if (!suivisJson) {
+    // Logger.log("Aucune configuration de suivis courriel trouvée.");
+    return;
+  }
+  var suivis = JSON.parse(suivisJson);
+  // Logger.log("Configuration de suivis courriel: " + suivisJson);
+  
+  // Calculer la plus petite date butoir parmi les configurations (pour optimisation globale)
+  var cutoffDates = [];
+  suivis.forEach(function(config) {
+    if (config.dateButoir) {
+      cutoffDates.push(new Date(config.dateButoir));
+    }
+  });
+  var earliestCutoff = null;
+  if (cutoffDates.length > 0) {
+    earliestCutoff = new Date(Math.min.apply(null, cutoffDates));
+    // Logger.log("Earliest cutoff among configurations: " + earliestCutoff);
+  }
+  
+  // Préparer le log pour éviter les envois multiples.
+  // On applique le format texte à toute la colonne A dès la création.
+  var logSheet = ss.getSheetByName("Suivi Courriel Log");
+  if (!logSheet) {
+    logSheet = ss.insertSheet("Suivi Courriel Log");
+    logSheet.appendRow(["Passeport", "Email envoyé", "Secteur", "Date d'envoi"]);
+    // Logger.log("Création de l'onglet 'Suivi Courriel Log'.");
+  }
+  logSheet.getRange("A:A").setNumberFormat("@");
+  
+  var logData = logSheet.getDataRange().getValues();
+  var sentKeys = {};
+  if (logData.length > 1) {
+    for (var i = 1; i < logData.length; i++) {
+      // Utiliser la colonne A (passeport) et la colonne C (secteur) pour former la clé composite
+      var passportVal = logData[i][0].toString().trim();
+      // Extraction si la valeur est en formule (ex: ="012345")
+      passportVal = passportVal.replace(/="(.*)"/, "$1");
+      var secteurVal = logData[i][2] ? logData[i][2].toString().trim() : "";
+      var key = passportVal + "-" + secteurVal;
+      if (key) {
+        sentKeys[key] = true;
+      }
+    }
+  }
+  
+  // Récupérer les données de l'onglet INSCRIPTIONS
+  var data = inscriptionsSheet.getDataRange().getValues();
+  // Logger.log("Nombre total d'inscriptions: " + data.length);
+  if (data.length < 2) return;
+  
+  // On suppose :
+  // - Colonne A (index 0) : passeport (identifiant unique, en texte)
+  // - Colonne L (index 11) : nom du frais
+  // - Colonne Z (index 25) : date d'inscription (ou facture)
+  var emailsSent = 0;
+  
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var passport = row[0] ? row[0].toString().trim() : "";
+    if (!passport) {
+      // Logger.log("Ligne " + i + " ignorée: pas de passeport.");
+      continue;
+    }
+    // Optimisation globale : si la date d'inscription est antérieure à la plus petite date butoir, ignorer la ligne.
+    if (earliestCutoff && row[25]) {
+      var inscriptionDateGlobal = new Date(row[25]);
+      if (inscriptionDateGlobal < earliestCutoff) {
+        // Logger.log("Ligne " + i + " ignorée: inscription (" + inscriptionDateGlobal + ") antérieure à la plus petite date butoir (" + earliestCutoff + ").");
+        continue;
+      }
+    }
+    
+   // Extraction et normalisation du nom du frais
+var feeName = row[11] ? row[11].toString().trim() : "";
+var normalizedFeeName = feeName
+  .toUpperCase()
+  .normalize('NFD')               // décompose les caractères accentués
+  .replace(/[\u0300-\u036f]/g, ''); // supprime les diacritiques
+
+// Utiliser un regex pour considérer les frais commençant par "U-XX" suivi d'un espace et de "MASCULIN" ou "FEMININ"
+var regex = /^U-(\d\d)\s+(MASCULIN|FEMININ)/;
+var match = normalizedFeeName.match(regex);
+if (!match) {
+  // Logger.log("Ligne " + i + " ignorée: le nom du frais ne correspond pas au format attendu (" + feeName + ").");
+  continue;
+}
+
+   var num = parseInt(match[1], 10);
+var secteur = "";
+if (num >= 4 && num <= 6) {
+  secteur = "U4-U6";
+} else if (num >= 7 && num <= 8) {
+  secteur = "U7-U8";
+} else if (num === 9) {
+  secteur = "U9";
+} else if (num === 10) {
+  secteur = "U10";
+} else if (num === 11) {
+  secteur = "U11";
+} else if (num === 12) {
+  secteur = "U12";
+} else if (num === 13) {
+  secteur = "U13";
+} else if (num === 14 || num === 15) {
+  secteur = "U14-U15";
+} else if (num >= 16 && num <= 19) {
+  secteur = "U16-U19";
+} else {
+  continue;  // en-dehors des plages gérées
+}
+    // Logger.log("Ligne " + i + ": secteur déterminé: " + secteur);
+    
+    if (!row[25]) {
+      // Logger.log("Ligne " + i + " ignorée: aucune date d'inscription trouvée.");
+      continue;
+    }
+    var inscriptionDate = new Date(row[25]);
+    
+    // Parcourir tous les suivis correspondant à ce secteur
+    for (var j = 0; j < suivis.length; j++) {
+      var config = suivis[j];
+      if (config.secteur !== secteur) continue;
+      
+      // Vérifier la date d'inscription pour ce suivi (chaque secteur a sa propre date cutoff)
+      if (config.dateButoir) {
+        var cutoff = new Date(config.dateButoir);
+        if (inscriptionDate < cutoff) {
+          // Logger.log("Ligne " + i + " ignorée pour config " + config.secteur + ": inscription (" + inscriptionDate + ") antérieure à la date butoir (" + cutoff + ").");
+          continue;
+        }
+      }
+      
+      // Utiliser une clé composite pour ce suivi : "passeport-config.secteur"
+      var logKey = passport + "-" + config.secteur;
+      if (sentKeys[logKey]) {
+        // Logger.log("Ligne " + i + " ignorée pour config " + config.secteur + ": déjà traité.");
+        continue;
+      }
+      
+      // Sélectionner l'adresse courriel du membre (colonnes G, H ou J par exemple)
+      var recipient = "";
+      var possibles = [row[6], row[7], row[9]];
+      for (var k = 0; k < possibles.length; k++) {
+        if (possibles[k] && possibles[k].toString().trim() !== "") {
+          recipient = possibles[k].toString().trim();
+          break;
+        }
+      }
+      if (!recipient) {
+        // Logger.log("Ligne " + i + " ignorée: aucun courriel trouvé pour le membre.");
+        continue;
+      }
+      
+      // En mode simulation pour ce suivi, remplacer le destinataire par l'adresse de test.
+      if (config.simulation === true) {
+        var originalRecipient = recipient;
+        recipient = config.testEmail ? config.testEmail : Session.getActiveUser().getEmail();
+        // Logger.log("Ligne " + i + " (simulation): remplacement du destinataire (" + originalRecipient + ") par " + recipient);
+      }
+      
+      // Préparer le contenu du courriel
+      var subject = "Informations importantes - " + secteur;
+      var bodyText = config.message || "";
+      if (config.liens && config.liens.length > 0) {
+        bodyText += "\n\n";
+        config.liens.forEach(function(lien) {
+          if (lien.url && lien.nom) {
+            bodyText += lien.nom + " : " + lien.url + "\n";
+          }
+        });
+      }
+      
+      // Préparer les options d'envoi avec le nom fixe "Phénix des Rivières"
+      var emailList = config.email ? config.email.split(",").map(function(e){ return e.trim(); }) : [];
+      var replyTo = emailList.length > 0 ? emailList[0] : "";
+      var bcc = emailList.length > 1 ? emailList.slice(1).join(",") : "";
+      var emailOptions = {
+        replyTo: replyTo,
+        bcc: bcc,
+        htmlBody: bodyText.replace(/\n/g, "<br>"),
+        name: "Phénix des Rivières"
+      };
+      
+      // Envoyer le courriel pour ce suivi
+      try {
+        MailApp.sendEmail(recipient, subject, bodyText, emailOptions);
+        emailsSent++;
+        // Forcer le passeport en texte (format formule) pour conserver les zéros initiaux
+        var passportForLog = '="' + passport + '"';
+        logSheet.appendRow([passportForLog, recipient, config.secteur, new Date()]);
+        sentKeys[logKey] = true;
+        // Logger.log("Ligne " + i + ": courriel envoyé à " + recipient + " pour le secteur " + config.secteur + ".");
+      } catch(e) {
+        // Logger.log("Ligne " + i + ": erreur lors de l'envoi du courriel à " + recipient + " - " + e);
+      }
+    } // fin de la boucle sur les configs pour cette inscription
+  }
+  
+  SpreadsheetApp.getUi().alert(emailsSent + " courriel(s) de suivi ont été envoyés.");
+}

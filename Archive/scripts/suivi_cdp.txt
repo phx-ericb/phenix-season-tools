@@ -1,0 +1,184 @@
+function envoyerRelances() {
+  var testMode = false; // false = production, true = mode test (aucun email n'est envoyé)
+  
+  // --- Récupération du fichier à joindre ---
+  var fileId = "12xITXx6uwKtw7DyU_DAZbSO9b3cYDRFp";
+  var fichierBlob = DriveApp.getFileById(fileId).getBlob();
+  
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // Accès aux feuilles
+  var baseSheet = ss.getSheetByName("U9U12");
+  var cdpSheet = ss.getSheetByName("CDP");
+  var suiviSheet = ss.getSheetByName("Suivi_Relances");
+  
+  if (!baseSheet || !cdpSheet || !suiviSheet) {
+    SpreadsheetApp.getUi().alert("Assurez-vous que les feuilles 'U9U12', 'CDP' et 'Suivi_Relances' existent dans le classeur.");
+    return;
+  }
+  
+  // --- FONCTION DE NORMALISATION ---
+  // Renvoie toujours une chaîne pour assurer des comparaisons cohérentes.
+  function normalizeValue(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value.trim();
+    if (Object.prototype.toString.call(value) === "[object Date]") {
+      return Utilities.formatDate(value, "GMT-5", "yyyy-MM-dd");
+    }
+    return value.toString().trim();
+  }
+  
+  // --- LECTURE DES DONNÉES AVEC getDisplayValues() ---
+  // Permet de conserver l'affichage exact (par exemple, les zéros initiaux)
+  var baseData = baseSheet.getDataRange().getDisplayValues();
+  var cdpData  = cdpSheet.getDataRange().getDisplayValues();
+  var suiviData = suiviSheet.getDataRange().getDisplayValues();
+  
+  // --- RÉCUPÉRATION DES PASSEPORTS QUI ONT UN ENTRAÎNEMENT CDP ---
+  var cdpPasseports = new Set();
+  for (var i = 1; i < cdpData.length; i++) {
+    var idCdp = normalizeValue(cdpData[i][0]); // Colonne A de CDP
+    if (idCdp) {
+      cdpPasseports.add(idCdp);
+    }
+  }
+  
+  // --- CRÉATION D'UN DICTIONNAIRE DES DATES DE RÉGULARISATION DE CDP ---
+  // On suppose que dans CDP, la colonne A contient le Passeport et la colonne G (index 6) la Date régularisation.
+  var cdpDateMap = {};
+  for (var i = 1; i < cdpData.length; i++) {
+    var cp = normalizeValue(cdpData[i][0]);
+    var regDateFromCDP = normalizeValue(cdpData[i][6]); // Colonne G
+    if (cp) {
+      cdpDateMap[cp] = regDateFromCDP;
+    }
+  }
+  
+  // --- RÉCUPÉRATION DES ENVOIS DÉJÀ EFFECTUÉS (clé = Passeport + Date_Facture) ---
+  // Dans Suivi_Relances, la colonne D contient la Date_Facture.
+  var emailsEnvoyes = {};
+  for (var i = 1; i < suiviData.length; i++) {
+    var idSuivi = normalizeValue(suiviData[i][0]); // Colonne A : Passeport
+    var dateFactureSuivi = normalizeValue(suiviData[i][3]); // Colonne D : Date_Facture
+    var keySuivi = idSuivi + "_" + dateFactureSuivi;
+    emailsEnvoyes[keySuivi] = true;
+  }
+  
+  // Initialisation des compteurs pour le popup
+  var nouveauxCas = 0;
+  var nbRegularises = 0;
+  
+  // --- PARCOURS DE L'ONGLET U9U12 ---
+  // Organisation dans U9U12 :
+  // • A : Passeport (index 0)
+  // • B : Prénom (index 1)
+  // • C : Nom (index 2)
+  // • Emails : colonnes G, H, I (indexes 6, 7, 8)
+  // • Programme : colonne J (index 9)
+  // • Date_Facture : colonne K (index 10)
+  for (var i = 1; i < baseData.length; i++) {
+    var row = baseData[i];
+    
+    var passeport = normalizeValue(row[0]); // Colonne A
+    if (!passeport) continue;
+    
+    var prenom = row[1]; // Colonne B
+    var nom = row[2];    // Colonne C
+    
+    // Récupération des emails dans les colonnes G, H et I
+    var emailG = normalizeValue(row[6]);
+    var emailH = normalizeValue(row[7]);
+    var emailI = normalizeValue(row[8]);
+    
+    var emailsSet = new Set();
+    if (emailG) emailsSet.add(emailG);
+    if (emailH) emailsSet.add(emailH);
+    if (emailI) emailsSet.add(emailI);
+    var emails = Array.from(emailsSet).filter(function(e) { return e !== ""; });
+    if (emails.length === 0) continue;
+    
+    var programme = row[9];                 // Colonne J
+    var dateFacture = normalizeValue(row[10]); // Colonne K
+    
+    // Si le membre n'a pas choisi d'entraînement (ID absent de CDP)
+    if (!cdpPasseports.has(passeport)) {
+      var key = passeport + "_" + dateFacture;
+      if (!emailsEnvoyes[key]) {
+        // C'est un nouveau cas détecté
+        nouveauxCas++;
+        
+        // --- PRÉPARATION DU MAIL ---
+        var sujet = "Confirmation de votre inscription - Options d'entraînement";
+        var corps = "Bonjour,\n\n" +
+          "Vous recevez ce courriel car vous avez inscrit " + prenom + " " + nom + " au programme " + programme +
+          " sans choisir d'option d'entraînement.\n" +
+          "S'il s'agit d'une erreur, nous vous invitons à ajouter 1 ou 2 séances d'entraînement CDP par semaine à votre inscription.\n" +
+          "Dans le cas contraire, " + prenom + " participera uniquement aux matchs et sera placé automatiquement dans la catégorie D3 (récréatif).\n\n" +
+          "Veuillez trouver ci-joint la procédure à suivre.\n\n" +
+          "N'hésitez pas à nous contacter à info@phenixdesrivieres.com si vous avez des questions.\n\n" +
+          "Cordialement,\n" +
+          "L'équipe Phénix";
+        
+        if (testMode) {
+          Logger.log("Mode test : AUCUN email envoyé.");
+          Logger.log("Destinataires : " + emails.join(","));
+          Logger.log("Sujet : " + sujet);
+          Logger.log("Corps :\n" + corps);
+          Logger.log("Pièce jointe incluse (ID: " + fileId + ")");
+        } else {
+          GmailApp.sendEmail(emails.join(","), sujet, corps, { attachments: [fichierBlob] });
+        }
+        
+        var envoiDate = new Date();
+        var statut = testMode ? "TEST" : "ENVOYE";
+        // Insertion dans Suivi_Relances selon l'ordre suivant :
+        // A : Passeport, B : Prénom, C : Nom, D : Date_Facture, E : Date_Envoi, F : Statut, G : Date régularisation (initialement vide)
+        var rowData = ["'" + passeport, prenom, nom, dateFacture, envoiDate, statut, ""];
+        suiviSheet.appendRow(rowData);
+        
+        emailsEnvoyes[key] = true;
+      }
+    }
+  }
+  
+  // --- MISE À JOUR DES STATUTS DANS SUIVI_RELANCES ---
+  // Pour chaque enregistrement de Suivi_Relances, si le Passeport figure dans CDP,
+  // on met à jour le Statut en "Régularisé" et on renseigne la Date régularisation à partir de CDP (colonne G dans CDP)
+  var suiviDataAfter = suiviSheet.getDataRange().getDisplayValues();
+  
+  // Vérification et mise en place des en-têtes (si nécessaire)
+  var headersSuivi = suiviDataAfter[0];
+  if (headersSuivi[0] !== "Passeport" ||
+      headersSuivi[1] !== "Prénom" ||
+      headersSuivi[2] !== "Nom" ||
+      headersSuivi[3] !== "Date_Facture" ||
+      headersSuivi[4] !== "Date_Envoi" ||
+      headersSuivi[5] !== "Statut" ||
+      headersSuivi[6] !== "Date régularisation") {
+    suiviSheet.getRange(1, 1, 1, 7).setValues([["Passeport", "Prénom", "Nom", "Date_Facture", "Date_Envoi", "Statut", "Date régularisation"]]);
+    suiviDataAfter = suiviSheet.getDataRange().getDisplayValues();
+  }
+  
+  for (var i = 1; i < suiviDataAfter.length; i++) {
+    var rowSuivi = suiviDataAfter[i];
+    var idSuivi = rowSuivi[0].trim();
+    if (idSuivi.charAt(0) === "'") {
+      idSuivi = idSuivi.substring(1);
+    }
+    // Si l'ID figure dans CDP, mettre à jour le statut et la date de régularisation
+    if (cdpPasseports.has(idSuivi)) {
+      var regDate = cdpDateMap[idSuivi] || Utilities.formatDate(new Date(), "GMT-5", "yyyy-MM-dd");
+      if (rowSuivi[5] !== "Régularisé" || rowSuivi[6] !== regDate) {
+        suiviSheet.getRange(i + 1, 6).setValue("Régularisé"); // Colonne F : Statut
+        suiviSheet.getRange(i + 1, 7).setValue(regDate);       // Colonne G : Date régularisation
+        nbRegularises++;
+      }
+    }
+  }
+  
+  // --- AFFICHAGE DU POP-UP ---
+  var message = "Résumé de l'exécution :\n\n" +
+    "- " + nouveauxCas + " nouveaux cas détectés d'inscription U9U12 sans CDP\n" +
+    "- " + nbRegularises + " cas régularisé(s) lors de cette exécution";
+  SpreadsheetApp.getUi().alert(message);
+}

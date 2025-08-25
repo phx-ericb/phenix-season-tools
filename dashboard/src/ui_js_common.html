@@ -1,0 +1,300 @@
+<script>
+console.log('UI booted');
+
+// Helpers DOM
+const $  = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+// ---- Busy par section ----
+const Busy = (() => {
+  const map = {
+    saison:   document.querySelector('#busy-saison'),
+    params:   document.querySelector('#busy-params'),
+    rules:    document.querySelector('#busy-rules'),
+    mappings: document.querySelector('#busy-mappings'),
+    exports:  document.querySelector('#busy-exports'),
+    journal:  document.querySelector('#busy-journal'),
+  };
+
+  // s'assure qu'un .busy-text existe dans chaque zone présente
+  Object.values(map).forEach(el => {
+    if (!el) return;
+    if (!el.querySelector('.busy-text')) {
+      const span = document.createElement('span');
+      span.className = 'busy-text';
+      el.appendChild(span);
+    }
+  });
+
+  function show(area, msg){
+    const el = map[area];
+    if (!el) return;
+    const txt = el.querySelector('.busy-text');
+    if (txt) txt.textContent = msg || 'Traitement…';
+    el.classList.add('show');
+  }
+
+  function hide(area){
+    const el = map[area];
+    if (!el) return;
+    el.classList.remove('show');
+  }
+
+  return { show, hide };
+})();
+
+// ---- Tabs ----
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    // visuel
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+
+    // sections
+    const tab = t.dataset.tab; // ex. "params", "rules", "mappings", "exports", "journal"
+    document.querySelectorAll('section[id^="tab-"]').forEach(s => s.classList.add('hidden'));
+    const section = document.querySelector('#tab-' + tab);
+    if (section) section.classList.remove('hidden');
+
+    // auto-load seulement si la section cible est présente
+    try {
+      if (tab === 'params'   && section) window.loadParamsForActiveSeason?.(false);
+      if (tab === 'rules'    && section) window.loadRulesForActiveSeason?.(false);
+      if (tab === 'mappings' && section) { window.loadMappingList?.(); window.autoLoadFirstMappingOnce?.(); }
+      if (tab === 'journal'  && section) window.loadLogsForActiveSeason?.(false);
+      // exports n'a pas de chargement auto: boutons preview/export déjà bindés
+    } catch(e){
+      console.error('Tab auto-load error for', tab, e);
+    }
+  });
+});
+
+// ---- Toast ----
+function toast(msg) {
+  const el = $('#toast'); el.textContent = msg; el.style.display='block';
+  setTimeout(() => el.style.display='none', 2600);
+}
+
+// ---- Seasons ----
+function refreshSeasons() {
+  Busy.show('saison', 'Chargement des saisons…');
+  google.script.run
+    .withSuccessHandler((res) => {
+            Busy.hide('saison');     
+      if (!res.ok) { toast(res.error); Busy.hide('saison'); return; }
+      const sel = $('#seasonSelect'); sel.innerHTML = '';
+      (res.data || []).forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.id; opt.textContent = (s.isActive ? '⭐ ' : '') + s.title;
+        sel.appendChild(opt);
+        if (s.isActive) sel.value = s.id;
+      });
+      // Précharges
+      // pré-charges dépendants de la saison
+
+window.loadParamsForActiveSeason?.(false);
+window.loadRulesForActiveSeason?.(false);
+window.loadMappingList?.();
+
+      Busy.hide('saison');
+    })
+       .withFailureHandler(err => {
+      Busy.hide('saison');          
+      console.error('getSeasonList FAILED:', err);
+      toast('Erreur serveur: getSeasonList');
+    })
+    .getSeasonList();
+}
+
+$('#btnSetActive').addEventListener('click', () => {
+  const id = $('#seasonSelect').value; if (!id) return toast('Choisis une saison');
+  $('#btnSetActive').disabled = true; Busy.show('saison', 'Définition de la saison…');
+  google.script.run
+    .withSuccessHandler(res => {
+      $('#btnSetActive').disabled = false; Busy.hide('saison');
+      toast(res.ok ? 'Saison active définie' : res.error);
+      refreshSeasons();
+      loadParamsForActiveSeason(true);
+      loadRulesForActiveSeason(true);
+      autoLoadFirstMappingOnce(true);
+    })
+    .withFailureHandler(err => { $('#btnSetActive').disabled = false; Busy.hide('saison'); console.error('setActiveSeason', err); toast('Erreur setActiveSeason'); })
+    .setActiveSeason(id);
+});
+
+// Clone
+$('#btnClone').addEventListener('click', () => {
+  const src = $('#cloneSrcId').value.trim();
+  const title = $('#cloneNewTitle').value.trim();
+  if (!src || !title) return toast('Source ou titre manquant');
+  $('#btnClone').disabled = true; $('#cloneStatus').textContent = '… en cours';
+  Busy.show('saison', 'Clonage de la saison…');
+  google.script.run.withSuccessHandler(res => {
+    $('#btnClone').disabled = false; Busy.hide('saison');
+    if (!res.ok) { $('#cloneStatus').textContent = 'Erreur'; return toast(res.error); }
+    $('#cloneStatus').textContent = 'Cloné';
+    toast('Saison clonée: ' + (res.data && res.data.title));
+    refreshSeasons();
+  }).withFailureHandler(err => { $('#btnClone').disabled = false; Busy.hide('saison'); console.error('cloneSeason', err); $('#cloneStatus').textContent = 'Erreur'; })
+    .cloneSeason(src, title);
+});
+
+function _activeSeasonId() { return $('#seasonSelect').value; }
+
+// Dry Import / Test Rules (onglet Saison)
+$('#btnImportDry').addEventListener('click', () => {
+  const sid = _activeSeasonId(); if (!sid) return toast('Sélectionne une saison');
+  $('#dryOutput').textContent = '…'; Busy.show('saison', 'Import (dry) en cours…');
+  google.script.run.withSuccessHandler(res => {
+    Busy.hide('saison');
+    if (!res.ok) { $('#dryOutput').textContent = res.error; return toast('Erreur import'); }
+    $('#dryOutput').textContent = JSON.stringify(res.data || res, null, 2);
+    toast('Import (dry) terminé');
+  }).withFailureHandler(err => { Busy.hide('saison'); console.error('runImportDry', err); $('#dryOutput').textContent = String(err); })
+    .runImportDry(sid);
+});
+
+function doTestRules() {
+  const sid = _activeSeasonId(); if (!sid) return toast('Sélectionne une saison');
+  $('#dryOutput').textContent = '…'; Busy.show('saison', 'Évaluation des règles…');
+  google.script.run.withSuccessHandler(res => {
+    Busy.hide('saison');
+    if (!res.ok) { $('#dryOutput').textContent = res.error; return toast('Erreur règles'); }
+    $('#dryOutput').textContent = JSON.stringify(res.data || res, null, 2);
+    toast('Règles évaluées');
+  }).withFailureHandler(err => { Busy.hide('saison'); console.error('testRules', err); $('#dryOutput').textContent = String(err); })
+    .testRules(sid);
+}
+$('#btnTestRules').addEventListener('click', doTestRules);
+
+// Exports
+$$('#tab-exports [data-preview]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const sid = _activeSeasonId(); if (!sid) return toast('Sélectionne une saison');
+    const type = btn.getAttribute('data-preview');
+    $('#exportPreview').textContent = ''; Busy.show('exports', 'Préparation de l’aperçu…');
+    google.script.run.withSuccessHandler(res => {
+      Busy.hide('exports');
+      if (!res.ok) return toast(res.error);
+      const { header, preview, total } = res.data || {};
+      $('#exportPreview').textContent = JSON.stringify({ header, total, preview }, null, 2);
+      toast('Aperçu prêt ('+ (total||0) +' lignes)');
+    }).withFailureHandler(err => {
+      Busy.hide('exports'); console.error('previewExport FAILED', err);
+      toast('Erreur serveur: previewExport');
+    }).previewExport(sid, type, 20);
+  });
+});
+
+
+
+// Helpers ultra-simples
+window.$ = (sel, root=document) => root.querySelector(sel);
+window.$all = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+
+// Attache seulement si le noeud existe
+window.safeOn = function safeOn(selector, event, handler, root=document){
+  const el = $(selector, root);
+  if (!el) return false;
+  el.addEventListener(event, handler);
+  return true;
+};
+
+// Délégation pour éléments dynamiques
+window.delegateOn = function delegateOn(rootSel, event, sel, handler){
+  const root = $(rootSel) || document;
+  root.addEventListener(event, e => {
+    const t = e.target.closest(sel);
+    if (t && root.contains(t)) handler(e, t);
+  });
+  return true;
+};
+
+// Tous tes bindings UI ici (appelé après DOM prêt)
+window.__bindUI = function __bindUI(){
+  // exemples — adapte selon tes IDs
+  safeOn('#seasonSelect','change', () => {
+    window.loadParamsForActiveSeason?.(false);
+    window.loadRulesForActiveSeason?.(false);
+    window.loadMappingList?.();
+  });
+
+  // Mappings
+  safeOn('#btnSaveAllMappings','click', window.saveAllMappings);
+  safeOn('#btnReloadMapping','click', window.reloadMappings);
+  safeOn('#btnExportCsv','click', window.exportMappingsCsv);
+  safeOn('#btnAddRow','click', window.addMappingRow);
+
+  // Modal mapping
+  safeOn('#mapSave','click', window.saveMappingFromModal);
+  safeOn('#mapCancel','click', () => $('#mapModal')?.setAttribute('hidden',''));
+
+  // Exports (aperçu dry-run)
+  delegateOn('#tab-exports','click','[data-preview]', (e,btn)=>{
+    const sid = window._activeSeasonId?.(); if (!sid) return toast('Sélectionne une saison');
+    const type = btn.getAttribute('data-preview');
+    $('#exportPreview').textContent = '';
+    Busy.show('exports','Préparation…');
+    google.script.run
+      .withSuccessHandler(res=>{
+        Busy.hide('exports');
+        if (!res.ok) return toast(res.error);
+        const { header, preview, total } = res.data || {};
+        $('#exportPreview').textContent = JSON.stringify({ header, total, preview }, null, 2);
+        toast(`Aperçu prêt (${total||0} lignes)`);
+      })
+      .withFailureHandler(err=>{
+        Busy.hide('exports'); console.error('previewExport FAILED', err);
+        toast('Erreur serveur: previewExport');
+      })
+      .previewExport(sid, type, 20);
+  });
+
+  
+  // Exports XLSX (Drive)
+delegateOn('#tab-exports','click','[data-export]', (e, btn) => {
+  const sid = window._activeSeasonId?.(); if (!sid) return toast('Sélectionne une saison');
+  const kind = (btn.getAttribute('data-export') || '').toLowerCase();
+
+  const call = {
+    membres: 'runExportRetroMembres',
+    groupes: 'runExportRetroGroupes',
+    gart:    'runExportRetroGroupeArticles'
+  }[kind];
+
+  if (!call) return toast('Type d’export inconnu: ' + kind);
+
+  btn.disabled = true;
+  Busy.show('exports','Export XLSX en cours…');
+
+  google.script.run
+    .withSuccessHandler(res => {
+      btn.disabled = false;
+      Busy.hide('exports');
+
+      if (!res || res.ok === false) {
+        console.error(call, res && res.error);
+        return toast(res && res.error || 'Export échoué');
+      }
+      const data = res.data || res;
+      const name = data.name || data.filename || data.title || 'Export';
+      const url  = data.url  || data.fileUrl || (data.file && data.file.url);
+
+      toast('Export OK: ' + name);
+      const box = document.querySelector('#exportResult');
+      if (box) {
+        box.innerHTML = url ? `<a href="${url}" target="_blank" rel="noopener">Ouvrir ${name}</a>`
+                            : `Fichier créé: ${name}`;
+      }
+    })
+    .withFailureHandler(err => {
+      btn.disabled = false;
+      Busy.hide('exports');
+      console.error(call, err);
+      toast('Erreur serveur: export');
+    })[call](); // runExportRetroMembres/Groupes/GroupeArticles
+});
+
+
+};
+</script>

@@ -1,0 +1,218 @@
+/*******************************
+ * MENU PERSONNALISÉ
+ *******************************/
+
+/*******************************
+ * FONCTION DE GÉNÉRATION DU RAPPORT
+ *******************************/
+function genererRapportInscriptions() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var inscriptionsSheet = ss.getSheetByName("Inscriptions");
+  if (!inscriptionsSheet) {
+    SpreadsheetApp.getUi().alert("L’onglet 'Inscriptions' est introuvable.");
+    return;
+  }
+  
+  // Vérifier ou créer l’onglet "Rapports inscriptions"
+  var rapportSheet = ss.getSheetByName("Rapports inscriptions");
+  if (!rapportSheet) {
+    rapportSheet = ss.insertSheet("Rapports inscriptions");
+  } else {
+    rapportSheet.clearContents();
+  }
+  
+  // Récupération des données : colonnes A à Z (26 colonnes)
+  var lastRow = inscriptionsSheet.getLastRow();
+  if (lastRow < 2) {
+    rapportSheet.getRange(5,1).setValue("Aucune donnée à afficher.");
+    return;
+  }
+  
+  var dataRange = inscriptionsSheet.getRange(1, 1, lastRow, 26);
+  var data = dataRange.getValues();
+  
+  // Définition des indices de colonnes (0-based)
+  // A: Passeport -> 0
+  // D: Date de naissance -> 3
+  // F: Genre -> 5
+  // L: Nom du frais -> 11
+  // R: Méthode de paiement -> 17
+  // W: Statut de l'inscription -> 22
+  // Z: Date de la facture -> 25
+  var INDEX_PASSEPORT = 0;
+  var INDEX_DATE_NAISSANCE = 3;
+  var INDEX_GENRE = 5;
+  var INDEX_NOM_FRAIS = 11;
+  var INDEX_METHODE_PAIEMENT = 17;
+  var INDEX_STATUT = 22;
+  var INDEX_DATE_FACTURE = 25;
+  
+  // Objets de comptage
+  var totalInscriptions = 0;
+  var itemCounts = {};         // Nombre d'items vendus par Nom du frais
+  var paymentCounts = {};      // Répartition par méthode de paiement
+  var statusCounts = {};       // Répartition par statut d'inscription
+  var yearOfBirthCounts = {};  // Répartition par année de naissance
+  var historical = {};         // Inscriptions par date de facture
+  
+  // Répartition par Genre (nouvelle section)
+  var genreCounts = {"Autres": 0, "Masculin": 0, "Féminin": 0};
+  
+  // Parcourir les lignes (en ignorant l'en-tête)
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    
+    var passeport = row[INDEX_PASSEPORT];
+    var dateNaissance = row[INDEX_DATE_NAISSANCE];
+    var genre = row[INDEX_GENRE];
+    var nomFrais = row[INDEX_NOM_FRAIS];
+    var paymentMethod = row[INDEX_METHODE_PAIEMENT];
+    var status = row[INDEX_STATUT];
+    var dateFacture = row[INDEX_DATE_FACTURE];
+    
+    totalInscriptions++;
+    
+    // Comptage des items vendus (Nom du frais)
+    if (nomFrais) {
+      itemCounts[nomFrais] = (itemCounts[nomFrais] || 0) + 1;
+    }
+    
+    // Comptage par méthode de paiement
+    if (paymentMethod) {
+      paymentCounts[paymentMethod] = (paymentCounts[paymentMethod] || 0) + 1;
+    }
+    
+    // Comptage par statut d'inscription
+    if (status) {
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+    }
+    
+    // Comptage par année de naissance
+    var birthYear = "";
+    if (dateNaissance instanceof Date) {
+      birthYear = dateNaissance.getFullYear();
+    } else if (dateNaissance) {
+      var parts = dateNaissance.toString().split(/[-\/]/);
+      birthYear = parts[parts.length - 1];
+    }
+    if (birthYear) {
+      yearOfBirthCounts[birthYear] = (yearOfBirthCounts[birthYear] || 0) + 1;
+    }
+    
+    // Comptage par date de facture
+    var factureDateStr = "";
+    if (dateFacture instanceof Date) {
+      factureDateStr = Utilities.formatDate(dateFacture, ss.getSpreadsheetTimeZone(), "yyyy-MM-dd");
+    } else if (dateFacture) {
+      factureDateStr = dateFacture.toString();
+    }
+    if (factureDateStr) {
+      historical[factureDateStr] = (historical[factureDateStr] || 0) + 1;
+    }
+    
+    // Comptage par genre
+    if (genre) {
+      var g = genre.toString().trim().toUpperCase();
+      if (g === "M" || g === "MASCULIN") {
+        genreCounts["Masculin"]++;
+      } else if (g === "F" || g === "FÉMININ") {
+        genreCounts["Féminin"]++;
+      } else {
+        genreCounts["Autres"]++;
+      }
+    } else {
+      genreCounts["Autres"]++;
+    }
+  }
+  
+  // Construction du tableau de sortie (output)
+  var output = [];
+  var now = new Date();
+  var formattedDate = Utilities.formatDate(now, ss.getSpreadsheetTimeZone(), "dd/MM/yyyy HH:mm");
+  
+  // Insertion du rapport à partir de la ligne 5
+  output.push(["Rapport généré le: " + formattedDate]); // Ligne 5
+  output.push(["Rapport Inscriptions"]);                   // Ligne 6
+  output.push([""]);                                       // Ligne 7 (vide)
+  output.push([""]);                                       // Ligne 8 (vide)
+  
+  // Total des inscriptions
+  output.push(["Total Inscriptions", totalInscriptions]);  // Ligne 9
+  output.push([""]);                                       // Ligne 10
+  
+  // Détail par Items vendus (Nom du frais) avec % du total (triés alphabétiquement)
+  output.push(["Items vendus (Nom du frais)", "Nombre", "% du total"]);
+  var sortedItems = Object.keys(itemCounts).sort();
+  sortedItems.forEach(function(item) {
+    var count = itemCounts[item];
+    var percent = ((count / totalInscriptions) * 100).toFixed(2) + "%";
+    output.push([item, count, percent]);
+  });
+  output.push([""]); // ligne vide
+  
+  // Détail par Méthode de paiement avec % du total
+  output.push(["Méthode de paiement", "Nombre", "% du total"]);
+  for (var method in paymentCounts) {
+    var count = paymentCounts[method];
+    var percent = ((count / totalInscriptions) * 100).toFixed(2) + "%";
+    output.push([method, count, percent]);
+  }
+  output.push([""]); // ligne vide
+  
+  // Détail par Statut d'inscription (sans %)
+  output.push(["Statut de l'inscription", "Nombre"]);
+  for (var st in statusCounts) {
+    output.push([st, statusCounts[st]]);
+  }
+  output.push([""]); // ligne vide
+  
+  // Nouvelle section : Répartition par Genre
+  output.push(["Répartition par Genre", "Nombre", "% du total"]);
+  // Ordre souhaité : Autres, Masculin, Féminin
+  var genresOrder = ["Autres", "Masculin", "Féminin"];
+  genresOrder.forEach(function(g) {
+    var count = genreCounts[g];
+    var percent = ((count / totalInscriptions) * 100).toFixed(2) + "%";
+    output.push([g, count, percent]);
+  });
+  output.push([""]); // ligne vide
+  
+  // Détail par Année de naissance avec % du total
+  output.push(["Année de naissance", "Nombre", "% du total"]);
+  var sortedYears = Object.keys(yearOfBirthCounts).sort();
+  sortedYears.forEach(function(y) {
+    var count = yearOfBirthCounts[y];
+    var percent = ((count / totalInscriptions) * 100).toFixed(2) + "%";
+    output.push([y, count, percent]);
+  });
+  output.push([""]); // ligne vide
+  
+  // Historique par Date de facture avec % du total
+  output.push(["Historique des inscriptions (Date de facture)", "Nombre", "% du total"]);
+  var sortedDates = Object.keys(historical).sort();
+  sortedDates.forEach(function(d) {
+    var count = historical[d];
+    var percent = ((count / totalInscriptions) * 100).toFixed(2) + "%";
+    output.push([d, count, percent]);
+  });
+  
+  // Uniformiser le nombre de colonnes dans toutes les lignes
+  var maxCols = 0;
+  for (var i = 0; i < output.length; i++) {
+    if (output[i].length > maxCols) {
+      maxCols = output[i].length;
+    }
+  }
+  for (var i = 0; i < output.length; i++) {
+    while (output[i].length < maxCols) {
+      output[i].push("");
+    }
+  }
+  
+  // Écriture du rapport à partir de la ligne 5
+  rapportSheet.getRange(5, 1, output.length, maxCols).setValues(output);
+  rapportSheet.autoResizeColumns(1, maxCols);
+  
+  // Alerte de confirmation
+  SpreadsheetApp.getUi().alert("Le rapport d'inscriptions a été généré avec succès !");
+}
