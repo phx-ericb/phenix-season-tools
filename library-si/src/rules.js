@@ -11,6 +11,23 @@
  * - Log dans ERREURS avec Nom/Prénom/NomComplet/Saison/Frais
  */
 
+// Clé de jointure "Passeport||Saison" – même normalisation des deux côtés
+function _psKey_(row) {
+  var p8 = normalizePassportPlain8_(row['Passeport #'] || row['Passeport']);
+  var s  = String(row['Saison'] || '');
+  return p8 + '||' + s;
+}
+
+// Clé "Passeport||Saison||base" pour les doublons d'articles
+function _articleDupKey_(row, match, rawFrais) {
+  var base;
+  if (match && match.Code) base = 'CODE:' + String(match.Code);
+  else if (match && match.ExclusiveGroup) base = 'EXG:' + String(match.ExclusiveGroup);
+  else base = 'LBL:' + String(rawFrais||'').toLowerCase().replace(/\s+/g,' ').trim();
+  return _psKey_(row) + '||' + base;
+}
+
+
 function evaluateSeasonRules(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
   ensureCoreSheets_(ss);
@@ -32,148 +49,176 @@ function evaluateSeasonRules(seasonSheetId) {
     var st  = (r['Statut de l\'inscription'] || r['Statut'] || '').toString().toLowerCase();
     return !can && !exc && st !== 'annulé' && st !== 'annule' && st !== 'cancelled';
   }
-  var inscAct = insc.rows.filter(isActive_);
-  var artAct  = art.rows.filter(isActive_);
+
+  // Helpers "dictionnaire sans prototype"
+  function dict_(){ return Object.create(null); }
+
+  // TOUJOURS initialiser avant usage
+  var setInscPS = dict_();
+  var dupCount = dict_();
+  var mapByPassSeasonGroup = dict_();
+  var mapInscByKey = dict_();
+  var hasCdp = dict_();
+
+  // Garde-fou si readSheetAsObjects_ renvoie qqch de falsy
+  var inscAct = (insc.rows || []).filter(isActive_);
+  var artAct  = (art.rows  || []).filter(isActive_);
+
 
   // MAPPINGS: ARTICLES
   var catalog = loadArticlesCatalog_(ss); // { items:[{Code, Umin, Umax, AliasContains, ExclusiveGroup}], match(rawName)->item|null }
 
-  // ERREURS (création/clear si pas append). En dry-run, on n'écrira rien.
-  var shErr = getSheetOrCreate_(ss, SHEETS.ERREURS, ['Passeport','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']);
-  if (!appendMode && !dryRun) { shErr.clearContents(); shErr.getRange(1,1,1,12).setValues([['Passeport','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']]); }
+// ERREURS (création/clear si pas append). En dry-run, on n'écrira rien.
+var shErr = getSheetOrCreate_(ss, SHEETS.ERREURS, ['Passeport','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']);
+if (!appendMode && !dryRun) {
+  shErr.clearContents();
+  shErr.getRange(1,1,1,12).setValues([['Passeport','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']]);
+}
+
+// IMPORTANT : colonne A en texte, pour conserver les zéros
+shErr.getRange('A:A').setNumberFormat('@');
+
+
+
 
   function shouldWrite_(sev) {
     var sevRank = { warn:1, error:2 };
     return (sevRank[(sev||'warn')] || 1) >= (sevRank[threshold] || 1);
   }
-  function writeErr_(sev, scope, type, r, msg, ctxObj) {
-    if (dryRun) return;            // pas d'écriture en DRY_RUN
-    if (!shouldWrite_(sev)) return;
-    shErr.appendRow([
-      r['Passeport #'] || '',
-      r['Nom'] || '',
-      (r['Prénom'] || r['Prenom'] || ''),
-      (((r['Prénom']||r['Prenom']||'') + ' ' + (r['Nom']||'')).trim()),
-      scope,
-      type,
-      sev,
-      r['Saison'] || '',
-      (r['Nom du frais'] || r['Frais'] || r['Produit'] || ''),
-      msg || '',
-      jsonCompact_(ctxObj||{}),
-      new Date()
-    ]);
-  }
+
+
+function writeErr_(sev, scope, type, r, msg, ctxObj) {
+  if (dryRun) return;
+  if (!shouldWrite_(sev)) return;
+
+  var passRaw = r['Passeport #'] || r['Passeport'] || '';
+  // ⬇️  utilise la version "avec apostrophe" pour forcer texte
+  var passTxt = normalizePassportToText8_(passRaw); // ex: "'00123456"
+
+  shErr.appendRow([
+    passTxt,  // <-- garde l’apostrophe ici, elle ne s’affiche pas en UI
+    r['Nom'] || '',
+    (r['Prénom'] || r['Prenom'] || ''),
+    (((r['Prénom']||r['Prenom']||'') + ' ' + (r['Nom']||'')).trim()),
+    scope,
+    type,
+    sev,
+    r['Saison'] || '',
+    (r['Nom du frais'] || r['Frais'] || r['Produit'] || ''),
+    msg || '',
+    jsonCompact_(ctxObj||{}),
+    new Date()
+  ]);
+}
+
+
 
   var found=0, warns=0, errors=0;
 
-  // ===== (0) ARTICLE ORPHELIN : article actif sans inscription active correspondante =====
-  var keyCols = getKeyColsFromParams_(ss);
-  var setInscKeys = {};
-  inscAct.forEach(function(r){ setInscKeys[ buildKeyFromRow_(r, keyCols) ] = true; });
+
+// ===== (0) ARTICLE ORPHELIN : article actif sans inscription active correspondante =====
+// IMPORTANT : la jointure se fait sur Passeport+Saison (pas sur 'Frais')
+  inscAct.forEach(function(r){ setInscPS[_psKey_(r)] = true; });
   artAct.forEach(function(a){
-    var k = buildKeyFromRow_(a, keyCols);
-    if (!setInscKeys[k]) {
-      found++; warns++;
-      writeErr_('warn', 'ARTICLES', 'ARTICLE_ORPHELIN', a, 'Article sans inscription correspondante', { key: k });
+    var k = _psKey_(a);
+    if (!setInscPS || !setInscPS[k]) { // <- défensif
+      writeErr_('warn','ARTICLES','ARTICLE_ORPHELIN', a, 'Article sans inscription correspondante', { key:k });
     }
   });
 
-  // ===== (1) Éligibilité âge/U ↔ article =====
+
+
+// ===== (1) Éligibilité âge/U ↔ article =====
+artAct.forEach(function(a){
+  var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
+  var item = catalog.match(raw);
+  if (!item) {
+    writeErr_('warn','ARTICLES','ARTICLE_INCONNU', a, 'Article non reconnu (non mappé) – ignoré en export', { libelle: raw });
+    return;
+  }
+  var U = deriveUFromRow_(a);
+  var uNum = parseInt(String(U).replace(/^U/i,''),10);
+  if (!uNum || isNaN(uNum)) return;
+
+  if ((item.Umin && uNum < item.Umin) || (item.Umax && uNum > item.Umax)) {
+    var sev = 'error';
+    writeErr_(sev, 'ARTICLES', 'ELIGIBILITE_U', a, 'Article non éligible pour ' + U, { raw: raw, code: item.Code, U: U, Umin:item.Umin, Umax:item.Umax });
+    found++; (sev==='error'?errors++:warns++);
+  }
+});
+
+
+
+// ===== (2) Doublons exacts sous même base (Code, sinon ExclusiveGroup, sinon Libellé normalisé)
+ artAct.forEach(function(a){
+    var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
+    var item = catalog.match(raw);
+    var k = _articleDupKey_(a, item, raw);
+    dupCount[k] = ((dupCount && dupCount[k]) || 0) + 1;
+  });
   artAct.forEach(function(a){
     var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
     var item = catalog.match(raw);
-    if (!item) return; // pas mappé => pas d'éligibilité à contrôler
-    var U = deriveUFromRow_(a);
-    var uNum = parseInt(String(U).replace(/^U/i,''),10);
-    if (!uNum || isNaN(uNum)) return;
-
-    if ((item.Umin && uNum < item.Umin) || (item.Umax && uNum > item.Umax)) {
-      var sev = 'error';
-      writeErr_(sev, 'ARTICLES', 'ELIGIBILITE_U', a, 'Article non éligible pour ' + U, { raw: raw, code: item.Code, U: U, Umin:item.Umin, Umax:item.Umax });
-      found++; (sev==='error'?errors++:warns++);
+    var k = _articleDupKey_(a, item, raw);
+    if (dupCount && dupCount[k] > 1) {
+      writeErr_('warn','ARTICLES','DUPLICAT', a, 'Article en double détecté', { code: (item&&item.Code)||'', count: dupCount[k] });
     }
   });
 
-  // ===== (2) Doublons exacts sous même code article/passeport/saison =====
-  var mapByPassSeasonCode = {};
-  artAct.forEach(function(a){
-    var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
-    var item = catalog.match(raw);
-    var code = item ? item.Code : raw.toLowerCase(); // à défaut, raw
-    var k = (a['Passeport #']||'') + '||' + (a['Saison']||'') + '||' + code;
-    mapByPassSeasonCode[k] = (mapByPassSeasonCode[k] || 0) + 1;
-  });
-  artAct.forEach(function(a){
-    var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
-    var item = catalog.match(raw);
-    var code = item ? item.Code : raw.toLowerCase();
-    var k = (a['Passeport #']||'') + '||' + (a['Saison']||'') + '||' + code;
-    if (mapByPassSeasonCode[k] > 1) {
-      writeErr_('warn', 'ARTICLES', 'DUPLICAT', a, 'Article en double détecté', { code: code, count: mapByPassSeasonCode[k] });
-      found++; warns++;
-    }
-  });
 
-  // ===== (3) Exclusivité (un seul article par ExclusiveGroup) =====
-  var mapByPassSeasonGroup = {};
+// ===== (3) Exclusivité (un seul article par ExclusiveGroup) =====
+artAct.forEach(function(a){
+    var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
+    var item = catalog.match(raw);
+    if (!item || !item.ExclusiveGroup) return;
+    var k = _psKey_(a) + '||' + item.ExclusiveGroup; // <- normalisé
+    mapByPassSeasonGroup[k] = ((mapByPassSeasonGroup && mapByPassSeasonGroup[k]) || 0) + 1;
+  });
   artAct.forEach(function(a){
     var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
     var item = catalog.match(raw);
     if (!item || !item.ExclusiveGroup) return;
-    var k = (a['Passeport #']||'') + '||' + (a['Saison']||'') + '||' + item.ExclusiveGroup;
-    mapByPassSeasonGroup[k] = (mapByPassSeasonGroup[k] || 0) + 1;
-  });
-  artAct.forEach(function(a){
-    var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
-    var item = catalog.match(raw);
-    if (!item || !item.ExclusiveGroup) return;
-    var k = (a['Passeport #']||'') + '||' + (a['Saison']||'') + '||' + item.ExclusiveGroup;
-    if (mapByPassSeasonGroup[k] > 1) {
-      writeErr_('error', 'ARTICLES', 'EXCLUSIVITE', a, 'Conflit d’articles exclusifs (groupe: ' + item.ExclusiveGroup + ')', { group: item.ExclusiveGroup, count: mapByPassSeasonGroup[k] });
-      found++; errors++;
+    var k = _psKey_(a) + '||' + item.ExclusiveGroup;
+    if (mapByPassSeasonGroup && mapByPassSeasonGroup[k] > 1) {
+      writeErr_('error','ARTICLES','EXCLUSIVITE', a, 'Conflit d’articles exclusifs (groupe: ' + item.ExclusiveGroup + ')', { group:item.ExclusiveGroup, count: mapByPassSeasonGroup[k] });
     }
   });
 
-  // ===== (4) Doublons d'INSCRIPTIONS (même clé) =====
-  var mapInscByKey = {};
+// ===== (4) Doublons d'INSCRIPTIONS (même clé) =====
+ var keyCols = getKeyColsFromParams_(ss); // ex: ["Passeport #","Saison"]
+  function buildInscDupKey_(r){
+    return buildArticleKey_(r) + '||' + String(r['Nom du frais']||'').trim();
+  }
   inscAct.forEach(function(r){
-    var k = buildKeyFromRow_(r, keyCols);
-    mapInscByKey[k] = (mapInscByKey[k] || 0) + 1;
+    var k = buildInscDupKey_(r);
+    mapInscByKey[k] = ((mapInscByKey && mapInscByKey[k]) || 0) + 1;
   });
   inscAct.forEach(function(r){
-    var k = buildKeyFromRow_(r, keyCols);
-    if (mapInscByKey[k] > 1) {
-      writeErr_('warn', 'INSCRIPTIONS', 'INSCRIPTION_DUPLICAT', r, 'Inscription en double détectée (même clé)', { key: k, count: mapInscByKey[k] });
-      found++; warns++;
+    var k = buildInscDupKey_(r);
+    if (mapInscByKey && mapInscByKey[k] > 1) {
+      writeErr_('warn','INSCRIPTIONS','INSCRIPTION_DUPLICAT', r, 'Inscription en double détectée (même clé)', { key:k, count: mapInscByKey[k] });
     }
   });
+
+
 
   // ===== (5) U9–U12 sans CDP (warning) =====
-// Marquer les (passeport||saison) qui ont un article de groupe exclusif CDP
-
-  var hasCdp = {};
-  artAct.forEach(function(a){
+// Marquer les (Passeport||Saison) qui ont un article de groupe exclusif CDP
+artAct.forEach(function(a){
     var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
     var item = catalog.match(raw);
     if (item && String(item.ExclusiveGroup||'') === 'CDP_ENTRAINEMENT') {
-      var k = (a['Passeport #']||'') + '||' + (a['Saison']||'');
-      hasCdp[k] = true;
+      hasCdp[_psKey_(a)] = true;
+    }
+  });
+  inscAct.forEach(function(r){
+    var uNum = parseInt(String(deriveUFromRow_(r)||'').replace(/^U/i,''),10);
+    if (uNum>=9 && uNum<=12 && !(hasCdp && hasCdp[_psKey_(r)])) {
+      var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, r['Passeport #']);
+      writeErr_('warn','INSCRIPTIONS','U9_12_SANS_CDP', r, 'U9–U12 sans CDP', { U: deriveUFromRow_(r), articlesActifs: arts });
     }
   });
 
-  inscAct.forEach(function(r){
-    var U = deriveUFromRow_(r);
-    var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
-    if (!uNum || uNum < 9 || uNum > 12) return;
-    var k = (r['Passeport #']||'') + '||' + (r['Saison']||'');
-    if (hasCdp[k]) return;
-
-    // Contexte : liste des articles actifs du passeport
-    var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, r['Passeport #']);
-    writeErr_('warn', 'INSCRIPTIONS', 'U9_12_SANS_CDP', r, 'U9–U12 sans CDP', { U: U, articlesActifs: arts });
-    found++; warns++;
-  });
 
   // Résumé
   appendImportLog_(ss, dryRun ? 'RULES_OK_DRYRUN' : 'RULES_OK', JSON.stringify({found:found, errors:errors, warns:warns}));

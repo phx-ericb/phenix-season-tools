@@ -120,37 +120,7 @@ function _rg_applyRowRulesMaybeSkip_(rules, row, ctx){
   return !!(res && res.skip);
 }
 
-/** Charge la table MAPPINGS unifiée (header unique). */
-function _loadUnifiedGroupMappings_(ss){
-  var sh = ss.getSheetByName(SHEETS.MAPPINGS);
-  var out = [];
-  if (!sh || sh.getLastRow() < 2) return out;
-  var data = sh.getDataRange().getValues();
-  var H = (data[0]||[]).map(function(h){ return String(h||'').trim(); });
-  function idx(k){ var i=H.indexOf(k); return i<0?null:i; }
-  var iType=idx('Type'), iAli=idx('AliasContains'), iUmin=idx('Umin'), iUmax=idx('Umax'),
-      iGen=idx('Genre'), iG=idx('GroupeFmt'), iC=idx('CategorieFmt'), iEx=idx('Exclude'), iPr=idx('Priority');
-  if (iType==null || iAli==null) return out;
 
-  for (var r=1; r<data.length; r++){
-    var row=data[r]||[];
-    if (!row.some(function(c){return String(c||'').trim();})) continue;
-    out.push({
-      Type: String(row[iType]||'').toLowerCase(),                // member | article
-      AliasContains: String(row[iAli]||''),
-      Umin: isNaN(parseInt(row[iUmin],10))?null:parseInt(row[iUmin],10),
-      Umax: isNaN(parseInt(row[iUmax],10))?null:parseInt(row[iUmax],10),
-      Genre: String(row[iGen]||'*').toUpperCase(),
-      GroupeFmt: String(row[iG]||''),
-      CategorieFmt: String(row[iC]||''),
-      Exclude: String(row[iEx]||'').toLowerCase()==='true',
-      Priority: isNaN(parseInt(row[iPr],10))?100:parseInt(row[iPr],10)
-    });
-  }
-  // tri par priorité croissante
-  out.sort(function(a,b){ return a.Priority - b.Priority; });
-  return out;
-}
 
 function _tpl_(tpl, vars){
   tpl = String(tpl==null?'':tpl);

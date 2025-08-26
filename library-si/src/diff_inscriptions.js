@@ -8,16 +8,13 @@
  */
 
 /*** Fallbacks sûrs ***/
+
+
+
 if (typeof CONTROL_COLS === 'undefined') {
   var CONTROL_COLS = { ROW_HASH: 'ROW_HASH', CANCELLED: 'CANCELLED', EXCLUDE_FROM_EXPORT: 'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT: 'LAST_MODIFIED_AT' };
 }
-if (typeof _norm_ !== 'function') {
-  function _norm_(s) {
-    s = String(s == null ? '' : s);
-    try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) { }
-    return s.toLowerCase().trim();
-  }
-}
+
 if (typeof _isCancelledStatus_ !== 'function') {
   function _isCancelledStatus_(val, cancelListCsv) {
     var norm = _norm_(val);
@@ -25,46 +22,9 @@ if (typeof _isCancelledStatus_ !== 'function') {
     return list.indexOf(norm) >= 0;
   }
 }
-if (typeof normalizePassportToText8_ !== 'function') {
-  /** Fallback — garde les 0 en tête et force texte */
-  function normalizePassportToText8_(val) {
-    if (val == null) return '';
-    var s = String(val).trim();
-    if (s === '') return '';
-    if (s[0] === "'") s = s.slice(1);
-    if (/^\d+$/.test(s) && s.length < 8) s = ('00000000' + s).slice(-8);
-    return "'" + s;
-  }
-}
-if (typeof getMailOutboxHeaders_ !== 'function') {
-  function getMailOutboxHeaders_() {
-    return ['Type', 'To', 'Cc', 'Sujet', 'Corps', 'Attachments', 'KeyHash', 'Status', 'CreatedAt', 'SentAt', 'Error'];
-  }
-}
-if (typeof ensureMailOutbox_ !== 'function') {
-  function ensureMailOutbox_(ss) {
-    var sh = ss.getSheetByName(SHEETS.MAIL_OUTBOX) || ss.insertSheet(SHEETS.MAIL_OUTBOX);
-    var headers = getMailOutboxHeaders_();
-    var last = sh.getLastRow();
-    if (last === 0) { sh.getRange(1, 1, 1, headers.length).setValues([headers]); return sh; }
-    var first = sh.getRange(1, 1, 1, headers.length).getValues()[0];
-    var ok = headers.every(function (h, i) { return String(first[i] || '') === headers[i]; });
-    if (!ok) { sh.insertRowsBefore(1, 1); sh.getRange(1, 1, 1, headers.length).setValues([headers]); }
-    return sh;
-  }
-}
-if (typeof enqueueOutboxRows_ !== 'function') {
-  function enqueueOutboxRows_(ssId, rows) {
-    if (!rows || !rows.length) return 0;
-    var ss = SpreadsheetApp.openById(ssId);
-    var sh = ensureMailOutbox_(ss);
-    var headers = getMailOutboxHeaders_();
-    var start = sh.getLastRow() + 1;
-    sh.insertRowsAfter(sh.getLastRow(), rows.length);
-    sh.getRange(start, 1, rows.length, headers.length).setValues(rows);
-    return rows.length;
-  }
-}
+
+
+
 
 /*** Helpers locaux ***/
 function ensureControlCols_(finalsInfo) {
@@ -83,7 +43,7 @@ function ensureControlCols_(finalsInfo) {
   finalsInfo.headers = headers;
 }
 function getKeyColsFromParams_(ss) {
-  var csv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Nom du frais,Saison';
+  var csv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
   return csv.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
 }
 function buildKeyFromRow_(row, keyCols) {

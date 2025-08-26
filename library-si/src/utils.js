@@ -1,14 +1,34 @@
+function setSeasonIdGlobalOnce() {
+  var id = '1IVVHi17Jyo8jvWtrSuenbPW8IyEZqlY1bXx-WbnXPkk'; // ton ID
+  var p = PropertiesService.getScriptProperties();
+  p.setProperty('ACTIVE_SEASON_ID', id);
+  p.setProperty('PHENIX_SEASON_SHEET_ID', id); // alias lu par la lib
+  p.setProperty('SEASON_SPREADSHEET_ID', id);  // alias supplémentaire
+}
+
+
 /** Ouvre le classeur de la saison ou lève une erreur claire */
 function getSeasonSpreadsheet_(seasonSheetId) {
-  if (!seasonSheetId) {
-    throw new Error('seasonSheetId manquant. Passe l’ID du classeur de la saison à la Library.');
-  }
+  if (seasonSheetId) return SpreadsheetApp.openById(seasonSheetId);
+
+  // ↙️ mêmes clés que celles que tu utilises dans Code.js
+  var props = PropertiesService.getScriptProperties();
+  var id =
+    props.getProperty('ACTIVE_SEASON_ID') ||
+    props.getProperty('PHENIX_SEASON_SHEET_ID') ||
+    props.getProperty('SEASON_SPREADSHEET_ID');
+
+  if (id) return SpreadsheetApp.openById(id);
+
+  // Dernier filet: si exécuté depuis un classeur (rare côté lib), prends l’actif
   try {
-    return SpreadsheetApp.openById(seasonSheetId);
-  } catch (e) {
-    throw new Error('Impossible d’ouvrir le classeur saison (ID=' + seasonSheetId + '). ' + e);
-  }
+    var active = SpreadsheetApp.getActiveSpreadsheet();
+    if (active) return active;
+  } catch (e) {}
+
+  throw new Error("seasonSheetId manquant. Passe l’ID ou définis ACTIVE_SEASON_ID/PHENIX_SEASON_SHEET_ID.");
 }
+
 
 /** Récupère une feuille, ou la crée vide avec un header si fourni */
 function getSheetOrCreate_(ss, name, header) {
@@ -138,7 +158,7 @@ function readSheetAsObjects_(ssId, sheetName) {
 
 /** KEY_COLS depuis PARAMS (fallback raisonnable) */
 function getKeyColsFromParams_(ss) {
-  var raw = (readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Nom du frais,Saison');
+  var raw = (readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison');
   return raw.split(',').map(function(s){ return s.trim(); }).filter(String);
 }
 
@@ -435,4 +455,89 @@ function listActiveOccurrencesForPassport_(ss, sheetName, passport) {
 /** Conversion simple JSON → string "compact" */
 function jsonCompact_(obj) {
   try { return JSON.stringify(obj); } catch(e){ return '{}'; }
+}
+
+/* ===== Lecture MAPPINGS unifiés (incl. ExclusiveGroup) ===== */
+function _loadUnifiedGroupMappings_(ss) {
+  // 1) feuille
+  var sh = ss.getSheetByName(SHEETS.MAPPINGS) || ss.getSheetByName('MAPPINGS');
+  if (!sh) return [];
+
+  // 2) données + détection d’entête « première ligne valable » (≥2 cellules non vides)
+  var data = sh.getDataRange().getValues();
+  var headerIdx = -1;
+  for (var r = 0; r < data.length; r++) {
+    var row = data[r] || [];
+    var nonEmpty = 0;
+    for (var c = 0; c < row.length; c++) {
+      if (String(row[c] || '').trim() !== '') { nonEmpty++; if (nonEmpty >= 2) break; }
+    }
+    if (nonEmpty >= 2) { headerIdx = r; break; }
+  }
+  if (headerIdx === -1) return [];
+
+  // 3) index des colonnes
+  var H = (data[headerIdx] || []).map(function (h) { return String(h || '').trim(); });
+  function idx(k) { var i = H.indexOf(k); return i < 0 ? null : i; }
+
+  var iType = idx('Type'), iAli = idx('AliasContains'), iUmin = idx('Umin'), iUmax = idx('Umax'),
+      iGen  = idx('Genre'), iG   = idx('GroupeFmt'),     iC    = idx('CategorieFmt'),
+      iEx   = idx('Exclude'), iPr = idx('Priority'), iX = idx('ExclusiveGroup'), iCode = idx('Code');
+
+  if (iType == null || iAli == null) return [];
+
+  // 4) lecture des lignes
+// 4) lecture des lignes (REMPLACE TOUT CE BLOC)
+var out = [];
+function _t(v) { return String(v == null ? '' : v).trim(); }            // trim simple
+function _tu(v) { return _t(v).toUpperCase(); }                         // trim + upper
+function _tl(v) { return _t(v).toLowerCase(); }                         // trim + lower
+function _toIntOrNull(v) {
+  var s = _t(v); if (s === '') return null;
+  var n = parseInt(s, 10); return isNaN(n) ? null : n;
+}
+
+for (var r = headerIdx + 1; r < data.length; r++) {
+  var row = data[r] || [];
+  // ligne vide ?
+  var isEmpty = true;
+  for (var c = 0; c < row.length; c++) {
+    if (_t(row[c]) !== '') { isEmpty = false; break; }
+  }
+  if (isEmpty) continue;
+
+  var type = (iType == null) ? '' : _tl(row[iType]);                    // <-- TRIM + lower
+  var ali  = (iAli  == null) ? '' : _t(row[iAli]);                      // <-- TRIM
+  var umin = (iUmin == null) ? null : _toIntOrNull(row[iUmin]);
+  var umax = (iUmax == null) ? null : _toIntOrNull(row[iUmax]);
+  var gen  = (iGen  == null) ? '*' : _tu(row[iGen] || '*');             // <-- TRIM + upper
+  var grp  = (iG    == null) ? '' : _t(row[iG]);                        // <-- TRIM
+  var cat  = (iC    == null) ? '' : _t(row[iC]);                        // <-- TRIM
+  var ex   = (iEx   == null) ? '' : _tl(row[iEx]);                      // <-- TRIM + lower
+  var pri  = (iPr   == null) ? null : _toIntOrNull(row[iPr]);
+  var exg  = (iX    == null) ? '' : _t(row[iX]);                        // <-- TRIM
+  var code = (iCode == null) ? '' : _t(row[iCode]);                     // <-- TRIM
+
+  out.push({
+    Type: type,                                // "article" / "member"
+    AliasContains: ali,                        // propre (trim)
+    Umin: umin,                                // nombre ou null
+    Umax: umax,
+    Genre: gen || '*',                         // "M" | "F" | "X" | "*"
+    GroupeFmt: grp,
+    CategorieFmt: cat,
+    Exclude: ex === 'true',
+    Priority: (pri == null ? 100 : pri),
+    ExclusiveGroup: exg,
+    Code: code
+  });
+}
+
+// 5) tri (inchangé)
+out.sort(function (a, b) {
+  if (a.Priority !== b.Priority) return b.Priority - a.Priority;
+  return (b.AliasContains || '').length - (a.AliasContains || '').length;
+});
+return out;
+
 }

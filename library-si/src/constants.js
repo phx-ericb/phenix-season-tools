@@ -81,7 +81,3 @@ var ARCHIVE = {
   DATE_FMT: 'yyyy-MM-dd'
 };
 
-/** En-tête canonique pour MAIL_OUTBOX */
-function getMailOutboxHeaders_() {
-  return ['Type','To','Cc','Sujet','Corps','Attachments','KeyHash','Status','CreatedAt','SentAt','Error'];
-}

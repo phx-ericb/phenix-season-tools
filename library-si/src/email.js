@@ -57,43 +57,8 @@ if (typeof getSheetOrCreate_ !== 'function') {
     return sh;
   }
 }
-if (typeof getMailOutboxHeaders_ !== 'function') {
-function getMailOutboxHeaders_() {
-  return [
-    'Type','To','Cc','Sujet','Corps','Attachments','KeyHash','Status','CreatedAt','SentAt','Error',
-    // --- nouvelles colonnes d’info (lecture/tri) :
-    'Passeport8','Nom','Prénom','NomComplet','Saison','Frais','EmailsCandidates'
-  ];
-}
-}
-if (typeof ensureMailOutbox_ !== 'function') {
-/** Crée/upgrade l’OUTBOX: si l’entête existante est un préfixe de la nouvelle, on complète proprement. */
-function ensureMailOutbox_(ss) {
-  var sheetName = (typeof SHEETS !== 'undefined' && SHEETS.MAIL_OUTBOX) ? SHEETS.MAIL_OUTBOX : 'MAIL_OUTBOX';
-  var sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
-  var want = getMailOutboxHeaders_();
 
-  if (sh.getLastRow() === 0) {
-    sh.getRange(1,1,1,want.length).setValues([want]);
-    return sh;
-  }
-    var firstRow = sh.getRange(1,1,1,Math.max(want.length, sh.getLastColumn())).getDisplayValues()[0];
-  // si l’entête actuelle est un préfixe de la nouvelle → on complete à droite
-  var isPrefix = true;
-  for (var i=0;i<Math.min(firstRow.length, want.length); i++) {
-    if ((firstRow[i]||'') !== want[i]) { isPrefix = false; break; }
-  }
-  if (isPrefix && firstRow.length < want.length) {
-    sh.getRange(1, firstRow.length+1, 1, want.length-firstRow.length).setValues([want.slice(firstRow.length)]);
-    return sh;
-  }
 
-  // Si entête incompatible → on insère une nouvelle ligne d’entête propre (préserve l’historique).
-  sh.insertRowsBefore(1,1);
-  sh.getRange(1,1,1,want.length).setValues([want]);
-  return sh;
-}
-}
 if (typeof getHeadersIndex_ !== 'function') {
   function getHeadersIndex_(sh, width){
     var headers = sh.getRange(1,1,1,width||sh.getLastColumn()).getValues()[0].map(String);
@@ -227,7 +192,7 @@ function fetchFinalRowByKeyHash_(ss, keyHash) {
   // key = base64websafe decode → "Passeport||Nom du frais||Saison"
   var keyStr = Utilities.newBlob(Utilities.base64DecodeWebSafe(keyHash)).getDataAsString();
   var finals = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS);
-  var keyColsCsv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Nom du frais,Saison';
+  var keyColsCsv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
   var keyCols = keyColsCsv.split(',').map(function(x){ return x.trim(); });
 
   for (var i=0;i<finals.rows.length;i++){

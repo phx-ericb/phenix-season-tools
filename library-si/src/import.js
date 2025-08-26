@@ -1,6 +1,6 @@
 /**
  * v0.5 — Import & Archives
- * Appel : Library.importerDonneesSaison('<ID_CLASSEUR_SAISON>')
+ * Appel : Library.importerDonneesSaison('<ID_CLASSEUR_SAISON>')cd dash
  */
 
 function importerDonneesSaison(seasonSheetId) {
@@ -127,6 +127,9 @@ function importerDonneesSaison(seasonSheetId) {
     incrOn ? ' [INCR]' : ' [FULL]'
   );
   appendImportLog_(ss, 'SCAN_OK', summary);
+  // À la toute fin, après SCAN_OK
+try { evaluateSeasonRules(seasonSheetId || getSeasonId_()); } catch(e) { appendImportLog_(ss, 'RULES_FAIL', ''+e); }
+
   return summary;
 }
 

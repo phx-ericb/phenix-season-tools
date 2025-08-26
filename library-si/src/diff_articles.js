@@ -8,16 +8,25 @@
  *    b) statut "annulé" en staging -> idem
  */
 
+// --- helper clé unique ARTICLES (Passeport||Saison||Frais-normalisé)
+function buildArticleKey_(row) {
+  // passeport -> 8 chiffres (sans apostrophe)
+  var p8 = (typeof normalizePassportPlain8_ === 'function')
+    ? normalizePassportPlain8_(row['Passeport #'] || row['Passeport'] || '')
+    : String(row['Passeport #'] || row['Passeport'] || '').trim();
+
+  var s  = String(row['Saison'] || '').trim();
+  var lib = (row['Nom du frais'] || row['Frais'] || row['Produit'] || '');
+  lib = String(lib).toLowerCase().replace(/\s+/g,' ').trim();
+
+  return [p8, s, lib].join('||');
+}
+
+
 if (typeof CONTROL_COLS === 'undefined') {
   var CONTROL_COLS = { ROW_HASH:'ROW_HASH', CANCELLED:'CANCELLED', EXCLUDE_FROM_EXPORT:'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT:'LAST_MODIFIED_AT' };
 }
-if (typeof _norm_ !== 'function') {
-  function _norm_(s) {
-    s = String(s == null ? '' : s);
-    try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch(e) {}
-    return s.toLowerCase().trim();
-  }
-}
+
 if (typeof _isCancelledStatus_ !== 'function') {
   function _isCancelledStatus_(val, cancelListCsv) {
     var norm = _norm_(val);
@@ -25,18 +34,9 @@ if (typeof _isCancelledStatus_ !== 'function') {
     return list.indexOf(norm) >= 0;
   }
 }
-if (typeof normalizePassportToText8_ !== 'function') {
-  function normalizePassportToText8_(val) {
-    if (val == null) return '';
-    var s = String(val).trim();
-    if (s === '') return '';
-    if (s[0] === "'") s = s.slice(1);
-    if (/^\d+$/.test(s) && s.length < 8) s = ('00000000' + s).slice(-8);
-    return "'" + s;
-  }
-}
+
 function getKeyColsFromParams_(ss) {
-  var csv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Nom du frais,Saison';
+  var csv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
   return csv.split(',').map(function(x){ return x.trim(); }).filter(Boolean);
 }
 function buildKeyFromRow_(row, keyCols) {
@@ -102,7 +102,7 @@ function diffArticles_(seasonSheetId) {
   var activeByPassport = {};
   finals.rows.forEach(function(r, i){
     r.__rownum__ = i + 2;
-    r.__key__ = buildKeyFromRow_(r, keyCols);
+    r.__key__ = buildArticleKey_(r);
     idxFinalByKey[r.__key__] = r;
 
     var pass = String(r['Passeport #']||'').trim();
@@ -121,7 +121,7 @@ function diffArticles_(seasonSheetId) {
 
   // --- Parcours staging
   staging.rows.forEach(function(sRow){
-    var key = buildKeyFromRow_(sRow, keyCols);
+    var key = buildArticleKey_(sRow);
     var fRow = idxFinalByKey[key];
     var sCancelled = _isCancelledStatus_(sRow[statusCol], cancelListCsv);
 
@@ -194,7 +194,7 @@ function diffArticles_(seasonSheetId) {
 
   // --- Disparitions = annulations
   var indexStagingKeys = {};
-  staging.rows.forEach(function(s){ indexStagingKeys[buildKeyFromRow_(s, keyCols)] = true; });
+  staging.rows.forEach(function(s){ indexStagingKeys[buildArticleKey_(s)] = true; });
   finals.rows.forEach(function(fRow){
     if (!indexStagingKeys[fRow.__key__]) {
       fRow[CONTROL_COLS.CANCELLED] = true;

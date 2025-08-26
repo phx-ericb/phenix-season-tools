@@ -353,21 +353,34 @@ function testMappings(seasonSpreadsheetId, opts) {
     return hits; // 0..n
   }
 
-  function _renderFmt_(fmt, row, U, genreInit){
-    if (!fmt) return '';
-    var g = _mt_extractGenreSmart_(row);
-    var init = (genreInit==='F'?'F':(genreInit==='M'?'M':(genreInit==='X'?'X':'')));
+function _u2FromU_(U) {
+  var s = (U || '').toString().trim();         // ex: "U7" ou "U10" ou "7"
+  if (!s) return '';
+  var m = s.match(/^[Uu]\s*(\d{1,2})$/) || s.match(/^(\d{1,2})$/);
+  var d = m ? m[1] : '';
+  if (!d) return '';
+  return 'U' + (d.length === 1 ? '0' + d : d); // -> "U07" ou "U10"
+}
 
-    // Remplit {{genre}} avec le libellé “Féminin/Masculin/Mixte”
-    // et {{genreInitiale}} avec M/F/X.
-    return String(fmt)
-      .replace(/{{\s*U\s*}}/g, U || '')
-      .replace(/{{\s*genreInitiale\s*}}/g, init || g.initiale || '')
-      .replace(/{{\s*genre\s*}}/g, g.label || '')
-      .replace(/{{\s*article\s*}}/g, String(_articleNameFromRow_(row) || ''))
-      .replace(/{{\s*saison\s*}}/g, String(row['Saison']||''))
-      .replace(/{{\s*annee\s*}}/g, String((row['Saison']||'').toString().replace(/.*(\d{4}).*$/,'$1')));
-  }
+
+function _renderFmt_(fmt, row, U, genreInit) {
+  if (!fmt) return '';
+  var g = _mt_extractGenreSmart_(row);
+  var init = (genreInit==='F' ? 'F' :
+             (genreInit==='M' ? 'M' :
+             (genreInit==='X' ? 'X' : '')));
+  var U2 = _u2FromU_(U);
+
+  // Remplit {{genre}} (label), {{genreInitiale}} (M/F/X), {{U}}, {{U2}}, etc.
+  return String(fmt)
+    .replace(/{{\s*U2\s*}}/g, U2 || '')
+    .replace(/{{\s*U\s*}}/g, U || '')
+    .replace(/{{\s*genreInitiale\s*}}/g, init || g.initiale || '')
+    .replace(/{{\s*genre\s*}}/g, g.label || '')
+    .replace(/{{\s*article\s*}}/g, String(_articleNameFromRow_(row) || ''))
+    .replace(/{{\s*saison\s*}}/g, String(row['Saison'] || ''))
+    .replace(/{{\s*annee\s*}}/g, String((row['Saison'] || '').toString().replace(/.*(\d{4}).*$/,'$1')));
+}
 
   function _deriveUFromRow_(r, ss){
     // 0) direct

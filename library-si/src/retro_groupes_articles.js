@@ -1,32 +1,36 @@
 /**
- * retro_groupe_articles.gs — v0.8
- * - Exporte "Rétro - Groupe Articles" (10 colonnes)
+ * retro_groupe_articles.gs — v0.10-debug
+ * - Export "Rétro - Groupe Articles" (10 colonnes)
  * - Unifie INSCRIPTIONS + ARTICLES (par passeport) pour compléter Nom/Prénom/DOB/Genre
  * - MAPPINGS unifiés (Type=article) pour Groupe/Catégorie (vars: U, U2, ageCat, genre/genreInitiale, article, saison, annee)
  * - Respecte CANCELLED/EXCLUDE_FROM_EXPORT + moteur de règles (RETRO_RULES_JSON)
- * - Collecte & écrit un onglet "Erreurs" (paramétrable)
- *
- * Colonnes exportées:
- *  "Identifiant unique","Nom","Prénom","Date de naissance","#","Couleur","Sous-groupe","Position","Équipe/Groupe","Catégorie"
+ * - Écrit "Rétro - Erreurs"; logging détaillé si RETRO_DEBUG=TRUE
  */
 
 /* ===================== Param keys ===================== */
 if (typeof PARAM_KEYS === 'undefined') { var PARAM_KEYS = {}; }
-PARAM_KEYS.RETRO_GART_SHEET_NAME = PARAM_KEYS.RETRO_GART_SHEET_NAME || 'RETRO_GART_SHEET_NAME';
+PARAM_KEYS.RETRO_GART_SHEET_NAME        = PARAM_KEYS.RETRO_GART_SHEET_NAME        || 'RETRO_GART_SHEET_NAME';
 PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID = PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID || 'RETRO_GART_EXPORTS_FOLDER_ID';
 
-PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV = PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV || 'RETRO_GART_IGNORE_FEES_CSV';     // sinon RETRO_IGNORE_FEES_CSV
-PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS = PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS || 'RETRO_GART_ELITE_KEYWORDS';
-PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING = PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING || 'RETRO_GART_REQUIRE_MAPPING';      // TRUE => ne sortir que les articles mappés
+PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV   = PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV   || 'RETRO_GART_IGNORE_FEES_CSV';
+PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS    = PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS    || 'RETRO_GART_ELITE_KEYWORDS';
+PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING   = PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING   || 'RETRO_GART_REQUIRE_MAPPING';
+PARAM_KEYS.RETRO_DEBUG                  = PARAM_KEYS.RETRO_DEBUG                  || 'RETRO_DEBUG';
 
-PARAM_KEYS.RETRO_RULES_JSON = PARAM_KEYS.RETRO_RULES_JSON || 'RETRO_RULES_JSON';                 // moteur de règles partagé
+PARAM_KEYS.RETRO_RULES_JSON             = PARAM_KEYS.RETRO_RULES_JSON             || 'RETRO_RULES_JSON';
+
+PARAM_KEYS.RETRO_GROUP_GROUPE_FMT       = PARAM_KEYS.RETRO_GROUP_GROUPE_FMT       || 'RETRO_GROUP_GROUPE_FMT';
+PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT    = PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT    || 'RETRO_GROUP_CATEGORIE_FMT';
 
 // Param erreurs
-PARAM_KEYS.RETRO_ERRORS_SHEET_NAME = PARAM_KEYS.RETRO_ERRORS_SHEET_NAME || 'RETRO_ERRORS_SHEET_NAME';
+PARAM_KEYS.RETRO_ERRORS_SHEET_NAME      = PARAM_KEYS.RETRO_ERRORS_SHEET_NAME      || 'RETRO_ERRORS_SHEET_NAME';
 
 // Adapté (pour exclure CDP0)
-PARAM_KEYS.RETRO_ADAPTE_KEYWORDS = PARAM_KEYS.RETRO_ADAPTE_KEYWORDS || 'RETRO_ADAPTE_KEYWORDS';
-PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS = PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS || 'RETRO_GROUP_SA_KEYWORDS';
+PARAM_KEYS.RETRO_ADAPTE_KEYWORDS        = PARAM_KEYS.RETRO_ADAPTE_KEYWORDS        || 'RETRO_ADAPTE_KEYWORDS';
+PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS      = PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS      || 'RETRO_GROUP_SA_KEYWORDS';
+
+/* ===================== DEBUG ===================== */
+function _dbg_(on, msg, obj) { if (!on) return; if (obj === undefined) { Logger.log(msg); } else { try { Logger.log(msg + ' ' + JSON.stringify(obj)); } catch (_) { Logger.log(msg); } } }
 
 /* ===================== Helpers genre ===================== */
 function _ga_extractGenreSmart_(row) {
@@ -44,9 +48,11 @@ function _ga_extractGenreSmart_(row) {
   if (!raw) return { label: '', initiale: '' };
   function _nrmLow(s) { try { s = String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) { } return s.toLowerCase().trim(); }
   var n = _nrmLow(raw);
-  if (/^(m|masculin|male|man|garcon|gar\u00e7on|homme|boy)\b/.test(n) || /\bu ?\d+\s*m\b/.test(n) || /\bmasc\b/.test(n))
+
+  // Supporte U11M / U11F collés OU avec espace
+  if (/^(m|masculin|male|man|garcon|gar\u00e7on|homme|boy)\b/.test(n) || /\bu ?\d+\s*m\b/.test(n) || /\bu ?\d+m\b/.test(n) || /\bmasc\b/.test(n))
     return { label: 'Masculin', initiale: 'M' };
-  if (/^(f|feminin|female|woman|fille|dame|girl)\b/.test(n) || /\bu ?\d+\s*f\b/.test(n) || /\bfem\b/.test(n))
+  if (/^(f|feminin|female|woman|fille|dame|girl)\b/.test(n) || /\bu ?\d+\s*f\b/.test(n) || /\bu ?\d+f\b/.test(n) || /\bfem\b/.test(n))
     return { label: 'Féminin', initiale: 'F' };
   if (/^(mixte|mix|x|non binaire|non-binaire|nb|autre)\b/.test(n))
     return { label: 'Mixte', initiale: 'X' };
@@ -72,10 +78,7 @@ function _ga_pad2_(n) { n = Number(n || 0); return (n < 10 ? ('0' + n) : String(
 function _ga_deriveAgeYear_(row) {
   var dn = row['Date de naissance'] || row['Naissance'] || '';
   if (dn instanceof Date) return dn.getFullYear();
-  if (dn) {
-    var m = String(dn).match(/(19|20)\d{2}/);
-    if (m) return parseInt(m[0], 10);
-  }
+  if (dn) { var m = String(dn).match(/(19|20)\d{2}/); if (m) return parseInt(m[0], 10); }
   return null;
 }
 function _ga_ageCat_(birthYear, seasonYear) {
@@ -89,8 +92,8 @@ function _ga_U_(birthYear, seasonYear) {
   return u2 ? ('U' + parseInt(u2.slice(1), 10)) : ''; // "U9", "U10", ...
 }
 function _ga_extractUFromFeeText_(feeName) {
-  var s = String(feeName || '').toUpperCase();
-  var m = s.match(/U\s*[-–]?\s*(\d{1,2})/);
+  var s = String(feeName || '');
+  var m = s.match(/U\s*[-–]?\s*(\d{1,2})/i);
   return m ? ('U' + parseInt(m[1], 10)) : '';
 }
 function _ga_computeUandU2_(row, seasonYear, feeName) {
@@ -102,25 +105,19 @@ function _ga_computeUandU2_(row, seasonYear, feeName) {
   }
   if (!U) {
     var uTxt = _ga_extractUFromFeeText_(feeName);
-    if (uTxt) {
-      U = uTxt;
-      var n = parseInt(uTxt.replace(/\D/g, ''), 10);
-      if (!isNaN(n)) U2 = 'U' + _ga_pad2_(n);
-    }
+    if (uTxt) { U = uTxt; var n = parseInt(uTxt.replace(/\D/g, ''), 10); if (!isNaN(n)) U2 = 'U' + _ga_pad2_(n); }
   }
   return { U: U, U2: U2 };
 }
 
+/* ==== Templating ==== */
 function _ga_tpl_(tpl, vars) {
   tpl = String(tpl == null ? '' : tpl);
   return tpl.replace(/{{\s*([\w.]+)\s*}}/g, function (_, k) { return (vars && k in vars && vars[k] != null) ? String(vars[k]) : ''; });
 }
 
 /* ===== Règles ===== */
-function _ga_loadRules_(ss) {
-  if (typeof loadRetroRules_ === 'function') return loadRetroRules_(ss);
-  return [];
-}
+function _ga_loadRules_(ss) { if (typeof loadRetroRules_ === 'function') return loadRetroRules_(ss); return []; }
 function _ga_applyRowRulesMaybeSkip_(rules, articleRow, ctx) {
   if (!rules || !rules.length || typeof applyRetroRowRules_ !== 'function') return false;
   var fakeMember = {};
@@ -128,70 +125,96 @@ function _ga_applyRowRulesMaybeSkip_(rules, articleRow, ctx) {
   return !!(res && res.skip);
 }
 
-/* ===== Lecture MAPPINGS unifiés (incl. ExclusiveGroup) ===== */
-function _loadUnifiedGroupMappings_(ss) {
-  var sh = ss.getSheetByName(SHEETS.MAPPINGS);
-  var out = [];
-  if (!sh || sh.getLastRow() < 2) return out;
-  var data = sh.getDataRange().getValues();
-  var H = (data[0] || []).map(function (h) { return String(h || '').trim(); });
-  function idx(k) { var i = H.indexOf(k); return i < 0 ? null : i; }
-  var iType = idx('Type'), iAli = idx('AliasContains'), iUmin = idx('Umin'), iUmax = idx('Umax'),
-    iGen = idx('Genre'), iG = idx('GroupeFmt'), iC = idx('CategorieFmt'), iEx = idx('Exclude'),
-    iPr = idx('Priority'), iX = idx('ExclusiveGroup'), iCode = idx('Code');
-  if (iType == null || iAli == null) return out;
-
-  for (var r = 1; r < data.length; r++) {
-    var row = data[r] || [];
-    if (!row.some(function (c) { return String(c || '').trim(); })) continue;
-    out.push({
-      Type: String(row[iType] || '').toLowerCase(),                // member | article
-      AliasContains: String(row[iAli] || ''),
-      Umin: isNaN(parseInt(row[iUmin], 10)) ? null : parseInt(row[iUmin], 10),
-      Umax: isNaN(parseInt(row[iUmax], 10)) ? null : parseInt(row[iUmax], 10),
-      Genre: String(row[iGen] || '*').toUpperCase(),
-      GroupeFmt: String(row[iG] || ''),
-      CategorieFmt: String(row[iC] || ''),
-      Exclude: String(row[iEx] || '').toLowerCase() === 'true',
-      Priority: isNaN(parseInt(row[iPr], 10)) ? 100 : parseInt(row[iPr], 10),
-      ExclusiveGroup: String(row[iX] || '').trim(),
-      Code: String(row[iCode] || '').trim()
-    });
+/* ==== Normalisation passeport ==== */
+function _ga_norm_passport_(ss, v) {
+  var s = String(v == null ? '' : v).trim();
+  if (!s) return '';
+  if (typeof normalizePassportPlain8_ === 'function') return normalizePassportPlain8_(s);
+  if (/^\d+$/.test(s)) {
+    var width = parseInt(readParam_(ss, 'PASSPORT_PAD_WIDTH') || '8', 10);
+    if (isNaN(width) || width < 1) width = 8;
+    s = (Array(width + 1).join('0') + s).slice(-width);
   }
-  // priorité: plus grand d'abord, puis Alias plus long
-  out.sort(function (a, b) {
-    if (a.Priority !== b.Priority) return b.Priority - a.Priority;
-    return (b.AliasContains || '').length - (a.AliasContains || '').length;
-  });
-  return out;
+  return s;
 }
 
-function _low_(s) { s = String(s == null ? '' : s); try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) { } return s.toLowerCase().trim(); }
+/* ==== Normalisation texte (espaces/tirets) ==== */
+function _low_(s) {
+  s = String(s == null ? '' : s);
+  try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) {}
+  s = s
+    .replace(/\u00A0/g, ' ')                 // NBSP → espace
+    .replace(/[\u2010-\u2015\u2212]/g, '-')  // tous les dashes → '-'
+    .replace(/\s+/g, ' ')                    // compacter
+    .trim()
+    .toLowerCase();
+  return s;
+}
 
-/** Renvoie {passed:[], failedU:[]} pour un fee donné (type filtré + genre/alias ok) */
-function _findArticleMappingCandidates_(maps, feeName, vars) {
-  var s = _low_(feeName || '');
-  var passed = [], failedU = [];
+/* ==== Match alias 3 étages (brut / normalisé / tokens) ==== */
+function _aliasMatchExplain_(feeName, alias) {
+  var feeRaw = String(feeName || '');
+  var aliRaw = String(alias || '');
+  var feeNorm = _low_(feeRaw);
+  var aliNorm = _low_(aliRaw);
+
+  var rawContains  = !!(aliRaw && feeRaw.indexOf(aliRaw) !== -1);
+  var normContains = !!(aliNorm && feeNorm.indexOf(aliNorm) !== -1);
+
+  var tokensOk = false;
+  if (!rawContains && !normContains) {
+    var toks = aliNorm.split(/[^a-z0-9]+/).filter(function (t) { return t.length >= 2; });
+    if (toks.length) {
+      tokensOk = toks.every(function (t) { return feeNorm.indexOf(t) !== -1; });
+    }
+  }
+
+  return {
+    ok: rawContains || normContains || tokensOk,
+    feeRaw: feeRaw,
+    aliRaw: aliRaw,
+    feeNorm: feeNorm,
+    aliNorm: aliNorm,
+    rawContains: rawContains,
+    normContains: normContains,
+    tokensOk: tokensOk
+  };
+}
+
+/** Renvoie {passed:[], failedU:[], triedAliases:[...], matchedAliases:[...], debug:[...]} */
+function _findArticleMappingCandidates_(maps, feeName, vars, DEBUG) {
+  var passed = [], failedU = [], tried = [], matched = [], debug = [];
   for (var i = 0; i < maps.length; i++) {
-    var m = maps[i]; if (m.Type !== 'article') continue;
+    var m = maps[i]; 
+    if (m.Type !== 'article') continue;
     if (!m.AliasContains) continue;
-    if (s.indexOf(_low_(m.AliasContains)) === -1) continue;
+
+    var ali = String(m.AliasContains);
+    tried.push(_low_(ali));
+
+    var ex = _aliasMatchExplain_(feeName, ali);
+    debug.push({ ali: ali, fee: feeName, rawContains: ex.rawContains, normContains: ex.normContains, tokensOk: ex.tokensOk });
+    if (!ex.ok) continue; // alias ne matche pas (aucun des 3 modes)
+    matched.push(_low_(ali));
+
+    // Genre
     if (m.Genre && m.Genre !== '*' && m.Genre !== (vars.genreInitiale || '')) continue;
 
-    // filtre U
-    var uNum = 0; if (vars.U) { var mm = String(vars.U).match(/^U(\d{1,2})$/i); if (mm) uNum = parseInt(mm[1], 10); }
+    // U
+    var uNum = 0; 
+    if (vars.U) { var mm = String(vars.U).match(/^U(\d{1,2})$/i); if (mm) uNum = parseInt(mm[1], 10); }
     var okU = true;
     if (m.Umin != null && (!uNum || uNum < m.Umin)) okU = false;
     if (m.Umax != null && (!uNum || uNum > m.Umax)) okU = false;
 
     if (okU) passed.push(m); else failedU.push(m);
   }
-  return { passed: passed, failedU: failedU };
+  return { passed: passed, failedU: failedU, triedAliases: tried, matchedAliases: matched, debug: debug };
 }
 
-/** Rend la 1ère règle qui passe, ou null; inclut exclusiveGroup pour analytique */
-function _applyUnifiedMapping_(maps, feeName, vars) {
-  var cand = _findArticleMappingCandidates_(maps, feeName, vars).passed;
+/** Rend la 1ère règle qui passe, ou null */
+function _applyUnifiedMapping_(maps, feeName, vars, DEBUG) {
+  var cand = _findArticleMappingCandidates_(maps, feeName, vars, DEBUG).passed;
   if (!cand.length) return null;
   var m = cand[0];
   if (m.Exclude) return { exclude: true, exclusiveGroup: m.ExclusiveGroup || '' };
@@ -206,8 +229,9 @@ function _applyUnifiedMapping_(maps, feeName, vars) {
 /* ===================== Unification INSCRIPTIONS + ARTICLES ===================== */
 function _ga_buildMemberIndex_(ss) {
   var idx = {};
-  function ensure(p) {
-    var k = String(p || '').trim(); if (!k) return null;
+  function ensure(pRaw) {
+    var k = _ga_norm_passport_(ss, pRaw);
+    if (!k) return null;
     if (!idx[k]) idx[k] = { passeport: k, nom: '', prenom: '', dob: '', genreInit: '', genreLabel: '' };
     return idx[k];
   }
@@ -235,15 +259,18 @@ function _ga_buildMemberIndex_(ss) {
 /* ===================== Construction + Erreurs ===================== */
 function buildRetroGroupeArticlesRows(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
-  var insc = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS);
-  var art = readSheetAsObjects_(ss.getId(), SHEETS.ARTICLES);
+  var DEBUG = String(readParam_(ss, PARAM_KEYS.RETRO_DEBUG) || 'FALSE').toUpperCase() === 'TRUE';
 
-  var rules = _ga_loadRules_(ss);
+  var insc = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS);
+  var art  = readSheetAsObjects_(ss.getId(), SHEETS.ARTICLES);
+
+  var rules    = _ga_loadRules_(ss);
   var mappings = _loadUnifiedGroupMappings_(ss);
+  _dbg_(DEBUG, '[GART] mappings loaded', { count: (mappings||[]).length });
 
   // Filtres
   var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV) || readParam_(ss, 'RETRO_IGNORE_FEES_CSV') || 'senior,u-sé,adulte,ligue';
-  var eliteCsv = readParam_(ss, PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS) || 'D1+,LDP,Ligue';
+  var eliteCsv  = readParam_(ss, PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS)  || 'D1+,LDP,Ligue';
   var requireMp = (String(readParam_(ss, PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING) || 'TRUE').toUpperCase() === 'TRUE');
 
   // Adapté (pour exclure CDP0 warn)
@@ -252,56 +279,49 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
 
   var header = ["Identifiant unique", "Nom", "Prénom", "Date de naissance", "#", "Couleur", "Sous-groupe", "Position", "Équipe/Groupe", "Catégorie"];
   var rows = [];
-  var errors = []; // {level: 'error'|'warn', code, passeport, nom, prenom, feeName, message, details}
+  var errors = []; // {level, code, passeport, nom, prenom, feeName, message, details}
 
   var activeArts = (art.rows || []).filter(_ga_isActiveArticle_);
+  _dbg_(DEBUG, '[GART] active articles', { count: activeArts.length });
+
   if (!activeArts.length) return { header: header, rows: rows, nbCols: header.length, errors: errors };
 
   // Saison/année
   var seasonLabel = readParam_(ss, 'SEASON_LABEL') || (activeArts[0] && activeArts[0]['Saison']) || '';
-  var seasonYear = parseSeasonYear_(seasonLabel);
+  var seasonYear  = parseSeasonYear_(seasonLabel);
+  _dbg_(DEBUG, '[GART] season', { label: seasonLabel, year: seasonYear });
 
   var ctx = { ss: ss, catalog: (typeof _loadArticlesCatalog_ === 'function' ? _loadArticlesCatalog_(ss) : { match: function () { return null; } }) };
 
   var memberIdx = _ga_buildMemberIndex_(ss);
+  _dbg_(DEBUG, '[GART] memberIdx size', { size: Object.keys(memberIdx).length });
 
-  // Set des passeports avec inscription active (pour "article sans inscription")
+  // Set des passeports avec inscription active (normalisés)
   var inscActivePass = {};
   (insc.rows || []).forEach(function (r) {
-    var p = r['Passeport #']; if (!p) return;
+    var p = _ga_norm_passport_(ss, r['Passeport #']); if (!p) return;
     var can = String(r[CONTROL_COLS.CANCELLED] || '').toLowerCase() === 'true';
     var exc = String(r[CONTROL_COLS.EXCLUDE_FROM_EXPORT] || '').toLowerCase() === 'true';
     var st = (r["Statut de l'inscription"] || r['Statut'] || '').toString().toLowerCase();
     var active = !can && !exc && st !== 'annulé' && st !== 'annule' && st !== 'cancelled';
-    if (active) inscActivePass[String(p).trim()] = true;
+    if (active) inscActivePass[p] = true;
   });
+  _dbg_(DEBUG, '[GART] active inscriptions (normalized)', { count: Object.keys(inscActivePass).length });
 
-  var _normPass = (typeof normalizePassportPlain8_ === 'function')
-    ? normalizePassportPlain8_
-    : function (v) {
-      var s = String(v == null ? '' : v).trim();
-      if (!s) return '';
-      if (/^\d+$/.test(s)) {
-        var width = parseInt(readParam_(ss, 'PASSPORT_PAD_WIDTH') || '8', 10);
-        if (isNaN(width) || width < 1) width = 8;
-        s = (Array(width + 1).join('0') + s).slice(-width);
-      }
-      return s;
-    };
-
-  // Pour l’exclusivité & CDP0
+  // Exclusivité & Adapté
   var perPassExclusive = {}; // pass -> { groupName -> [ {feeName, code} ] }
-  var perPassIsAdapte = {}; // pass -> true si un de ses articles/inscriptions correspond aux mots-clés "Adapté"
+  var perPassIsAdapte  = {}; // pass -> true si un article/inscription correspond aux mots-clés "Adapté"
 
-  activeArts.forEach(function (a) {
-    if (_ga_applyRowRulesMaybeSkip_(rules, a, ctx)) return;
+  activeArts.forEach(function (a, idx) {
+    if (_ga_applyRowRulesMaybeSkip_(rules, a, ctx)) { _dbg_(DEBUG, '[GART] skip by rules', { i: idx }); return; }
 
     var feeName = a['Nom du frais'] || a['Frais'] || a['Produit'] || '';
-    if (_ga_containsAny_(feeName, ignoreCsv)) return;
-    if (_ga_containsAny_(feeName, eliteCsv)) return;
+    if (_ga_containsAny_(feeName, ignoreCsv)) { _dbg_(DEBUG, '[GART] skip ignoreCsv', { fee: feeName }); return; }
+    if (_ga_containsAny_(feeName, eliteCsv))  { _dbg_(DEBUG, '[GART] skip eliteCsv',  { fee: feeName }); return; }
 
-    var pass = a['Passeport #']; if (!pass) return;
-    var passK = String(pass).trim();
+    var passRaw = a['Passeport #'];
+    var passK   = _ga_norm_passport_(ss, passRaw);
+    if (!passK) { _dbg_(DEBUG, '[GART] no passport, skip', { fee: feeName }); return; }
 
     // Article sans inscription active ?
     if (!inscActivePass[passK]) {
@@ -310,13 +330,14 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
         nom: (a['Nom'] || ''), prenom: (a['Prénom'] || a['Prenom'] || ''), feeName: feeName,
         message: 'Article actif sans inscription active correspondante', details: {}
       });
-      return; // on n’écrit pas la ligne
+      _dbg_(DEBUG, '[GART] error ARTICLE_WITHOUT_INSCRIPTION', { pass: passK, fee: feeName });
+      return;
     }
 
-    // Marqueur "Adapté" si repéré via articles actifs
+    // Marqueur "Adapté"
     if (_ga_containsAny_(feeName, adapteCsv)) perPassIsAdapte[passK] = true;
 
-    // Compléter depuis index membre
+    // Profil membre fusionné
     var m = memberIdx[passK] || {};
     var nom = (a['Nom'] || '') || m.nom || '';
     var prenom = (a['Prénom'] || a['Prenom'] || '') || m.prenom || '';
@@ -332,11 +353,12 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
 
     var vars = { U: U, U2: U2, ageCat: U2, genreInitiale: gInit, genre: gLbl, article: feeName, saison: seasonLabel, annee: seasonYear };
 
-    // Candidats de mapping (pour AGE_OUT_OF_RANGE)
-    var cands = _findArticleMappingCandidates_(mappings, feeName, vars);
-    if (!cands.passed.length && cands.failedU.length) {
-      // au moins un alias matche mais U est hors bornes
-      var ranges = cands.failedU.map(function (m) {
+    // Candidats de mapping + debug alias
+    var cand = _findArticleMappingCandidates_(mappings, feeName, vars, DEBUG);
+    _dbg_(DEBUG, '[GART] alias check', { fee: feeName, debugs: cand.debug.slice(0,8) });
+
+    if (!cand.passed.length && cand.failedU.length) {
+      var ranges = cand.failedU.map(function (m) {
         var a = []; if (m.Umin != null) a.push('min ' + m.Umin); if (m.Umax != null) a.push('max ' + m.Umax);
         return a.join(', ');
       }).join(' | ');
@@ -344,32 +366,51 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
         level: 'error', code: 'AGE_OUT_OF_RANGE', passeport: passK, nom: nom, prenom: prenom, feeName: feeName,
         message: 'Âge (U) hors bornes pour cet article', details: { U: U, ranges: ranges }
       });
-      // on continue, car on peut décider de ne pas écrire si requireMp==true (ci-dessous)
+      _dbg_(DEBUG, '[GART] error AGE_OUT_OF_RANGE', { pass: passK, fee: feeName, U: U, ranges: ranges });
     }
 
-    // Application du mapping principal
-    var mp = _applyUnifiedMapping_(mappings, feeName, vars);
-    if (mp && mp.exclude) return;
+    // Application mapping
+    var mp = _applyUnifiedMapping_(mappings, feeName, vars, DEBUG);
+    if (mp && mp.exclude) { _dbg_(DEBUG, '[GART] excluded by mapping', { fee: feeName }); return; }
 
     var groupe = (mp && mp.groupe) || '';
-    var categ = (mp && mp.categorie) || '';
-    var exg = (mp && mp.exclusiveGroup) || '';
-    var code = (mp && mp.code) || '';
+    var categ  = (mp && mp.categorie) || '';
+    var exg    = (mp && mp.exclusiveGroup) || '';
+    var code   = (mp && mp.code) || '';
 
-    // Exclusivité: accumule par passeport & groupe
+    // Pas de mapping
+    if (!mp) {
+      if (requireMp) {
+        errors.push({
+          level: 'error', code: 'ARTICLE_UNMAPPED', passeport: passK, nom: nom, prenom: prenom, feeName: feeName,
+          message: 'Aucun mapping article trouvé (requireMapping=TRUE)',
+          details: { tried: cand.triedAliases.slice(0, 20), matchedAlias: (cand.matchedAliases || []).slice(0, 5), U: U, genre: gInit }
+        });
+        _dbg_(DEBUG, '[GART] ARTICLE_UNMAPPED (requireMp=TRUE)', { fee: feeName, U: U, genre: gInit, matched: cand.matchedAliases });
+        return;
+      } else {
+        var gfmt = readParam_(ss, PARAM_KEYS.RETRO_GROUP_GROUPE_FMT)    || '{{U}}{{genreInitiale}}';
+        var cfmt = readParam_(ss, PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT) || '{{U}} {{genreInitiale}}';
+        groupe = _ga_tpl_(gfmt, vars);
+        categ  = _ga_tpl_(cfmt, vars);
+        _dbg_(DEBUG, '[GART] fallback group/category', { fee: feeName, groupe: groupe, categorie: categ });
+      }
+    } else {
+      _dbg_(DEBUG, '[GART] mapped', { fee: feeName, groupe: groupe, categorie: categ, code: code, exg: exg });
+    }
+
+    // Exclusivité
     if (exg) {
       perPassExclusive[passK] = perPassExclusive[passK] || {};
       perPassExclusive[passK][exg] = perPassExclusive[passK][exg] || [];
       perPassExclusive[passK][exg].push({ feeName: feeName, code: code || feeName });
     }
 
-    if (!mp && requireMp) return; // si exigé: uniquement les mappés
-
-    if (!groupe && !categ) return; // rien à écrire
+    if (!groupe && !categ) { _dbg_(DEBUG, '[GART] skip empty group/category', { fee: feeName }); return; }
 
     var nbCols = header.length;
     var rowOut = new Array(nbCols).fill("");
-    rowOut[0] = _normPass(pass);
+    rowOut[0] = _ga_norm_passport_(ss, passK);
     rowOut[1] = nom;
     rowOut[2] = prenom;
     rowOut[3] = dob;
@@ -380,12 +421,11 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     rows.push(rowOut);
   });
 
-  // Conflits d’exclusivité (ex.: CDP1+CDP2)
+  // Conflits d’exclusivité
   Object.keys(perPassExclusive).forEach(function (passK) {
     var ex = perPassExclusive[passK];
     Object.keys(ex).forEach(function (group) {
       var arr = ex[group] || [];
-      // conflit si >=2 codes distincts
       var distinct = {};
       arr.forEach(function (x) { distinct[String(x.code || '')] = true; });
       var nb = Object.keys(distinct).filter(Boolean).length;
@@ -394,14 +434,13 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
           level: 'error', code: 'EXCLUSIVE_CONFLICT', passeport: passK, nom: '', prenom: '', feeName: '',
           message: 'Conflit d’exclusivité: plusieurs articles du groupe ' + group, details: { group: group, items: arr }
         });
+        _dbg_(true, '[GART] EXCLUSIVE_CONFLICT', { pass: passK, group: group, items: arr });
       }
     });
   });
 
-  // CDP0 (warn) pour U9–U12 non-Adapté
-  // On regarde exclusivité "CDP" sur 9..12 : si aucune trace, warning
+  // CDP0 (warn) U9–U12 hors Adapté
   Object.keys(inscActivePass).forEach(function (passK) {
-    // U via membre index + (fallback articles) : on refait un U rapide via memberIdx
     var m = memberIdx[passK] || {};
     var UU2 = _ga_computeUandU2_({ 'Date de naissance': m.dob, 'Naissance': m.dob }, seasonYear, '');
     var U = UU2.U || '';
@@ -426,6 +465,7 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     }
   });
 
+  _dbg_(DEBUG, '[GART] done', { rows: rows.length, errors: errors.length });
   return { header: header, rows: rows, nbCols: header.length, errors: errors };
 }
 
@@ -435,7 +475,6 @@ function writeRetroGroupeArticlesSheet(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
   var out = buildRetroGroupeArticlesRows(seasonSheetId);
 
-  // --- Data
   var sheetName = readParam_(ss, PARAM_KEYS.RETRO_GART_SHEET_NAME) || 'Rétro - Groupe Articles';
   var sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
   sh.clearContents();
@@ -450,9 +489,7 @@ function writeRetroGroupeArticlesSheet(seasonSheetId) {
   }
   appendImportLog_(ss, 'RETRO_GART_SHEET_OK', 'rows=' + out.rows.length);
 
-  // --- Erreurs
   _writeRetroErrors_(ss, out.errors);
-
   return out.rows.length;
 }
 
@@ -486,7 +523,7 @@ function _writeRetroErrors_(ss, errors) {
 /** Export XLSX rapide — Rétro Groupe Articles */
 function exportRetroGroupeArticlesXlsxToDrive(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
-  var out = buildRetroGroupeArticlesRows(seasonSheetId); // {header, rows, nbCols, errors}
+  var out = buildRetroGroupeArticlesRows(seasonSheetId);
 
   // 1) Temp minimal
   var temp = SpreadsheetApp.create('Export temporaire - Retro Groupe Articles');
@@ -526,7 +563,6 @@ function exportRetroGroupeArticlesXlsxToDrive(seasonSheetId) {
 
   // 6) Écrit/MAJ l’onglet Erreurs
   _writeRetroErrors_(ss, out.errors);
-
   return { fileId: file.getId(), name: file.getName(), rows: out.rows.length, errors: out.errors.length };
 }
 

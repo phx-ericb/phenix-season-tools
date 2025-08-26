@@ -12,7 +12,7 @@ function oneTimeNormalizeFinalsAndRehash_(seasonSpreadsheetId) {
 
   // Lire PARAMS
   var seasonLabel = (readParam_(ss, 'SEASON_LABEL') || '').trim();
-  var keyCols = (readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Nom du frais,Saison')
+  var keyCols = (readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison')
                  .split(',').map(function(s){return s.trim();}).filter(String);
 
   // Données en display (préserve zéros)
