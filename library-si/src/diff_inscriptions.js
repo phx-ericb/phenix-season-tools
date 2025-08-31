@@ -335,7 +335,7 @@ function diffInscriptions_(seasonSheetId) {
   }
 
   // --- 5) Outbox des nouveaux
-  if (outboxRows.length) enqueueOutboxRows_(ss.getId(), outboxRows);
+  // if (outboxRows.length) enqueueOutboxRows_(ss.getId(), outboxRows);
 
   return { added: toAppend.length, updated: toUpdate.length, outbox: outboxRows.length, annuls: annRows.length, mods: modRows.length };
 }

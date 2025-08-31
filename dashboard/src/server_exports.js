@@ -40,3 +40,61 @@ function previewExport(seasonId, type, maxRows) {
     }, 'Preview ready');
   });
 }
+
+// ---- Courriels D'ERREUR (réutilise le moteur de secteurs) ----
+// errorItem = { code: 'MISSING_CDP', label: 'CDP manquant', details: '...' }
+
+function previewErrorForPassport(seasonId, secteurId, passport, errorItem){
+  try{
+    var ss = getSeasonSpreadsheet_(seasonId);
+    var row = _findRowByPassport_(ss, passport);
+    if(!row) throw new Error('Passeport introuvable: ' + passport);
+
+    var sectors = getMailSectors(seasonId);
+    if(!sectors.ok) throw new Error(sectors.error || 'Erreur lecture secteurs');
+    var items = sectors.data.items || [];
+    var it = null;
+    for (var i=0;i<items.length;i++){ if(String(items[i].SecteurId||'')===String(secteurId||'')){ it=items[i]; break; } }
+    if(!it) throw new Error('Secteur introuvable: ' + secteurId);
+
+    // payload utilisateur + enrichissements erreur
+    var payload = buildDataFromRow_(row);
+    errorItem = errorItem || {};
+    payload.error_code = String(errorItem.code || '');
+    payload.error_label = String(errorItem.label || '');
+    payload.error_details = String(errorItem.details || '');
+
+    var sb = _resolveSubjectBody_(ss, it, payload);
+    var to = _resolveToForRow_(ss, row, it);
+
+    return { ok:true, data:{ subject: sb.subject, bodyHtml: sb.bodyHtml, to: to } };
+  } catch(e){ return { ok:false, error:String(e) }; }
+}
+
+function sendErrorTest(seasonId, item, passport, toTest, errorItem){
+  try{
+    var ss = getSeasonSpreadsheet_(seasonId);
+    var row = _findRowByPassport_(ss, passport);
+    if(!row) throw new Error('Passeport introuvable: ' + passport);
+
+    var it = Object.assign({}, item || {});
+    var payload = buildDataFromRow_(row);
+    errorItem = errorItem || {};
+    payload.error_code = String(errorItem.code || '');
+    payload.error_label = String(errorItem.label || '');
+    payload.error_details = String(errorItem.details || '');
+
+    var sb = _resolveSubjectBody_(ss, it, payload);
+    var to = String(toTest||'').trim(); if (!to) to = Session.getActiveUser().getEmail();
+    var fromName = readParam_(ss, 'MAIL_FROM') || undefined;
+
+    MailApp.sendEmail({
+      to: to,
+      subject: sb.subject,
+      htmlBody: sb.bodyHtml,
+      name: fromName
+    });
+
+    return { ok:true };
+  } catch(e){ return { ok:false, error:String(e) }; }
+}

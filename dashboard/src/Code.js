@@ -96,13 +96,6 @@ function runEvaluateRules() {
   return LIB.evaluateSeasonRules(getSeasonId_());
 }
 
-/** Envoyer les emails en attente (outbox) */
-function runSendPendingOutbox() {
-  if (!LIB || typeof LIB.sendPendingOutbox !== 'function') {
-    throw new Error('Fonction sendPendingOutbox indisponible dans la lib.');
-  }
-  return LIB.sendPendingOutbox(getSeasonId_());
-}
 
 /** ============================== Outils debug =============================== */
 /** Vérifie que la lib expose bien les fonctions clés */
@@ -174,4 +167,71 @@ function smoke_test() {
   Logger.log(JSON.stringify(LIB.exportRetroMembresXlsxToDrive(id)));
   Logger.log('---- TAIL IMPORT_LOG ----');
   debug_tailImportLog(40);
+}
+
+function resetSeasonData(seasonId){
+  return _wrap('resetSeasonData', function(){
+    var ss = SpreadsheetApp.openById(seasonId);
+
+    var targets = [
+      'MODIFS_INSCRIPTIONS','STAGING_INSCRIPTIONS','STAGING_ARTICLES',
+      'ARTICLES','INSCRIPTIONS',
+      'ANNULATIONS_INSCRIPTIONS','ANNULATIONS_ARTICLES',
+      'IMPORT_LOG','MAIL_OUTBOX','ERREURS'
+    ];
+
+    var cleared = [];
+    targets.forEach(function(name){
+      var sh = ss.getSheetByName(name);
+      if (!sh) return;
+      var last = sh.getLastRow();
+      if (last > 1){
+        sh.getRange(2,1,last-1, Math.max(1, sh.getLastColumn())).clearContent();
+      }
+      cleared.push(name);
+    });
+
+    return _ok({ cleared: cleared }, 'Réinitialisation complétée');
+  });
+}
+
+/**
+ * Import → Exports rétroaction (groupes & groupe articles) → Log dans IMPORT_LOG.
+ * Utilise tes runners existants (runImportDry / runExport).
+ */
+function runImportAndExports(){
+  var seasonId = getSeasonId_(); // déjà défini dans ton projet
+  var out = { ok:false, steps: [] };
+
+  // 1) Import (dry)
+  var imp = runImportDry(seasonId);           // fourni par server_exports.js
+  out.steps.push({ step: 'import', res: imp });
+
+  // 2) Exports rétroaction (XLSX)
+  var ex1 = runExport(seasonId, 'groupes');   // fourni par server_exports.js
+  out.steps.push({ step: 'export_groupes', res: ex1 });
+
+  var ex2 = runExport(seasonId, 'groupArticles'); // fourni par server_exports.js
+  out.steps.push({ step: 'export_groupArticles', res: ex2 });
+
+  // 3) Log IMPORT_LOG
+  appendImportLog_({
+    type: 'IMPORT',
+    details: 'Import exécuté + Exports rétroaction générés (groupes & groupe articles)'
+  });
+
+  out.ok = true;
+  return out;
+}
+
+/** Écrit une ligne dans IMPORT_LOG (Date | Type | Détails). Crée la feuille au besoin. */
+function appendImportLog_(entry){
+  var ss = SpreadsheetApp.openById(getSeasonId_());
+  var name = 'IMPORT_LOG';
+  var sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1,1,1,3).setValues([['Date','Type','Détails']]);
+  }
+  sh.appendRow([ new Date(), entry.type || 'INFO', entry.details || '' ]);
 }

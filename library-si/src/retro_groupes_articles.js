@@ -15,6 +15,7 @@ PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID = PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_I
 PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV   = PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV   || 'RETRO_GART_IGNORE_FEES_CSV';
 PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS    = PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS    || 'RETRO_GART_ELITE_KEYWORDS';
 PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING   = PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING   || 'RETRO_GART_REQUIRE_MAPPING';
+PARAM_KEYS.RETRO_GART_REQUIRE_INSCRIPTION = PARAM_KEYS.RETRO_GART_REQUIRE_INSCRIPTION || 'RETRO_GART_REQUIRE_INSCRIPTION';
 PARAM_KEYS.RETRO_DEBUG                  = PARAM_KEYS.RETRO_DEBUG                  || 'RETRO_DEBUG';
 
 PARAM_KEYS.RETRO_RULES_JSON             = PARAM_KEYS.RETRO_RULES_JSON             || 'RETRO_RULES_JSON';
@@ -97,16 +98,12 @@ function _ga_extractUFromFeeText_(feeName) {
   return m ? ('U' + parseInt(m[1], 10)) : '';
 }
 function _ga_computeUandU2_(row, seasonYear, feeName) {
-  var by = _ga_deriveAgeYear_(row);
-  var U = '', U2 = '';
-  if (by) {
-    U2 = _ga_ageCat_(by, seasonYear);
-    if (U2) U = 'U' + parseInt(U2.slice(1), 10);
-  }
-  if (!U) {
-    var uTxt = _ga_extractUFromFeeText_(feeName);
-    if (uTxt) { U = uTxt; var n = parseInt(uTxt.replace(/\D/g, ''), 10); if (!isNaN(n)) U2 = 'U' + _ga_pad2_(n); }
-  }
+   var by = _ga_deriveAgeYear_(row);
+   var U = '', U2 = '';
+   if (by) {
+     U2 = _ga_ageCat_(by, seasonYear);
+     if (U2) U = 'U' + parseInt(U2.slice(1), 10);
+   }
   return { U: U, U2: U2 };
 }
 
@@ -201,13 +198,15 @@ function _findArticleMappingCandidates_(maps, feeName, vars, DEBUG) {
     if (m.Genre && m.Genre !== '*' && m.Genre !== (vars.genreInitiale || '')) continue;
 
     // U
-    var uNum = 0; 
-    if (vars.U) { var mm = String(vars.U).match(/^U(\d{1,2})$/i); if (mm) uNum = parseInt(mm[1], 10); }
-    var okU = true;
-    if (m.Umin != null && (!uNum || uNum < m.Umin)) okU = false;
-    if (m.Umax != null && (!uNum || uNum > m.Umax)) okU = false;
+var uNum = parseInt(String(vars.U || '').replace(/^U/i, ''), 10) || 0;
 
+    if (vars.U) { var mm = String(vars.U).match(/^U(\d{1,2})$/i); if (mm) uNum = parseInt(mm[1], 10); }
+  var okU = true;
+if (uNum) {
+  if (m.Umin != null && uNum < m.Umin) okU = false;
+  if (m.Umax != null && uNum > m.Umax) okU = false;
     if (okU) passed.push(m); else failedU.push(m);
+  }    
   }
   return { passed: passed, failedU: failedU, triedAliases: tried, matchedAliases: matched, debug: debug };
 }
@@ -272,8 +271,9 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
   var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV) || readParam_(ss, 'RETRO_IGNORE_FEES_CSV') || 'senior,u-sé,adulte,ligue';
   var eliteCsv  = readParam_(ss, PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS)  || 'D1+,LDP,Ligue';
   var requireMp = (String(readParam_(ss, PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING) || 'TRUE').toUpperCase() === 'TRUE');
+  var requireInsc = (String(readParam_(ss, PARAM_KEYS.RETRO_GART_REQUIRE_INSCRIPTION) || 'FALSE').toUpperCase() === 'TRUE');
 
-  // Adapté (pour exclure CDP0 warn)
+  // Adapté (pour exclure CDP0 warn/export)
   var adapteCsv = (readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || '') + ',' + (readParam_(ss, PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS) || '');
   adapteCsv = adapteCsv.replace(/^,|,$/g, '');
 
@@ -330,8 +330,8 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
         nom: (a['Nom'] || ''), prenom: (a['Prénom'] || a['Prenom'] || ''), feeName: feeName,
         message: 'Article actif sans inscription active correspondante', details: {}
       });
-      _dbg_(DEBUG, '[GART] error ARTICLE_WITHOUT_INSCRIPTION', { pass: passK, fee: feeName });
-      return;
+      _dbg_(DEBUG, '[GART] ARTICLE_WITHOUT_INSCRIPTION', { pass: passK, fee: feeName });
+      if (requireInsc) return; // on ne bloque que si explicitement exigé
     }
 
     // Marqueur "Adapté"
@@ -343,10 +343,20 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     var prenom = (a['Prénom'] || a['Prenom'] || '') || m.prenom || '';
     var dob = (a['Date de naissance'] || a['Naissance'] || '') || m.dob || '';
 
-    // U/U2 + genre
-    var UU2 = _ga_computeUandU2_({ 'Date de naissance': dob, 'Naissance': dob }, seasonYear, feeName);
+    // U/U2 + genre — on ne déduit JAMAIS U depuis le libellé du frais
+    var UU2 = _ga_computeUandU2_({ 'Date de naissance': dob, 'Naissance': dob }, seasonYear, '');
     var U = UU2.U || '';
     var U2 = UU2.U2 || '';
+    if (!U2) {
+      errors.push({
+        level: 'error', code: 'MISSING_DOB_for_U', passeport: passK, nom: nom, prenom: prenom, feeName: feeName,
+        message: 'Impossible de dériver U/U2 sans date de naissance (chaque joueur doit avoir un U).',
+        details: {}
+      });
+      _dbg_(DEBUG, '[GART] MISSING_DOB_for_U', { pass: passK, fee: feeName });
+      return;
+    }
+
     var gA = _ga_extractGenreSmart_(a);
     var gInit = gA.initiale || m.genreInit || '';
     var gLbl = gA.label || m.genreLabel || (gInit === 'F' ? 'Féminin' : (gInit === 'M' ? 'Masculin' : (gInit === 'X' ? 'Mixte' : '')));
@@ -355,22 +365,60 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
 
     // Candidats de mapping + debug alias
     var cand = _findArticleMappingCandidates_(mappings, feeName, vars, DEBUG);
-    _dbg_(DEBUG, '[GART] alias check', { fee: feeName, debugs: cand.debug.slice(0,8) });
+    _dbg_(DEBUG, '[GART] alias check', { fee: feeName, debugs: (cand.debug || []).slice(0, 8) });
 
-    if (!cand.passed.length && cand.failedU.length) {
-      var ranges = cand.failedU.map(function (m) {
-        var a = []; if (m.Umin != null) a.push('min ' + m.Umin); if (m.Umax != null) a.push('max ' + m.Umax);
-        return a.join(', ');
+    // Cas 1: alias matché mais U hors bornes → log AGE_OUT_OF_RANGE et ne pas exporter
+    if ((!cand.passed || cand.passed.length === 0) && cand.failedU && cand.failedU.length) {
+      var ranges = cand.failedU.map(function (mm) {
+        var aR = []; if (mm.Umin != null) aR.push('min ' + mm.Umin); if (mm.Umax != null) aR.push('max ' + mm.Umax);
+        return aR.join(', ');
       }).join(' | ');
       errors.push({
         level: 'error', code: 'AGE_OUT_OF_RANGE', passeport: passK, nom: nom, prenom: prenom, feeName: feeName,
         message: 'Âge (U) hors bornes pour cet article', details: { U: U, ranges: ranges }
       });
-      _dbg_(DEBUG, '[GART] error AGE_OUT_OF_RANGE', { pass: passK, fee: feeName, U: U, ranges: ranges });
+      _dbg_(DEBUG, '[GART] AGE_OUT_OF_RANGE', { pass: passK, fee: feeName, U: U, ranges: ranges });
+      return; // pas d’export
     }
 
-    // Application mapping
-    var mp = _applyUnifiedMapping_(mappings, feeName, vars, DEBUG);
+    // Cas 2: aucun alias matché → unmapped (si requireMapping)
+    var hasAliasMatch = (cand.matchedAliases && cand.matchedAliases.length) || false;
+    if ((!hasAliasMatch) && requireMp) {
+      errors.push({
+        level: 'error', code: 'ARTICLE_UNMAPPED', passeport: passK, nom: nom, prenom: prenom, feeName: feeName,
+        message: 'Aucun mapping article trouvé (requireMapping=TRUE)',
+        details: { tried: (cand.triedAliases || []).slice(0, 20), matchedAlias: [], U: U, genre: gInit }
+      });
+      _dbg_(DEBUG, '[GART] ARTICLE_UNMAPPED (no alias matched)', { fee: feeName, U: U, genre: gInit });
+      return;
+    }
+
+    // Sélection du mapping applicable (passé Umin/Umax)
+    var mp = null;
+    if (cand.passed && cand.passed.length) {
+      mp = _applyUnifiedMapping_(mappings, feeName, vars, DEBUG);
+      if (!mp) {
+        var chosen = cand.passed[0] || {};
+        var gfmt = chosen.GroupeFmt || chosen.gfmt || chosen.groupeFmt || chosen.groupFmt || readParam_(ss, PARAM_KEYS.RETRO_GROUP_GROUPE_FMT) || '{{U2}}{{genreInitiale}}';
+        var cfmt = chosen.CategorieFmt || chosen.cfmt || chosen.categorieFmt || chosen.categoryFmt || readParam_(ss, PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT) || '{{U2}} {{genreInitiale}}';
+        mp = {
+          groupe: _ga_tpl_(gfmt, vars),
+          categorie: _ga_tpl_(cfmt, vars),
+          exclude: !!chosen.Exclude || !!chosen.exclude,
+          exclusiveGroup: chosen.ExclusiveGroup || chosen.exclusiveGroup || '',
+          code: chosen.Code || chosen.code || ''
+        };
+      }
+    } else {
+      if (!requireMp) {
+        var gfmtFb = readParam_(ss, PARAM_KEYS.RETRO_GROUP_GROUPE_FMT)    || '{{U2}}{{genreInitiale}}';
+        var cfmtFb = readParam_(ss, PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT) || '{{U2}} {{genreInitiale}}';
+        mp = { groupe: _ga_tpl_(gfmtFb, vars), categorie: _ga_tpl_(cfmtFb, vars), exclude: false, exclusiveGroup: '', code: '' };
+      } else {
+        return;
+      }
+    }
+
     if (mp && mp.exclude) { _dbg_(DEBUG, '[GART] excluded by mapping', { fee: feeName }); return; }
 
     var groupe = (mp && mp.groupe) || '';
@@ -378,28 +426,6 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     var exg    = (mp && mp.exclusiveGroup) || '';
     var code   = (mp && mp.code) || '';
 
-    // Pas de mapping
-    if (!mp) {
-      if (requireMp) {
-        errors.push({
-          level: 'error', code: 'ARTICLE_UNMAPPED', passeport: passK, nom: nom, prenom: prenom, feeName: feeName,
-          message: 'Aucun mapping article trouvé (requireMapping=TRUE)',
-          details: { tried: cand.triedAliases.slice(0, 20), matchedAlias: (cand.matchedAliases || []).slice(0, 5), U: U, genre: gInit }
-        });
-        _dbg_(DEBUG, '[GART] ARTICLE_UNMAPPED (requireMp=TRUE)', { fee: feeName, U: U, genre: gInit, matched: cand.matchedAliases });
-        return;
-      } else {
-        var gfmt = readParam_(ss, PARAM_KEYS.RETRO_GROUP_GROUPE_FMT)    || '{{U}}{{genreInitiale}}';
-        var cfmt = readParam_(ss, PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT) || '{{U}} {{genreInitiale}}';
-        groupe = _ga_tpl_(gfmt, vars);
-        categ  = _ga_tpl_(cfmt, vars);
-        _dbg_(DEBUG, '[GART] fallback group/category', { fee: feeName, groupe: groupe, categorie: categ });
-      }
-    } else {
-      _dbg_(DEBUG, '[GART] mapped', { fee: feeName, groupe: groupe, categorie: categ, code: code, exg: exg });
-    }
-
-    // Exclusivité
     if (exg) {
       perPassExclusive[passK] = perPassExclusive[passK] || {};
       perPassExclusive[passK][exg] = perPassExclusive[passK][exg] || [];
@@ -419,6 +445,7 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     rowOut[9] = categ;
 
     rows.push(rowOut);
+    _dbg_(DEBUG, '[GART] mapped/exported', { pass: passK, fee: feeName, groupe: groupe, categorie: categ, code: code, exg: exg });
   });
 
   // Conflits d’exclusivité
@@ -439,12 +466,13 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     });
   });
 
-  // CDP0 (warn) U9–U12 hors Adapté
+  // CDP0 (warn) U9–U12 hors Adapté → **inclure dans l'export** avec {{U2}}{{genreInitiale}} CDP0
   Object.keys(inscActivePass).forEach(function (passK) {
     var m = memberIdx[passK] || {};
-    var UU2 = _ga_computeUandU2_({ 'Date de naissance': m.dob, 'Naissance': m.dob }, seasonYear, '');
-    var U = UU2.U || '';
-    var uNum = parseInt(String(U).replace(/^U/i, ''), 10);
+    var UU2m = _ga_computeUandU2_({ 'Date de naissance': m.dob, 'Naissance': m.dob }, seasonYear, '');
+    var Um  = UU2m.U  || '';
+    var U2m = UU2m.U2 || '';
+    var uNum = parseInt(String(Um).replace(/^U/i, ''), 10);
     if (!(uNum >= 9 && uNum <= 12)) return;
 
     var isAdapte = !!perPassIsAdapte[passK];
@@ -458,16 +486,40 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
       count = a1 + a2;
     }
     if (!count) {
+      // Warn (historique/comm)
       errors.push({
         level: 'warn', code: 'CDP0', passeport: passK, nom: (m.nom || ''), prenom: (m.prenom || ''), feeName: '',
-        message: 'Membre U9–U12 sans CDP (1/2) — hors Adapté', details: { U: U }
+        message: 'Membre U9–U12 sans CDP (1/2) — hors Adapté', details: { U: Um }
       });
+
+      // **Ligne d'export synthétique CDP0**
+      var gInitM = m.genreInit || (m.genreLabel === 'Féminin' ? 'F' : (m.genreLabel === 'Masculin' ? 'M' : (m.genreLabel === 'Mixte' ? 'X' : '')));
+      var groupe = (U2m || '').concat(gInitM ? gInitM : '').concat(' CDP0'); // ex: U10M CDP0
+      var categ  = (U2m || '') + (gInitM ? (' ' + gInitM) : '');            // ex: U10 M
+
+      var nbCols = header.length;
+      var rowOut = new Array(nbCols).fill("");
+      rowOut[0] = _ga_norm_passport_(ss, passK);
+      rowOut[1] = m.nom || '';
+      rowOut[2] = m.prenom || '';
+      rowOut[3] = m.dob || '';
+      rowOut[8] = groupe;
+      rowOut[9] = categ;
+      rows.push(rowOut);
+
+      // (facultatif) noter l’exclusivité avec code "CDP0" dans le groupe CDP_ENTRAINEMENT
+      perPassExclusive[passK] = perPassExclusive[passK] || {};
+      perPassExclusive[passK]['CDP_ENTRAINEMENT'] = perPassExclusive[passK]['CDP_ENTRAINEMENT'] || [];
+      perPassExclusive[passK]['CDP_ENTRAINEMENT'].push({ feeName: 'CDP0', code: 'CDP0' });
+
+      _dbg_(DEBUG, '[GART] CDP0 exported', { pass: passK, groupe: groupe, categorie: categ });
     }
   });
 
   _dbg_(DEBUG, '[GART] done', { rows: rows.length, errors: errors.length });
   return { header: header, rows: rows, nbCols: header.length, errors: errors };
 }
+
 
 /* ===================== Écriture feuilles ===================== */
 

@@ -24,4 +24,48 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 });
+
+// Helper: renvoie la saison actuellement sélectionnée
+function _sid(){
+  var el = document.getElementById('seasonSelect');
+  return el && el.value ? String(el.value).trim() : '';
+}
+
+// Petit helper busy local (tu peux le remplacer par ton busy(...) si tu l'as déjà)
+function _busyReset(on, msg){
+  var badge = document.getElementById('resetStatus');
+  if (!badge) return;
+  if (on){ badge.textContent = msg || 'Exécution…'; }
+  else { badge.textContent = ''; }
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  var btn = document.getElementById('btnResetSeason');
+  if (!btn) return;
+
+  btn.onclick = function(){
+    var seasonId = _sid();
+    if (!seasonId){
+      (window.toast ? toast('Aucune saison sélectionnée.') : alert('Aucune saison sélectionnée.'));
+      return;
+    }
+    if (!confirm('Confirmer la réinitialisation des feuilles techniques pour cette saison ?')) return;
+
+    _busyReset(true, 'Exécution…');
+    google.script.run
+      .withSuccessHandler(function(res){
+        _busyReset(false, '');
+        if (!res || !res.ok){
+          (window.toast ? toast(res && res.error || 'Échec réinitialisation', 'error') : alert(res && res.error || 'Échec réinitialisation'));
+          return;
+        }
+        (window.toast ? toast('Réinitialisation complétée : ' + (res.data.cleared||[]).join(', ')) : alert('Réinitialisation complétée.'));
+      })
+      .withFailureHandler(function(err){
+        _busyReset(false, '');
+        (window.toast ? toast(String(err),'error') : alert(String(err)));
+      })
+      .resetSeasonData(seasonId);
+  };
+});
 </script>

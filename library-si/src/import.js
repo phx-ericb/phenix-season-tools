@@ -128,10 +128,43 @@ function importerDonneesSaison(seasonSheetId) {
   );
   appendImportLog_(ss, 'SCAN_OK', summary);
   // À la toute fin, après SCAN_OK
-try { evaluateSeasonRules(seasonSheetId || getSeasonId_()); } catch(e) { appendImportLog_(ss, 'RULES_FAIL', ''+e); }
+// --- 4) Règles
+try {
+  evaluateSeasonRules(seasonSheetId || getSeasonId_()); // la fonction logge déjà elle-même (OK/FAIL)
+} catch(e) {
+  appendImportLog_(ss, 'RULES_FAIL_WRAP', ''+e); // backup minimal
+}
+
+// --- 5) Enqueue des courriels
+// 5.1 confirmations (par secteurs)
+try { enqueueInscriptionNewBySectors(seasonSheetId || getSeasonId_()); } 
+catch(e) { appendImportLog_(ss, 'QUEUE_NEW_FAIL', ''+e); }
+
+// 5.2 erreurs (chaque code séparément pour mieux diagnostiquer)
+['U9_12_SANS_CDP','U7_8_SANS_2E_SEANCE'].forEach(function(code){
+  try {
+    var qErr = enqueueValidationEmailsByErrorCode(seasonSheetId || getSeasonId_(), code);
+    appendImportLog_(ss, 'QUEUE_ERRMAIL_OK', JSON.stringify({code: code, queued: qErr.queued}));
+  } catch(e) {
+    appendImportLog_(ss, 'QUEUE_ERRMAIL_FAIL', JSON.stringify({code: code, error: ''+e}));
+  }
+});
+
+// --- 6) Worker d’envoi
+try {
+  appendImportLog_(ss, 'MAIL_WORKER_BEGIN', 'start');
+var workerRes = sendPendingOutbox(seasonSheetId || getSeasonId_());
+appendImportLog_(ss, 'MAIL_WORKER_DONE', JSON.stringify(workerRes)); // le worker logge déjà "MAIL_WORKER"
+
+ } catch(e) {
+   appendImportLog_(ss, 'MAIL_WORKER_FAIL', ''+e);
+ }
+
 
   return summary;
 }
+
+
 
 /** Liste les fichiers dont le nom contient l’un des patterns (niveau courant uniquement) */
 function scanImportFiles_(folder, namePatterns) {

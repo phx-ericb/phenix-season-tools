@@ -53,12 +53,39 @@ function evaluateSeasonRules(seasonSheetId) {
   // Helpers "dictionnaire sans prototype"
   function dict_(){ return Object.create(null); }
 
+  // Helper : renvoie true si la ligne correspond au programme "Adapté"
+function isAdapteMember_(row){
+  function norm(s){ s=String(s==null?'':s); try{s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,'');}catch(e){} return s.toUpperCase(); }
+  var cat = norm(row['Catégorie']||row['Categorie']||'');
+  var frais = norm(row['Nom du frais']||row['Frais']||row['Produit']||'');
+  if (cat.indexOf('ADAPTE') !== -1) return true;
+  if (frais.indexOf('ADAPTE') !== -1) return true;
+
+  // Optionnel : si tu veux le baser explicitement sur MAPPINGS (Type=member, AliasContains='Adapté')
+  try{
+    var mapObj = readSheetAsObjects_(ss.getId(), 'MAPPINGS'); // ss est dispo dans evaluateSeasonRules
+    var maps = (mapObj && mapObj.rows) ? mapObj.rows : [];
+    var txt = norm((row['Catégorie']||row['Categorie']||'') + ' ' + (row['Nom du frais']||row['Frais']||row['Produit']||''));
+    for (var i=0;i<maps.length;i++){
+      var mp = maps[i];
+      if (String(mp['Type']||'').toLowerCase()!=='member') continue;
+      var alias = norm(mp['AliasContains']||mp['Alias']||'');
+      if (alias && alias.indexOf('ADAPTE')!==-1){
+        if (txt.indexOf(alias)!==-1 || txt.indexOf('ADAPTE')!==-1) return true;
+      }
+    }
+  }catch(e){}
+  return false;
+}
+
+
   // TOUJOURS initialiser avant usage
   var setInscPS = dict_();
   var dupCount = dict_();
   var mapByPassSeasonGroup = dict_();
   var mapInscByKey = dict_();
   var hasCdp = dict_();
+  var hasU7U8Second = dict_();
 
   // Garde-fou si readSheetAsObjects_ renvoie qqch de falsy
   var inscAct = (insc.rows || []).filter(isActive_);
@@ -86,17 +113,17 @@ shErr.getRange('A:A').setNumberFormat('@');
     return (sevRank[(sev||'warn')] || 1) >= (sevRank[threshold] || 1);
   }
 
+  var errBuf = []; // buffer d'écriture en batch
 
 function writeErr_(sev, scope, type, r, msg, ctxObj) {
   if (dryRun) return;
   if (!shouldWrite_(sev)) return;
 
   var passRaw = r['Passeport #'] || r['Passeport'] || '';
-  // ⬇️  utilise la version "avec apostrophe" pour forcer texte
-  var passTxt = normalizePassportToText8_(passRaw); // ex: "'00123456"
+  var passTxt = normalizePassportToText8_(passRaw);
 
-  shErr.appendRow([
-    passTxt,  // <-- garde l’apostrophe ici, elle ne s’affiche pas en UI
+  errBuf.push([
+    passTxt,
     r['Nom'] || '',
     (r['Prénom'] || r['Prenom'] || ''),
     (((r['Prénom']||r['Prenom']||'') + ' ' + (r['Nom']||'')).trim()),
@@ -110,6 +137,7 @@ function writeErr_(sev, scope, type, r, msg, ctxObj) {
     new Date()
   ]);
 }
+
 
 
 
@@ -212,6 +240,7 @@ artAct.forEach(function(a){
     }
   });
   inscAct.forEach(function(r){
+    if (isAdapteMember_(r)) return;
     var uNum = parseInt(String(deriveUFromRow_(r)||'').replace(/^U/i,''),10);
     if (uNum>=9 && uNum<=12 && !(hasCdp && hasCdp[_psKey_(r)])) {
       var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, r['Passeport #']);
@@ -219,9 +248,66 @@ artAct.forEach(function(a){
     }
   });
 
+  // ===== (6) U7–U8 sans 2e séance (warning) =====
+// Idée: marquer (Passeport||Saison) qui ont un article "2e séance", puis loguer ceux qui n'en ont pas.
+// On accepte 2 sources de vérité :
+//  - via MAPPINGS (ExclusiveGroup ou Code == 'U7U8_2E_SEANCE')
+//  - fallback regex sur le libellé ('2e' + 'séance' ou 'deuxieme séance'), sans accents
+
+
+
+artAct.forEach(function(a){
+  var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
+  var item = catalog.match(raw);
+  var U = deriveUFromRow_(a);
+  var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
+
+  // Ne marque que si l'article est pour U7 ou U8
+  if (!uNum || isNaN(uNum) || (uNum !== 7 && uNum !== 8)) return;
+
+  var matchByMapping =
+    (item && (String(item.ExclusiveGroup||'') === 'U7U8_2E_SEANCE' || String(item.Code||'') === 'U7U8_2E_SEANCE'));
+
+  // fallback : robustifier la détection par texte brut (sans accents)
+  function norm(s){ return String(s||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+  var N = norm(raw);
+  var matchByName =
+    (/(^|\s)2\s*E(\s|$)/.test(N) && /SEANCE/.test(N)) || /DEUXIEME\s+SEANCE/.test(N);
+
+  if (matchByMapping || matchByName) {
+    hasU7U8Second[_psKey_(a)] = true;
+  }
+});
+
+inscAct.forEach(function(r){
+   if (isAdapteMember_(r)) return; 
+  var U = deriveUFromRow_(r);
+  var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
+  if (uNum === 7 || uNum === 8) {
+    if (!(hasU7U8Second && hasU7U8Second[_psKey_(r)])) {
+      var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, r['Passeport #']);
+      writeErr_('warn','INSCRIPTIONS','U7_8_SANS_2E_SEANCE', r, 'U7–U8 sans 2e séance', { U: U, articlesActifs: arts });
+    }
+  }
+});
+
 
   // Résumé
-  appendImportLog_(ss, dryRun ? 'RULES_OK_DRYRUN' : 'RULES_OK', JSON.stringify({found:found, errors:errors, warns:warns}));
+  // appendImportLog_(ss, dryRun ? 'RULES_OK_DRYRUN' : 'RULES_OK', JSON.stringify({found:found, errors:errors, warns:warns}));
+
+if (!dryRun && errBuf.length) {
+  var W = 12; // largeur d'en-tête ERREURS
+  var start = shErr.getLastRow() + 1;
+  shErr.insertRowsAfter(shErr.getLastRow(), errBuf.length);
+  // pad/troncature défensive
+  var rows = errBuf.map(r => {
+    r = (r || []).slice(0, W);
+    while (r.length < W) r.push('');
+    return r;
+  });
+  shErr.getRange(start, 1, rows.length, W).setValues(rows);
+}
+  
   return {found:found, errors:errors, warns:warns, dryRun: dryRun};
 }
 

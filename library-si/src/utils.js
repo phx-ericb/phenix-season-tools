@@ -30,6 +30,8 @@ function getSeasonSpreadsheet_(seasonSheetId) {
 }
 
 
+  
+
 /** Récupère une feuille, ou la crée vide avec un header si fourni */
 function getSheetOrCreate_(ss, name, header) {
   var sh = ss.getSheetByName(name);
@@ -457,6 +459,30 @@ function jsonCompact_(obj) {
   try { return JSON.stringify(obj); } catch(e){ return '{}'; }
 }
 
+/** Harmonise une valeur "Genre" provenant de MAPPINGS.
+ *  - '' | '*'                    -> '*'
+ *  - MF | M/F | F/M | FEM/MASC   -> '*'
+ *  - MIXTE | MIX | NB | X        -> 'X' (catégorie "neutre")
+ *  - M | F                       -> inchangé
+ *  - Autre                       -> '*' (par défaut: mixte)
+ */
+function _normMapGenre(g) {
+  var v = String(g == null ? '' : g).trim().toUpperCase();
+  if (!v || v === '*') return '*';
+
+  var vClean = v.replace(/\s+/g, '');
+  var AS_X   = ['MIXTE','MIX','NB','NONBINAIRE','NON-BINAIRE','X'];
+  var AS_ALL = ['MF','M/F','F/M','FEM/MASC','MASC/FEM'];
+
+  if (AS_X.indexOf(vClean)   >= 0) return 'X';
+  if (AS_ALL.indexOf(vClean) >= 0) return '*';
+  if (vClean === 'M' || vClean === 'F') return vClean;
+
+  // Valeur inconnue → considérer "tous" pour ne pas bloquer
+  return '*';
+}
+
+/* ===== Lecture MAPPINGS unifiés (incl. ExclusiveGroup) ===== */
 /* ===== Lecture MAPPINGS unifiés (incl. ExclusiveGroup) ===== */
 function _loadUnifiedGroupMappings_(ss) {
   // 1) feuille
@@ -477,7 +503,7 @@ function _loadUnifiedGroupMappings_(ss) {
   if (headerIdx === -1) return [];
 
   // 3) index des colonnes
-  var H = (data[headerIdx] || []).map(function (h) { return String(h || '').trim(); });
+  var H = (data[headerIdx] || []).map(function(h){ return String(h || '').trim(); });
   function idx(k) { var i = H.indexOf(k); return i < 0 ? null : i; }
 
   var iType = idx('Type'), iAli = idx('AliasContains'), iUmin = idx('Umin'), iUmax = idx('Umax'),
@@ -486,58 +512,67 @@ function _loadUnifiedGroupMappings_(ss) {
 
   if (iType == null || iAli == null) return [];
 
-  // 4) lecture des lignes
-// 4) lecture des lignes (REMPLACE TOUT CE BLOC)
-var out = [];
-function _t(v) { return String(v == null ? '' : v).trim(); }            // trim simple
-function _tu(v) { return _t(v).toUpperCase(); }                         // trim + upper
-function _tl(v) { return _t(v).toLowerCase(); }                         // trim + lower
-function _toIntOrNull(v) {
-  var s = _t(v); if (s === '') return null;
-  var n = parseInt(s, 10); return isNaN(n) ? null : n;
-}
-
-for (var r = headerIdx + 1; r < data.length; r++) {
-  var row = data[r] || [];
-  // ligne vide ?
-  var isEmpty = true;
-  for (var c = 0; c < row.length; c++) {
-    if (_t(row[c]) !== '') { isEmpty = false; break; }
+  // helpers de nettoyage
+  function _t(v) {
+    // trim + supprime les espaces insécables
+    return String(v == null ? '' : v).replace(/\u00A0/g, ' ').trim();
   }
-  if (isEmpty) continue;
+  function _toIntOrNull(v) {
+    var s = _t(v); if (s === '') return null;
+    var n = parseInt(s, 10); return isNaN(n) ? null : n;
+  }
+  function _normGenreCell(g) {
+    var v = _t(g).toUpperCase();
+    // on n'accepte QUE M, F, ou '*' (joker). Tout le reste => joker.
+    if (v === 'M' || v === 'F' || v === '*') return v;
+    if (!v) return '*';
+    return '*';
+  }
 
-  var type = (iType == null) ? '' : _tl(row[iType]);                    // <-- TRIM + lower
-  var ali  = (iAli  == null) ? '' : _t(row[iAli]);                      // <-- TRIM
-  var umin = (iUmin == null) ? null : _toIntOrNull(row[iUmin]);
-  var umax = (iUmax == null) ? null : _toIntOrNull(row[iUmax]);
-  var gen  = (iGen  == null) ? '*' : _tu(row[iGen] || '*');             // <-- TRIM + upper
-  var grp  = (iG    == null) ? '' : _t(row[iG]);                        // <-- TRIM
-  var cat  = (iC    == null) ? '' : _t(row[iC]);                        // <-- TRIM
-  var ex   = (iEx   == null) ? '' : _tl(row[iEx]);                      // <-- TRIM + lower
-  var pri  = (iPr   == null) ? null : _toIntOrNull(row[iPr]);
-  var exg  = (iX    == null) ? '' : _t(row[iX]);                        // <-- TRIM
-  var code = (iCode == null) ? '' : _t(row[iCode]);                     // <-- TRIM
+  // 4) lecture des lignes
+  var out = [];
+  for (var r = headerIdx + 1; r < data.length; r++) {
+    var row = data[r] || [];
 
-  out.push({
-    Type: type,                                // "article" / "member"
-    AliasContains: ali,                        // propre (trim)
-    Umin: umin,                                // nombre ou null
-    Umax: umax,
-    Genre: gen || '*',                         // "M" | "F" | "X" | "*"
-    GroupeFmt: grp,
-    CategorieFmt: cat,
-    Exclude: ex === 'true',
-    Priority: (pri == null ? 100 : pri),
-    ExclusiveGroup: exg,
-    Code: code
+    // ligne complètement vide ?
+    var isEmpty = true;
+    for (var c = 0; c < row.length; c++) {
+      if (_t(row[c]) !== '') { isEmpty = false; break; }
+    }
+    if (isEmpty) continue;
+
+    var type = (iType == null) ? '' : String(_t(row[iType])).toLowerCase(); // "article"/"member"
+    var ali  = (iAli  == null) ? '' : _t(row[iAli]);
+    var umin = (iUmin == null) ? null : _toIntOrNull(row[iUmin]);
+    var umax = (iUmax == null) ? null : _toIntOrNull(row[iUmax]);
+    var gen  = (iGen  == null) ? '*' : _normGenreCell(row[iGen]);
+    var grp  = (iG    == null) ? '' : _t(row[iG]);
+    var cat  = (iC    == null) ? '' : _t(row[iC]);
+    var ex   = (iEx   == null) ? '' : String(_t(row[iEx])).toLowerCase();
+    var pri  = (iPr   == null) ? null : _toIntOrNull(row[iPr]);
+    var exg  = (iX    == null) ? '' : _t(row[iX]);
+    var code = (iCode == null) ? '' : _t(row[iCode]);
+
+    out.push({
+      Type: type,                 // "article" / "member"
+      AliasContains: ali,         // propre (trim + nbsp fix)
+      Umin: umin,                 // number | null
+      Umax: umax,
+      Genre: gen,                 // 'M' | 'F' | '*'
+      GroupeFmt: grp,
+      CategorieFmt: cat,
+      Exclude: ex === 'true',
+      Priority: (pri == null ? 100 : pri),
+      ExclusiveGroup: exg,
+      Code: code
+    });
+  }
+
+  // 5) tri (priorité desc, puis alias plus long)
+  out.sort(function(a, b) {
+    if (a.Priority !== b.Priority) return b.Priority - a.Priority;
+    return (b.AliasContains || '').length - (a.AliasContains || '').length;
   });
-}
 
-// 5) tri (inchangé)
-out.sort(function (a, b) {
-  if (a.Priority !== b.Priority) return b.Priority - a.Priority;
-  return (b.AliasContains || '').length - (a.AliasContains || '').length;
-});
-return out;
-
+  return out;
 }
