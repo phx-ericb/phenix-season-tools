@@ -95,7 +95,90 @@ if (typeof collectEmailsFromRow_ !== 'function') {
     return Object.keys(set).join(',');
   }
 }
+
+
+// ===== Coach detection shim (lib-safe) =====
+// Utilise la version lib (rules.js) si dispo, sinon fallback autonome.
+// Zéro SpreadsheetApp.getActive() — on passe "ss".
+
+function _coachCsv_(ss){
+  var csv = '';
+  try { if (typeof readParam_ === 'function') csv = readParam_(ss, 'RETRO_COACH_FEES_CSV') || ''; } catch(_){}
+  if (!csv) csv = 'Entraîneurs, Entraineurs, Entraîneur, Entraineur, Coach, Coaches';
+  return csv;
+}
+function _normNoAccentsLower_(s){
+  s = String(s == null ? '' : s).trim();
+  try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g,''); } catch(_){}
+  return s.toLowerCase();
+}
+function _isCoachFeeByNameSafe_(ss, name){
+  // 1) Si la lib rules.js fournit isCoachFeeByName_, on l'utilise
+  try { if (typeof isCoachFeeByName_ === 'function') return !!isCoachFeeByName_(ss, name); } catch(_){}
+  // 2) Fallback par mots-clés
+  var v = _normNoAccentsLower_(name);
+  if (!v) return false;
+  var toks = _coachCsv_(ss).split(',').map(_normNoAccentsLower_).filter(Boolean);
+  if (toks.some(function(t){ return v === t || v.indexOf(t) >= 0; })) return true;
+  // filet
+  return /(entraineur|entra[îi]neur|coach)/i.test(String(name||''));
+}
+function _isCoachMemberSafe_(ss, row){
+  var name = row ? (row['Nom du frais'] || row['Frais'] || row['Produit'] || '') : '';
+  // 1) Si la lib rules.js fournit isCoachMember_, on l'utilise
+  try { if (typeof isCoachMember_ === 'function') return !!isCoachMember_(ss, row); } catch(_){}
+  // 2) Fallback
+  return _isCoachFeeByNameSafe_(ss, name);
+}
+
+
+
 /* ======================== Helpers communs ======================== */
+
+function _rg_csvEsc_(v){ v=v==null?'':String(v).replace(/"/g,'""'); return /[",\n;]/.test(v)?('"'+v+'"'):v; }
+
+/** "id1, id2 ; id3" -> ['id1','id2','id3'] */
+function _parseAttachIdsCsv_(csv) {
+  if (!csv) return [];
+  return String(csv)
+    .split(/[,\s;]+/)
+    .map(function(s){ return String(s||'').trim(); })
+    .filter(Boolean);
+}
+
+/** IDs Drive -> Array<Blob> (ignore IDs invalides / accès refusé) */
+function _getAttachBlobsByIds_(ids) {
+  var blobs = [];
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    try {
+      var f = DriveApp.getFileById(id);
+      blobs.push(f.getBlob());
+    } catch(e) {
+      try { Logger.log('ATTACH_WARN ' + id + ': ' + e); } catch(_) {}
+    }
+  }
+  return blobs;
+}
+
+/** CSV d’IDs Drive -> Array<Blob> (dedup simple via nom+size) */
+function _attachmentsFromCsv_(csv) {
+  var ids = _parseAttachIdsCsv_(csv);
+  var blobs = _getAttachBlobsByIds_(ids);
+  if (!blobs || !blobs.length) return [];
+  // dédoublonnage basique : nom+taille (évite doublons si sector+row incluent le même ID)
+  var seen = {};
+  var unique = [];
+  for (var i=0;i<blobs.length;i++){
+    var b = blobs[i];
+    var key = (b.getName()||'') + '|' + (b.getBytes() ? b.getBytes().length : b.getDataAsString().length);
+    if (!seen[key]) { seen[key]=1; unique.push(b); }
+  }
+  return unique;
+}
+
+
+
 function _normText(s){ s=String(s==null?'':s); try{s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,'');}catch(e){} return s.trim(); }
 function renderTemplate_(tpl, data){ tpl=String(tpl==null?'':tpl); return tpl.replace(/{{\s*([\w.]+)\s*}}/g,function(_,k){ var v=(data.hasOwnProperty(k)?data[k]:''); return (v==null?'':String(v)); }); }
 // Helpers (ajoute-les si non présents dans le fichier)
@@ -115,22 +198,35 @@ function _U_U2_FromRow_(row){
 }
 function buildDataFromRow_(row) {
   var d = _U_U2_FromRow_(row);
+
+  var prenomRaw = row['Prénom']||row['Prenom']||'';
+  var nomRaw    = row['Nom']||'';
+
+  var prenomPC  = _toProperCase_(prenomRaw);
+  var nomPC     = _toProperCase_(nomRaw);
+
   return {
     passeport:  row['Passeport #'] || '',
-    nom:        row['Nom'] || '',
-    prenom:     row['Prénom'] || row['Prenom'] || '',
-    nomcomplet: (((row['Prénom']||row['Prenom']||'') + ' ' + (row['Nom']||'')).trim()),
+    nom:        nomPC,
+    prenom:     prenomPC,
+    nomcomplet: (prenomPC + ' ' + nomPC).trim(),
     saison:     row['Saison'] || '',
     frais:      row['Nom du frais'] || row['Frais'] || row['Produit'] || '',
-    categorie:  row['Catégorie'] || row['Categorie'] || '',        // <-- {{categorie}}
-    secteur:    deriveSectorFromRow_(row) || '',                    // <-- {{secteur}}
-    U:          d.U || '',                                          // <-- {{U}}
-    U2:         d.U2 || '',                                         // <-- {{U2}}
-    U_num:      d.n,                                                // <-- {{U_num}}
+    categorie:  row['Catégorie'] || row['Categorie'] || '',
+    secteur:    deriveSectorFromRow_(row) || '',
+    U:          d.U || '',
+    U2:         d.U2 || '',
+    U_num:      d.n,
     genre:      row['Identité de genre'] || row['Identité de Genre'] || row['Genre'] || '',
     genreInitiale: _genreInitFromRow_(row)
   };
 }
+
+function _toProperCase_(s) {
+  s = String(s||'').toLowerCase();
+  return s.replace(/\b\w/g, function(c){ return c.toUpperCase(); });
+}
+
 
 /** Renvoie true si la ligne INSCRIPTIONS matche un mapping member avec Exclude=TRUE */
 function matchesMemberExcludeMapping_(ss, row){
@@ -318,6 +414,12 @@ function sendPendingOutbox(seasonSheetId) {
     try {
       if (typeof isAdapteMember_ === 'function' && isAdapteMember_(row)) return 'excluded_adapte_rule';
     } catch(e){}
+
+   // ⛔ Coach : pas de confirmations
+   try {
+     if (_isCoachMemberSafe_(ss, row)) return 'excluded_coach_fee';
+   } catch(e){}
+
     var txt = _composeText_(row);
     if (txt.indexOf('ADAPTE') !== -1) return 'excluded_adapte_text';
     if (txt.indexOf('ADULTE') !== -1) return 'excluded_adulte_text';
@@ -370,8 +472,43 @@ function sendPendingOutbox(seasonSheetId) {
       continue;
     }
 
-    var rcptDefault = resolveRecipient_(ss, type, fRow);
-    var subject = (row['Sujet'] || '').trim();
+// -- Résolution destinataires (secteur > finale > STAGING fallback)
+var rcptDefault = { to:'', cc:'' };
+
+// overrides secteur (si un secteur s'applique plus tard)
+if (s && s.to) rcptDefault.to = s.to;
+if (s && s.cc) rcptDefault.cc = s.cc;
+
+// sinon: essaie sur la ligne finale
+if (!rcptDefault.to) {
+  var csv = readParam_(ss, PARAM_KEYS.TO_FIELDS_INSCRIPTIONS) || 'Courriel,Parent 1 - Courriel,Parent 2 - Courriel';
+  var toFinal = collectEmailsFromRow_(fRow || {}, csv);
+  if (toFinal) rcptDefault.to = toFinal;
+}
+
+// si encore vide ET type ≠ INSCRIPTION_NEW: secours via STAGING
+if (!rcptDefault.to && type !== 'INSCRIPTION_NEW') {
+  var sRow = fetchStagingRowByKeyHash_(ss, keyHash);
+  if (sRow) {
+    var csv2 = readParam_(ss, PARAM_KEYS.TO_FIELDS_INSCRIPTIONS) || 'Courriel,Parent 1 - Courriel, Parent 2 - Courriel';
+    var toStage = collectEmailsFromRow_(sRow, csv2);
+    if (toStage) rcptDefault.to = toStage;
+
+    // bonus: en profite pour enrichir le payload (prenom/nom/U...) si vide
+    try {
+      var p2 = buildDataFromRow_(sRow);
+      ['prenom','nom','nomcomplet','U','U2','U_num','categorie','secteur'].forEach(function(k){
+        if (!payload[k] && p2[k]) payload[k] = p2[k];
+      });
+    } catch(_) {}
+  }
+}
+
+// CC par défaut selon tes PARAMS « confirmation » (ou ajoute des PARAMS spécifiques si tu veux)
+if (!rcptDefault.cc) rcptDefault.cc = readParam_(ss, PARAM_KEYS.MAIL_CC_NEW_INSCRIPTIONS) || '';
+
+
+var subject = (row['Sujet'] || '').trim();
     var bodyHtml = (row['Corps'] || '').trim();
     var attachments = _attachmentsFromCsv_(row['Attachments']);
 
@@ -415,26 +552,62 @@ function sendPendingOutbox(seasonSheetId) {
     var replyTo = (s && s.replyTo) || undefined;
 
     if (s && s.attachCsv) attachments = attachments.concat(_attachmentsFromCsv_(s.attachCsv));
+// === Resolve DRY behavior ===
+var dryRun = (readParam_(ss, PARAM_KEYS.DRY_RUN) || 'FALSE').toUpperCase() === 'TRUE';
+var redirect = readParam_(ss, 'DRY_REDIRECT_EMAIL'); // new param in PARAMS
 
-    if (!dry) {
-      if (useGmailApp) {
-        GmailApp.sendEmail(to, subject, '', {
-          htmlBody: bodyHtml,
-          cc: cc || undefined,
-          replyTo: replyTo || undefined,
-          attachments: (attachments.length ? attachments : undefined),
-          name: fromName
-        });
-      } else {
-        MailApp.sendEmail({
-          to: to, cc: cc, replyTo: replyTo,
-          subject: subject,
-          htmlBody: bodyHtml,
-          attachments: (attachments.length ? attachments : null),
-          name: fromName
-        });
-      }
-    }
+// Build a safe recipient set for DRY
+var resolvedTo = to;
+var resolvedCc = cc;
+var resolvedReplyTo = replyTo;
+var resolvedSubject = subject;
+var resolvedHtml = bodyHtml;
+
+if (dryRun && redirect) {
+  // Redirige tout vers l’adresse de test; garde l’original en mémo dans le corps
+  resolvedSubject = '[DRY → ' + redirect + '] ' + subject;
+
+  // Ajoute un encart debug au bas du HTML (les headers custom ne sont pas supportés)
+  var debugBlock =
+    '<hr style="margin:16px 0;border:0;border-top:1px solid #ddd">' +
+    '<div style="font:12px/1.4 system-ui,Arial,sans-serif;color:#555">' +
+      '<div><b>DRY RUN</b> : ce message a été redirigé.</div>' +
+      '<div><b>Destinataires (original)</b> : ' + _rg_csvEsc_(to) + (cc ? (' | CC: ' + _rg_csvEsc_(cc)) : '') + '</div>' +
+      (replyTo ? ('<div><b>Reply-To</b> : ' + _rg_csvEsc_(replyTo) + '</div>') : '') +
+    '</div>';
+
+  resolvedHtml = (bodyHtml || '') + debugBlock;
+
+  // Forcer l’envoi vers l’adresse de test
+  resolvedTo = redirect;
+  resolvedCc = '';          // neutre en DRY
+  resolvedReplyTo = '';     // neutre en DRY
+}
+
+if (dryRun && !redirect) { appendImportLog_(ss, 'MAIL_DRY_NO_REDIRECT', 'DRY_RUN sans DRY_REDIRECT_EMAIL: envoi bloqué'); return; }
+
+
+// === Envoi (inchangé, mais avec les variables "resolved*") ===
+if (useGmailApp) {
+  GmailApp.sendEmail(resolvedTo, resolvedSubject, '', {
+    htmlBody: resolvedHtml,
+    cc: resolvedCc || undefined,
+    replyTo: resolvedReplyTo || undefined,
+    attachments: (attachments.length ? attachments : undefined),
+    name: fromName
+  });
+} else {
+  MailApp.sendEmail({
+    to: resolvedTo,
+    cc: resolvedCc || undefined,
+    replyTo: resolvedReplyTo || undefined,
+    subject: resolvedSubject,
+    htmlBody: resolvedHtml,
+    attachments: (attachments.length ? attachments : null),
+    name: fromName
+  });
+}
+
 
     // marque envoyé (par ligne; on peut optimiser si les lignes sont contiguës)
     shOut.getRange(i + 2, idx['SentAt']).setValue(new Date());
@@ -537,6 +710,8 @@ function enqueueInscriptionNewBySectors(seasonSheetId){
 
   finals.forEach(function(r){
     // KeyHash stable
+    // ⛔ On n'envoie pas de confirmations aux "frais coach"
+    if (_isCoachMemberSafe_(ss, r)) return;
     var keyColsCsv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
     var keyStr = keyColsCsv.split(',').map(function(kc){ kc=kc.trim(); return r[kc] == null ? '' : String(r[kc]); }).join('||');
     var kh = Utilities.base64EncodeWebSafe(Utilities.newBlob(keyStr).getBytes());
@@ -654,6 +829,9 @@ function enqueueValidationEmailsByErrorCode(seasonSheetId, errorCode){
 
     var k = keyHashAndRowFor(passport, saison);
     if (!k.kh) continue;
+
+// ⛔ Jamais d'e-mail "erreur" aux coachs
+if (_isCoachMemberSafe_(ss, k.row)) continue;
 
     // skip si déjà en OUTBOX
     if (existing[errorCode+'||'+k.kh]) continue;

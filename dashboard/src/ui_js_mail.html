@@ -1,287 +1,343 @@
 <script>
-// ============ COURRIELS (SECTEURS) ============
+  // ============ COURRIELS (SECTEURS) ============
 
-// Helpers
-function _sid(){ return document.querySelector('#seasonSelect')?.value || ''; }
-function $m(q,root){ return (root||document).querySelector(q); }
-function $$m(q,root){ return Array.from((root||document).querySelectorAll(q)); }
-function toast(msg){ try{ window.toast(msg); }catch(e){ alert(msg); } }
+  // Helpers
+  function _sid() { return document.querySelector('#seasonSelect')?.value || ''; }
+  function $m(q, root) { return (root || document).querySelector(q); }
+  function $$m(q, root) { return Array.from((root || document).querySelectorAll(q)); }
+  function toast(msg) { try { window.toast(msg); } catch (e) { alert(msg); } }
 
-// Busy helpers (liste)
-const MAILBUSY = {
-  show(msg){ const b=$m('#busy-mail'); if(!b) return; b.classList.add('show'); $m('.busy-text',b).textContent = msg || '…'; },
-  hide(){ const b=$m('#busy-mail'); if(!b) return; b.classList.remove('show'); }
-};
+  // Busy helpers (liste)
+  const MAILBUSY = {
+    show(msg) { const b = $m('#busy-mail'); if (!b) return; b.classList.add('show'); $m('.busy-text', b).textContent = msg || '…'; },
+    hide() { const b = $m('#busy-mail'); if (!b) return; b.classList.remove('show'); }
+  };
 
-// Spinner inline dans les boutons
-function btnBusy(btn, on){
-  if(!btn) return;
-  let sp = btn.querySelector('.spinner');
-  if(!sp){
-    sp = document.createElement('span');
-    sp.className = 'spinner';
-    sp.style.marginLeft = '8px';
-    btn.appendChild(sp);
+  // Spinner inline dans les boutons
+  function btnBusy(btn, on) {
+    if (!btn) return;
+    let sp = btn.querySelector('.spinner');
+    if (!sp) {
+      sp = document.createElement('span');
+      sp.className = 'spinner';
+      sp.style.marginLeft = '8px';
+      btn.appendChild(sp);
+    }
+    sp.style.display = on ? 'inline-block' : 'none';
+    btn.disabled = !!on;
   }
-  sp.style.display = on ? 'inline-block' : 'none';
-  btn.disabled = !!on;
-}
 
-// Modèle
-const MailModel = { items: [], editing: null };
+  // Modèle
+  const MailModel = { items: [], editing: null };
 
-// Rendu liste
-function mail_render(){
-  const tbl = $m('#mailTable');
-  if(!tbl) return;
+  // Rendu liste
+  function mail_render() {
+    const tbl = $m('#mailTable');
+    if (!tbl) return;
 
-  tbl.innerHTML = '';
-  const thead = document.createElement('thead');
-  thead.innerHTML = '<tr><th>Label</th><th>Umin–Umax</th><th>Genre</th><th>Active</th><th>PJ</th><th>Actions</th></tr>';
-  tbl.appendChild(thead);
+    tbl.innerHTML = '';
+    const thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>Label</th><th>Umin–Umax</th><th>Genre</th><th>Active</th><th>PJ</th><th>Actions</th></tr>';
+    tbl.appendChild(thead);
 
-  const tbody = document.createElement('tbody');
-  if(!MailModel.items.length){
-    const tr = document.createElement('tr');
-    const td = document.createElement('td');
-    td.colSpan = 6; td.textContent = 'Aucun secteur'; td.style.color='#64748b';
-    tr.appendChild(td); tbody.appendChild(tr);
-  } else {
-    MailModel.items.forEach(it=>{
+    const tbody = document.createElement('tbody');
+    if (!MailModel.items.length) {
       const tr = document.createElement('tr');
-      function td(t){ const e=document.createElement('td'); e.textContent=t; return e; }
-      tr.appendChild(td(it.Label||''));
-      tr.appendChild(td((it.Umin||'') + '–' + (it.Umax||'')));
-      tr.appendChild(td(it.Genre||'*'));
-      tr.appendChild(td(String(it.Active).toLowerCase()==='false'?'Non':'Oui'));
-      tr.appendChild(td((String(it.AttachIdsCSV||'').split(/[,\s;]+/).filter(Boolean).length)||0));
+      const td = document.createElement('td');
+      td.colSpan = 6; td.textContent = 'Aucun secteur'; td.style.color = '#64748b';
+      tr.appendChild(td); tbody.appendChild(tr);
+    } else {
+      MailModel.items.forEach(it => {
+        const tr = document.createElement('tr');
+        function td(t) { const e = document.createElement('td'); e.textContent = t; return e; }
+        tr.appendChild(td(it.Label || ''));
+        tr.appendChild(td((it.Umin || '') + '–' + (it.Umax || '')));
+        tr.appendChild(td(it.Genre || '*'));
+        tr.appendChild(td(String(it.Active).toLowerCase() === 'false' ? 'Non' : 'Oui'));
+        tr.appendChild(td((String(it.AttachIdsCSV || '').split(/[,\s;]+/).filter(Boolean).length) || 0));
 
-      const tdAct = document.createElement('td');
-      const bEdit = document.createElement('button'); bEdit.className='btn'; bEdit.textContent='Éditer';
-      const bDup  = document.createElement('button'); bDup.className='btn secondary'; bDup.style.marginLeft='6px'; bDup.textContent='Dupliquer';
-      const bDel  = document.createElement('button'); bDel.className='btn'; bDel.style.marginLeft='6px'; bDel.style.background='#dc2626'; bDel.textContent='Supprimer';
+        const tdAct = document.createElement('td');
+        const bEdit = document.createElement('button'); bEdit.className = 'btn'; bEdit.textContent = 'Éditer';
+        const bDup = document.createElement('button'); bDup.className = 'btn secondary'; bDup.style.marginLeft = '6px'; bDup.textContent = 'Dupliquer';
+        const bDel = document.createElement('button'); bDel.className = 'btn'; bDel.style.marginLeft = '6px'; bDel.style.background = '#dc2626'; bDel.textContent = 'Supprimer';
 
-      bEdit.onclick = ()=> mail_openModal(it);
-      bDup.onclick  = ()=>{
-        btnBusy(bDup, true);
-        google.script.run
-          .withSuccessHandler(res=>{ btnBusy(bDup,false);
-            if(!res.ok){ toast(res.error||'Erreur'); return; }
-            mail_openModal(res.data.item);
-            mail_load();
-          })
-          .withFailureHandler(err=>{ btnBusy(bDup,false); console.error(err); toast('Erreur duplication'); })
-          .duplicateMailSector(_sid(), it.SecteurId);
-      };
-      bDel.onclick  = ()=>{
-        if(!confirm('Supprimer le secteur "'+(it.Label||it.SecteurId)+'" ?')) return;
-        btnBusy(bDel, true);
-        google.script.run
-          .withSuccessHandler(res=>{ btnBusy(bDel,false); if(!res.ok){ toast(res.error||'Erreur'); return; } mail_load(); })
-          .withFailureHandler(err=>{ btnBusy(bDel,false); console.error(err); toast('Erreur suppression'); })
-          .deleteMailSector(_sid(), it.SecteurId);
-      };
+        bEdit.onclick = () => mail_openModal(it);
+        bDup.onclick = () => {
+          btnBusy(bDup, true);
+          google.script.run
+            .withSuccessHandler(res => {
+              btnBusy(bDup, false);
+              if (!res.ok) { toast(res.error || 'Erreur'); return; }
+              mail_openModal(res.data.item);
+              mail_load();
+            })
+            .withFailureHandler(err => { btnBusy(bDup, false); console.error(err); toast('Erreur duplication'); })
+            .duplicateMailSector(_sid(), it.SecteurId);
+        };
+        bDel.onclick = () => {
+          if (!confirm('Supprimer le secteur "' + (it.Label || it.SecteurId) + '" ?')) return;
+          btnBusy(bDel, true);
+          google.script.run
+            .withSuccessHandler(res => { btnBusy(bDel, false); if (!res.ok) { toast(res.error || 'Erreur'); return; } mail_load(); })
+            .withFailureHandler(err => { btnBusy(bDel, false); console.error(err); toast('Erreur suppression'); })
+            .deleteMailSector(_sid(), it.SecteurId);
+        };
 
-      tdAct.appendChild(bEdit); tdAct.appendChild(bDup); tdAct.appendChild(bDel);
-      tr.appendChild(tdAct);
-      tbody.appendChild(tr);
-    });
+        tdAct.appendChild(bEdit); tdAct.appendChild(bDup); tdAct.appendChild(bDel);
+        tr.appendChild(tdAct);
+        tbody.appendChild(tr);
+      });
+    }
+    tbl.appendChild(tbody);
   }
-  tbl.appendChild(tbody);
-}
 
-// Chargement
-function mail_load(){
-  const sid=_sid(); if(!sid) return;
-  MAILBUSY.show('Chargement…');
-  google.script.run
-    .withSuccessHandler(res=>{
-      MAILBUSY.hide();
-      if(!res.ok){ toast(res.error||'Erreur serveur'); MailModel.items=[]; return; }
-      MailModel.items = res.data.items||[];
-      mail_render();
-    })
-    .withFailureHandler(err=>{ MAILBUSY.hide(); console.error(err); toast('Erreur serveur'); })
-    .getMailSectors(sid);
-}
+  // Chargement
+  function mail_load() {
+    const sid = _sid(); if (!sid) return;
+    MAILBUSY.show('Chargement…');
+    google.script.run
+      .withSuccessHandler(res => {
+        MAILBUSY.hide();
+        if (!res.ok) { toast(res.error || 'Erreur serveur'); MailModel.items = []; return; }
+        MailModel.items = res.data.items || [];
+        mail_render();
+      })
+      .withFailureHandler(err => { MAILBUSY.hide(); console.error(err); toast('Erreur serveur'); })
+      .getMailSectors(sid);
+  }
 
-// Auto-charge l’onglet Courriels dès qu’il devient visible
-(function(){
-  function isVisible(el){ return !!el && !el.classList.contains('hidden'); }
-  function tryLoad(){ const sec = document.getElementById('tab-mail'); if (isVisible(sec)) mail_load(); }
-  document.addEventListener('season-changed', function(){ tryLoad(); });
-  const target = document.getElementById('tab-mail');
-  if (target){
-    const obs = new MutationObserver(function(muts){
-      for (const m of muts){
-        if (m.type === 'attributes' && m.attributeName === 'class'){
-          if (isVisible(target)) tryLoad();
+  // Auto-charge l’onglet Courriels dès qu’il devient visible
+  (function () {
+    function isVisible(el) { return !!el && !el.classList.contains('hidden'); }
+    function tryLoad() { const sec = document.getElementById('tab-mail'); if (isVisible(sec)) mail_load(); }
+    document.addEventListener('season-changed', function () { tryLoad(); });
+    const target = document.getElementById('tab-mail');
+    if (target) {
+      const obs = new MutationObserver(function (muts) {
+        for (const m of muts) {
+          if (m.type === 'attributes' && m.attributeName === 'class') {
+            if (isVisible(target)) tryLoad();
+          }
         }
-      }
-    });
-    obs.observe(target, { attributes:true });
+      });
+      obs.observe(target, { attributes: true });
+    }
+    document.addEventListener('DOMContentLoaded', tryLoad);
+  })();
+
+  // ---------- Modal ----------
+  function mail_openModal(item) {
+    MailModel.editing = item || { Active: true, Genre: '*', Umin: 4, Umax: 6, ErrorCode: '' };
+    const it = MailModel.editing;
+
+    const wrap = $m('#mailModal'); if (!wrap) return;
+    const card = $m('.modal-card', wrap);
+
+    $m('#ms_id', card).value = it.SecteurId || '';
+    $m('#ms_label', card).value = it.Label || '';
+    $m('#ms_umin', card).value = it.Umin || '';
+    $m('#ms_umax', card).value = it.Umax || '';
+    $m('#ms_genre', card).value = it.Genre || '*';
+    $m('#ms_active', card).checked = (String(it.Active).toLowerCase() !== 'false');
+    $m('#ms_to', card).value = it.To || '';
+    $m('#ms_cc', card).value = it.Cc || '';
+    $m('#ms_reply', card).value = it.ReplyTo || '';
+    $m('#ms_subj', card).value = it.SubjectTpl || '';
+    if ($m('#ms_errorcode', card)) $m('#ms_errorcode', card).value = it.ErrorCode || '';
+
+    const ed = $m('#ms_body_edit', card);
+    ed.innerHTML = it.BodyTpl || '';
+    $m('#ms_body', card).value = it.BodyTpl || '';
+    ed.oninput = () => { $m('#ms_body', card).value = ed.innerHTML; };
+
+    $m('#ms_attach', card).value = it.AttachIdsCSV || '';
+    $m('#ms_row', card).value = it._row || '';
+    $m('#ms_preview', card).innerHTML = '';
+
+    wrap.hidden = false;
+    ed.focus();
   }
-  document.addEventListener('DOMContentLoaded', tryLoad);
-})();
+  // Formatting toolbar
+  function fmt(cmd, value) { document.execCommand(cmd, false, value); }
 
-// ---------- Modal ----------
-function mail_openModal(item){
-  MailModel.editing = item || { Active: true, Genre: '*', Umin:4, Umax:6, ErrorCode:'' };
-  const it = MailModel.editing;
+  // Collecte form → objet
+  function mail_collect(card) {
+    return {
+      SecteurId: $m('#ms_id', card).value.trim(),
+      Label: $m('#ms_label', card).value.trim(),
+      Umin: Number($m('#ms_umin', card).value || ''),
+      Umax: Number($m('#ms_umax', card).value || ''),
+      Genre: $m('#ms_genre', card).value.trim() || '*',
+      Active: $m('#ms_active', card).checked ? 'TRUE' : '',
+      To: $m('#ms_to', card).value.trim(),
+      Cc: $m('#ms_cc', card).value.trim(),
+      ReplyTo: $m('#ms_reply', card).value.trim(),
+      SubjectTpl: $m('#ms_subj', card).value,
+      BodyTpl: $m('#ms_body', card).value,
+      AttachIdsCSV: $m('#ms_attach', card).value.trim(),
+      ErrorCode: ($m('#ms_errorcode', card)?.value || '').trim(),
+      _row: $m('#ms_row', card).value || null
+    };
+  }
 
-  const wrap = $m('#mailModal'); if(!wrap) return;
-  const card = $m('.modal-card', wrap);
+  // Bind des boutons du modal
+  function mail_bindModal() {
+    const wrap = $m('#mailModal'); if (!wrap) return;
+    const card = $m('.modal-card', wrap);
 
-  $m('#ms_id',    card).value = it.SecteurId||'';
-  $m('#ms_label', card).value = it.Label||'';
-  $m('#ms_umin',  card).value = it.Umin||'';
-  $m('#ms_umax',  card).value = it.Umax||'';
-  $m('#ms_genre', card).value = it.Genre||'*';
-  $m('#ms_active',card).checked = (String(it.Active).toLowerCase()!=='false');
-  $m('#ms_to',    card).value = it.To||'';
-  $m('#ms_cc',    card).value = it.Cc||'';
-  $m('#ms_reply', card).value = it.ReplyTo||'';
-  $m('#ms_subj',  card).value = it.SubjectTpl||'';
-  if ($m('#ms_errorcode', card)) $m('#ms_errorcode', card).value = it.ErrorCode||'';
+    // Fermer
+    $m('#btnMailClose', card).onclick = () => wrap.hidden = true;
 
-  const ed = $m('#ms_body_edit', card);
-  ed.innerHTML = it.BodyTpl || '';
-  $m('#ms_body', card).value = it.BodyTpl || '';
-  ed.oninput = ()=> { $m('#ms_body', card).value = ed.innerHTML; };
+    // Aperçu
+    $m('#btnPreview', card).onclick = () => {
+      const sid = _sid(); const btn = $m('#btnPreview', card);
+      const passport = $m('#ms_sample', card).value.trim();
+      if (!passport) { toast('Indique un passeport'); return; }
+      btnBusy(btn, true);
+      const item = mail_collect(card);
+      google.script.run
+        .withSuccessHandler(res => {
+          btnBusy(btn, false);
+          if (!res.ok) { toast(res.error || 'Erreur aperçu'); return; }
+          const p = $m('#ms_preview', card);
+          p.innerHTML = '<div><b>Sujet :</b> ' + res.data.subject + '</div>'
+            + '<div><b>To (résolu) :</b> ' + res.data.to + '</div>'
+            + '<hr>' + res.data.bodyHtml;
+        })
+        .withFailureHandler(err => { btnBusy(btn, false); console.error(err); toast('Erreur aperçu'); })
+        .previewSectorForPassport(sid, item.SecteurId || ('SEC-' + Date.now()), passport, item);
+    };
 
-  $m('#ms_attach', card).value = it.AttachIdsCSV||'';
-  $m('#ms_row',    card).value = it._row||'';
-  $m('#ms_preview',card).innerHTML = '';
-
-  wrap.hidden = false;
-  ed.focus();
-}
-// Formatting toolbar
-function fmt(cmd, value){ document.execCommand(cmd, false, value); }
-
-// Collecte form → objet
-function mail_collect(card){
-  return {
-    SecteurId: $m('#ms_id',card).value.trim(),
-    Label:     $m('#ms_label',card).value.trim(),
-    Umin:      Number($m('#ms_umin',card).value||''),
-    Umax:      Number($m('#ms_umax',card).value||''),
-    Genre:     $m('#ms_genre',card).value.trim()||'*',
-    Active:    $m('#ms_active',card).checked?'TRUE':'',
-    To:        $m('#ms_to',card).value.trim(),
-    Cc:        $m('#ms_cc',card).value.trim(),
-    ReplyTo:   $m('#ms_reply',card).value.trim(),
-    SubjectTpl:$m('#ms_subj',card).value,
-    BodyTpl:   $m('#ms_body',card).value,
-    AttachIdsCSV: $m('#ms_attach',card).value.trim(),
-    ErrorCode: ($m('#ms_errorcode',card)?.value || '').trim(),
-    _row:      $m('#ms_row',card).value || null
-  };
-}
-
-// Bind des boutons du modal
-function mail_bindModal(){
-  const wrap = $m('#mailModal'); if(!wrap) return;
-  const card = $m('.modal-card', wrap);
-
-  // Fermer
-  $m('#btnMailClose', card).onclick = ()=> wrap.hidden = true;
-
-  // Aperçu
-  $m('#btnPreview', card).onclick = ()=>{
-    const sid=_sid(); const btn=$m('#btnPreview', card);
-    const passport = $m('#ms_sample', card).value.trim();
-    if(!passport){ toast('Indique un passeport'); return; }
-    btnBusy(btn, true);
-    const item = mail_collect(card);
-    google.script.run
-      .withSuccessHandler(res=>{
-        btnBusy(btn,false);
-        if(!res.ok){ toast(res.error||'Erreur aperçu'); return; }
-        const p = $m('#ms_preview', card);
-        p.innerHTML = '<div><b>Sujet :</b> '+res.data.subject+'</div>'
-                    + '<div><b>To (résolu) :</b> '+res.data.to+'</div>'
-                    + '<hr>'+res.data.bodyHtml;
-      })
-      .withFailureHandler(err=>{ btnBusy(btn,false); console.error(err); toast('Erreur aperçu'); })
-      .previewSectorForPassport(sid, item.SecteurId || ('SEC-'+Date.now()), passport, item);
-  };
-
-  // Envoi test
-  $m('#btnSendTest', card).onclick = ()=>{
-    const sid=_sid(); const btn=$m('#btnSendTest', card);
-    const passport = $m('#ms_sample', card).value.trim();
-    const toTest   = $m('#ms_testEmail', card).value.trim();
-    if(!passport){ toast('Indique un passeport'); return; }
-    btnBusy(btn, true);
-    const item = mail_collect(card);
-    google.script.run
-      .withSuccessHandler(res=>{ btnBusy(btn,false); toast(res.ok?'Test envoyé':'Erreur: '+(res.error||'')); })
-      .withFailureHandler(err=>{ btnBusy(btn,false); console.error(err); toast('Erreur envoi test'); })
-      .sendSectorTest(sid, item, passport, toTest||null);
-  };
-
-  // Save
-  $m('#btnSave', card).onclick = ()=>{
-    const sid=_sid(); const btn=$m('#btnSave', card);
-    const item = mail_collect(card);
-    if(!item.SecteurId){ toast('SecteurId obligatoire'); return; }
-    btnBusy(btn, true);
-    google.script.run
-      .withSuccessHandler(res=>{
-        btnBusy(btn,false);
-        if(!res.ok){ toast(res.error||'Erreur sauvegarde'); return; }
-        wrap.hidden = true; mail_load(); toast('Secteur enregistré');
-      })
-      .withFailureHandler(err=>{ btnBusy(btn,false); console.error(err); toast('Erreur sauvegarde'); })
-      .upsertMailSector(sid, item);
-  };
-
-  // Delete
-  $m('#btnDelete', card).onclick = ()=>{
-    const sid=_sid(); const btn=$m('#btnDelete', card);
-    const id = $m('#ms_id',card).value.trim();
-    if(!id){ wrap.hidden=true; return; }
-    if(!confirm('Supprimer ce secteur ?')) return;
-    btnBusy(btn, true);
-    google.script.run
-      .withSuccessHandler(res=>{ btnBusy(btn,false); wrap.hidden=true; mail_load(); })
-      .withFailureHandler(err=>{ btnBusy(btn,false); console.error(err); toast('Erreur suppression'); })
-      .deleteMailSector(sid, id);
-  };
-}
+    // Envoi test
+    $m('#btnSendTest', card).onclick = () => {
+      const sid = _sid(); const btn = $m('#btnSendTest', card);
+      const passport = $m('#ms_sample', card).value.trim();
+      const toTest = $m('#ms_testEmail', card).value.trim();
+      if (!passport) { toast('Indique un passeport'); return; }
+      btnBusy(btn, true);
 
 
-// Boot
+      const item = mail_collect(card);
+      google.script.run
+.withSuccessHandler(res => {
+  btnBusy(btn,false);
+  if (!res.ok) { toast('Erreur: ' + (res.error || '')); return; }
+  const info = res.data || {};
+  toast(`Test envoyé • PJ: ${info.attached ?? 0}`);
 
-document.querySelector('#btnSendOutbox')?.addEventListener('click', ()=>{
-  const sid = _sid(); // ou récupère depuis ton select de saison
-  MAILBUSY.show('Envoi en cours…');
-  google.script.run
-    .withSuccessHandler(res=>{
-      MAILBUSY.hide();
-      if (res && res.ok) {
-        const d = res.data || {};
-        toast(`Envoyés: ${d.processed||0} • Résumés CSV: ${d.summaries?'oui':'non'}`);
+  // Affiche un petit rapport sous l’aperçu
+  const p = $m('#ms_preview', card);
+  if (info.probe && info.probe.length) {
+    const rows = info.probe.map(x => {
+      if (x.ok) {
+        const sz = (typeof x.size === 'number' ? (Math.round(x.size/1024)+' KB') : '');
+        return `<tr><td>${x.id}</td><td>OK</td><td>${x.name||''}</td><td>${x.mimeType||''}</td><td>${sz}</td></tr>`;
       } else {
-        toast('Erreur: '+(res && res.error ? res.error : 'inconnue'));
+        return `<tr><td>${x.id}</td><td style="color:#b91c1c;">ERR</td><td colspan="3">${x.error||''}</td></tr>`;
       }
-    })
-    .withFailureHandler(err=>{
-      MAILBUSY.hide();
-      console.error(err);
-      toast('Erreur serveur (voir console)');
-    })
-    .runSendPendingOutbox(sid);
+    }).join('');
+    const table = `
+      <div style="margin-top:8px;">
+        <b>Pièces jointes (résolution IDs):</b>
+        <table style="margin-top:6px; width:100%; border-collapse:collapse; font:12px system-ui;">
+          <thead><tr>
+            <th style="text-align:left;border-bottom:1px solid #ddd;">ID</th>
+            <th style="text-align:left;border-bottom:1px solid #ddd;">Statut</th>
+            <th style="text-align:left;border-bottom:1px solid #ddd;">Nom</th>
+            <th style="text-align:left;border-bottom:1px solid #ddd;">Type</th>
+            <th style="text-align:left;border-bottom:1px solid #ddd;">Taille</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    p.innerHTML = p.innerHTML + table;
+  }
+})
+
+        .withFailureHandler(err => { btnBusy(btn, false); console.error(err); toast('Erreur envoi test'); })
+        .sendSectorTest(sid, item, passport, toTest || null);
+
+    };
+
+    // Save
+    $m('#btnSave', card).onclick = () => {
+      const sid = _sid(); const btn = $m('#btnSave', card);
+      const item = mail_collect(card);
+      if (!item.SecteurId) { toast('SecteurId obligatoire'); return; }
+      btnBusy(btn, true);
+      google.script.run
+        .withSuccessHandler(res => {
+          btnBusy(btn, false);
+          if (!res.ok) { toast(res.error || 'Erreur sauvegarde'); return; }
+          wrap.hidden = true; mail_load(); toast('Secteur enregistré');
+        })
+        .withFailureHandler(err => { btnBusy(btn, false); console.error(err); toast('Erreur sauvegarde'); })
+        .upsertMailSector(sid, item);
+    };
+
+    // Delete
+    $m('#btnDelete', card).onclick = () => {
+      const sid = _sid(); const btn = $m('#btnDelete', card);
+      const id = $m('#ms_id', card).value.trim();
+      if (!id) { wrap.hidden = true; return; }
+      if (!confirm('Supprimer ce secteur ?')) return;
+      btnBusy(btn, true);
+      google.script.run
+        .withSuccessHandler(res => { btnBusy(btn, false); wrap.hidden = true; mail_load(); })
+        .withFailureHandler(err => { btnBusy(btn, false); console.error(err); toast('Erreur suppression'); })
+        .deleteMailSector(sid, id);
+    };
+  }
+
+
+  // Boot
+
+document.addEventListener('DOMContentLoaded', () => {
+  const b = document.getElementById('btnSendOutbox');
+  if (!b) return;
+  const clone = b.cloneNode(true);     // retire anciens onclick/listeners
+  b.replaceWith(clone);
+  const btn = document.getElementById('btnSendOutbox');
+
+  let sending = false;                 // garde-fou
+  btn.addEventListener('click', ()=>{
+    if (sending) return;               // ignore double-clic
+    sending = true;
+    btn.disabled = true;
+    MAILBUSY.show('Envoi en cours…');
+
+    const sid = _sid();
+    google.script.run
+      .withSuccessHandler(res=>{
+        MAILBUSY.hide();
+        sending = false;
+        btn.disabled = false;
+        if (res && res.ok) {
+          const d = res.data || {};
+          toast(`Envoyés: ${d.processed||0} • Résumés CSV: ${d.summaries?'oui':'non'}`);
+        } else {
+          toast('Erreur: '+(res && res.error ? res.error : 'inconnue'));
+        }
+      })
+      .withFailureHandler(err=>{
+        MAILBUSY.hide();
+        sending = false;
+        btn.disabled = false;
+        console.error(err);
+        toast('Erreur serveur (voir console)');
+      })
+      .runSendPendingOutbox(sid);
+  });
 });
 
 
-document.addEventListener('DOMContentLoaded', ()=>{
-   
-  $m('#btnMailReload')?.addEventListener('click', mail_load);
-  $m('#btnMailAdd')?.addEventListener('click', ()=> mail_openModal({ Active:true, Genre:'*' }));
-  mail_bindModal();
-  // (on ne lie plus les boutons d’erreur, ils n’existent plus)
-  mail_load();
-});
+
+  document.addEventListener('DOMContentLoaded', () => {
+
+    $m('#btnMailReload')?.addEventListener('click', mail_load);
+    $m('#btnMailAdd')?.addEventListener('click', () => mail_openModal({ Active: true, Genre: '*' }));
+    mail_bindModal();
+    // (on ne lie plus les boutons d’erreur, ils n’existent plus)
+    mail_load();
+  });
 </script>

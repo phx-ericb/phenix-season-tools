@@ -208,7 +208,7 @@ document.getElementById('btnSaveRules').addEventListener('click', () => {
     toast(res.ok ? 'Règles sauvegardées' : res.error);
   }).setRules(sid, json);
 });
-document.getElementById('btnTestRules2').addEventListener('click', () => doTestRules());
+document.getElementById('btnTestRules').addEventListener('click', () => doTestRules());
 document.getElementById('btnToggleJson').addEventListener('click', () => {
   _jsonMode = !_jsonMode;
   document.getElementById('rulesTable').classList.toggle('hidden', _jsonMode);

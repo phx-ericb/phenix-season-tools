@@ -1,16 +1,16 @@
 /**
- * v0.7 — Diff incrémental ARTICLES (optimisé)
- * - Clé = PARAMS!KEY_COLS
+ * v0.8 — Diff incrémental ARTICLES (optimisé)
+ * - Clé = buildArticleKey_ (Passeport||Saison||Frais-normalisé)
  * - Nouveaux: append + ROW_HASH
- * - Modifiés: update + ROW_HASH + LAST_MODIFIED_AT
+ * - Modifiés: update + ROW_HASH + LAST_MODIFIED_AT + log (si statut change)
  * - Annulations (batch):
- *    a) disparition -> CANCELLED/EXCLUDE + log ANNULATIONS_ARTICLES
+ *    a) disparition -> CANCELLED/EXCLUDE + LAST_MODIFIED_AT + log ANNULATIONS_ARTICLES
  *    b) statut "annulé" en staging -> idem
+ * - ✨ Nouveau: retourne touchedPassports (ensemble des passeports touchés)
  */
 
 // --- helper clé unique ARTICLES (Passeport||Saison||Frais-normalisé)
 function buildArticleKey_(row) {
-  // passeport -> 8 chiffres (sans apostrophe)
   var p8 = (typeof normalizePassportPlain8_ === 'function')
     ? normalizePassportPlain8_(row['Passeport #'] || row['Passeport'] || '')
     : String(row['Passeport #'] || row['Passeport'] || '').trim();
@@ -21,7 +21,6 @@ function buildArticleKey_(row) {
 
   return [p8, s, lib].join('||');
 }
-
 
 if (typeof CONTROL_COLS === 'undefined') {
   var CONTROL_COLS = { ROW_HASH:'ROW_HASH', CANCELLED:'CANCELLED', EXCLUDE_FROM_EXPORT:'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT:'LAST_MODIFIED_AT' };
@@ -35,14 +34,6 @@ if (typeof _isCancelledStatus_ !== 'function') {
   }
 }
 
-function getKeyColsFromParams_(ss) {
-  var csv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
-  return csv.split(',').map(function(x){ return x.trim(); }).filter(Boolean);
-}
-function buildKeyFromRow_(row, keyCols) {
-  var parts = keyCols.map(function(k){ return (row[k] == null ? '' : String(row[k])); });
-  return parts.join('||');
-}
 function ensureControlCols_(finalsInfo) {
   var sh = finalsInfo.sheet;
   var headers = finalsInfo.headers.slice();
@@ -57,6 +48,14 @@ function ensureControlCols_(finalsInfo) {
   ensureCol_(CONTROL_COLS.EXCLUDE_FROM_EXPORT);
   ensureCol_(CONTROL_COLS.LAST_MODIFIED_AT);
   finalsInfo.headers = headers;
+}
+function getKeyColsFromParams_(ss) {
+  var csv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
+  return csv.split(',').map(function(x){ return x.trim(); }).filter(Boolean);
+}
+function buildKeyFromRow_(row, keyCols) {
+  var parts = keyCols.map(function(k){ return (row[k] == null ? '' : String(row[k])); });
+  return parts.join('||');
 }
 function ensureLogSheetWithHeaders_(ss, sheetName, headers) {
   var sh = ss.getSheetByName(sheetName);
@@ -85,6 +84,7 @@ function occurrenceLabel_(row) {
   var frais  = row['Nom du frais'] || row['Frais'] || row['Produit'] || '';
   return (saison + ' — ' + frais).trim();
 }
+function jsonCompact_(obj){ try { return JSON.stringify(obj); } catch(e){ return '{}'; } }
 
 function diffArticles_(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
@@ -114,6 +114,14 @@ function diffArticles_(seasonSheetId) {
   });
 
   var toAppend = [], toUpdate = [];
+  var touchedSet = {}; // ✨ nouveau
+  function touch_(row){
+    var p = String((row && (row['Passeport #'] || row['Passeport'])) || '').trim();
+    if (!p) return;
+    try { if (typeof normalizePassportPlain8_ === 'function') p = normalizePassportPlain8_(p); } catch(_){ }
+    touchedSet[p] = true;
+  }
+
   var HEADERS_ANN = ['Horodatage','Passeport','Nom','Prénom','NomComplet','Saison','Frais','DateAnnulation','A_ENCORE_ACTIF','ACTIFS_RESTANTS'];
   var annRows = [];
 
@@ -133,6 +141,7 @@ function diffArticles_(seasonSheetId) {
       newRow[CONTROL_COLS.EXCLUDE_FROM_EXPORT] = !!sCancelled;
       newRow[CONTROL_COLS.ROW_HASH] = rowHash_(newRow);
       toAppend.push(newRow);
+      touch_(newRow);
 
       if (sCancelled) {
         var passN = String(newRow['Passeport #']||'').trim();
@@ -167,9 +176,11 @@ function diffArticles_(seasonSheetId) {
       merged[CONTROL_COLS.ROW_HASH] = newHash;
       merged[CONTROL_COLS.LAST_MODIFIED_AT] = new Date();
       toUpdate.push({ rownum: fRow.__rownum__, data: merged });
+      touch_(merged);
     } else if (newCancelled !== (String(fRow[CONTROL_COLS.CANCELLED]||'').toLowerCase()==='true')) {
       // Changement de statut => annulation
       toUpdate.push({ rownum: fRow.__rownum__, data: merged });
+      touch_(merged);
 
       var passU = String(merged['Passeport #']||'').trim();
       var list = (activeByPassport[passU]||[]).slice(0);
@@ -192,18 +203,20 @@ function diffArticles_(seasonSheetId) {
     }
   });
 
-  // --- Disparitions = annulations
+  // --- Disparitions = annulations (⚠️ ajoute LAST_MODIFIED_AT + touch_)
   var indexStagingKeys = {};
   staging.rows.forEach(function(s){ indexStagingKeys[buildArticleKey_(s)] = true; });
   finals.rows.forEach(function(fRow){
     if (!indexStagingKeys[fRow.__key__]) {
       fRow[CONTROL_COLS.CANCELLED] = true;
       fRow[CONTROL_COLS.EXCLUDE_FROM_EXPORT] = true;
+      fRow[CONTROL_COLS.LAST_MODIFIED_AT] = new Date(); // ✨
       toUpdate.push({ rownum: fRow.__rownum__, data: fRow });
+      touch_(fRow);
 
       var passD = String(fRow['Passeport #']||'').trim();
       var listD = (activeByPassport[passD]||[]).slice(0);
-      var occD  = occurrenceLabel_(fRow);
+      var occD = occurrenceLabel_(fRow);
       var ix = listD.indexOf(occD);
       if (ix >= 0) listD.splice(ix,1);
 
@@ -227,14 +240,14 @@ function diffArticles_(seasonSheetId) {
     var startRow = shFinal.getLastRow() + 1;
     shFinal.insertRowsAfter(shFinal.getLastRow(), toAppend.length);
     var headers = finals.headers;
-    var values = toAppend.map(function(r){ return headers.map(function(h){ return r[h]; }); });
-    shFinal.getRange(startRow,1,toAppend.length,headers.length).setValues(values);
+    var values = toAppend.map(function (r) { return headers.map(function (h) { return r[h]; }); });
+    shFinal.getRange(startRow, 1, toAppend.length, headers.length).setValues(values);
   }
   if (toUpdate.length) {
     var headersU = finals.headers;
-    toUpdate.forEach(function(up){
-      var rowArr = headersU.map(function(h){ return up.data[h]; });
-      shFinal.getRange(up.rownum,1,1,headersU.length).setValues([rowArr]);
+    toUpdate.forEach(function (up) {
+      var rowArr = headersU.map(function (h) { return up.data[h]; });
+      shFinal.getRange(up.rownum, 1, 1, headersU.length).setValues([rowArr]);
     });
   }
 
@@ -246,5 +259,11 @@ function diffArticles_(seasonSheetId) {
     shAnn.getRange(startA, 1, annRows.length, HEADERS_ANN.length).setValues(annRows);
   }
 
-  return { added: toAppend.length, updated: toUpdate.length, annuls: annRows.length };
+  var touchedPassports = Object.keys(touchedSet);
+  return {
+    added: toAppend.length,
+    updated: toUpdate.length,
+    annuls: annRows.length,
+    touchedPassports: touchedPassports
+  };
 }

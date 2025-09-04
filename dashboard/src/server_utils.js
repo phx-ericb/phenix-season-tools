@@ -96,3 +96,24 @@ function _inferSeasonLabelFromTitle_(title) {
   var m = title.match(/^(.+?)(?:\s*-\s*Saison)?$/i);
   return (m ? m[1] : title).trim();
 }
+function getSheet_(ss, name, createIfMissing) {
+  return createIfMissing ? getSheetOrCreate_(ss, name) : ss.getSheetByName(name);
+}
+
+function norm_(s){ return String(s||'').trim().toLowerCase()
+  .normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+
+function isIgnoredFeeRetro_(ss, fee){
+  var v = norm_(fee);
+  if (!v) return false;
+  var csv = (typeof readParam_==='function' ? (readParam_(ss,'RETRO_IGNORE_FEES_CSV')||'') : '');
+  var toks = csv.split(',').map(norm_).filter(Boolean);
+
+  if (toks.indexOf(v) >= 0) return true;        // exact
+  for (var i=0;i<toks.length;i++)               // contains
+    if (v.indexOf(toks[i]) >= 0) return true;
+
+  // filet si le param n'était pas encore rempli
+  if (/(entraineur|entra[îi]neur|coach)/i.test(String(fee||''))) return true;
+  return false;
+}

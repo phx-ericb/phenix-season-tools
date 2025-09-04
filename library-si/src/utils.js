@@ -576,3 +576,124 @@ function _loadUnifiedGroupMappings_(ss) {
 
   return out;
 }
+// ========= MEMBRES_GLOBAL: index & cache (lib/server) =========
+
+// Cache process local (mémoire de l'instance)
+var __MG_CACHE = (typeof __MG_CACHE !== 'undefined') ? __MG_CACHE : { at:0, key:'', data:null };
+
+/** Fallback passport normalizer (au cas où) */
+if (typeof normalizePassportPlain8_ !== 'function') {
+  function normalizePassportPlain8_(v){
+    var s = String(v == null ? '' : v).replace(/\D/g,'').trim();
+    if (!s) return '';
+    // garde les 8 derniers chiffres; pad à gauche si besoin
+    s = s.slice(-8);
+    while (s.length < 8) s = '0' + s;
+    return s;
+  }
+}
+
+/** Construit une clé de cache rapide pour MEMBRES_GLOBAL (id feuille + taille + header) */
+function _mg_cacheKey_(ss){
+  try {
+    var name = (typeof readParam_==='function' ? (readParam_(ss,'SHEET_MEMBRES_GLOBAL') || 'MEMBRES_GLOBAL') : 'MEMBRES_GLOBAL');
+    var sh = ss.getSheetByName(name);
+    if (!sh) return ss.getId() + '|MG:none';
+    var lr = sh.getLastRow() || 0, lc = sh.getLastColumn() || 0;
+    // header (limité à 30 colonnes pour rester léger)
+    var hdr = (lr >= 1 && lc >= 1) ? sh.getRange(1,1,1, Math.min(lc,30)).getDisplayValues()[0].join('|') : '';
+    var sig = [ss.getId(), name, lr, lc, hdr].join('|');
+    // hash court (MD5) pour avoir une clé compacte dans CacheService
+    var md5 = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, sig);
+    var b64 = Utilities.base64EncodeWebSafe(md5).slice(0,22);
+    return 'MG:' + b64;
+  } catch(e) {
+    return ss.getId() + '|MG:fallback';
+  }
+}
+
+/**
+ * Lit MEMBRES_GLOBAL et renvoie un index:
+ * {
+ *   byPass: { '00012345': { Passeport, PhotoExpireLe, PhotoInvalide:0/1, CasierExpire:0/1, LastUpdate, PhotoInvalideDuesLe, StatutMembre } },
+ *   headers: [...],
+ *   rows: <optionnel>,
+ *   key: <clé de cache>
+ * }
+ * Cache mémoire + CacheService (5 min).
+ */
+function getMembresIndex_(ss){
+  var key = _mg_cacheKey_(ss);
+  var now = Date.now();
+
+  // 1) Mémoire locale (process) — très rapide
+  if (__MG_CACHE.data && __MG_CACHE.key === key && (now - __MG_CACHE.at) < 5*60*1000) {
+    return __MG_CACHE.data;
+  }
+
+  // 2) CacheService (partagé entre invocations)
+  try {
+    var sc = CacheService.getScriptCache();
+    var cached = sc.get(key);
+    if (cached) {
+      try {
+        var parsed = JSON.parse(cached);
+        __MG_CACHE = { at: now, key: key, data: parsed };
+        return parsed;
+      } catch(_){}
+    }
+  } catch(_){}
+
+  // 3) Lecture live
+  var name = (typeof readParam_==='function' ? (readParam_(ss,'SHEET_MEMBRES_GLOBAL') || 'MEMBRES_GLOBAL') : 'MEMBRES_GLOBAL');
+  var sh = ss.getSheetByName(name);
+  if (!sh || sh.getLastRow() < 2 || sh.getLastColumn() < 1) {
+    var empty = { byPass:{}, headers:[], rows:[], key:key };
+    __MG_CACHE = { at: now, key: key, data: empty };
+    return empty;
+  }
+
+  var V = sh.getDataRange().getValues();
+  var H = V[0].map(String);
+  var col = {};
+  H.forEach(function(h,i){ col[h]=i; });
+
+  function colIdx(n){ var i = col[n]; return (typeof i==='number') ? i : -1; }
+
+  var cPass = colIdx('Passeport'),
+      cPhEx = colIdx('PhotoExpireLe'),
+      cPhInv= colIdx('PhotoInvalide'),
+      cCas  = colIdx('CasierExpiré') >= 0 ? colIdx('CasierExpiré') : colIdx('CasierExpire'),
+      cLast = colIdx('LastUpdate'),
+      cDue  = colIdx('PhotoInvalideDuesLe'),
+      cStat = colIdx('StatutMembre');
+
+  var byPass = Object.create(null);
+
+  for (var r=1; r<V.length; r++){
+    var row = V[r];
+    var p8 = normalizePassportPlain8_(row[cPass]);
+    if (!p8) continue;
+
+    var photoInv = String(row[cPhInv] == null ? '' : row[cPhInv]).toLowerCase();
+    var casVal   = row[cCas];
+
+    byPass[p8] = {
+      Passeport: p8,
+      PhotoExpireLe: (cPhEx >= 0 ? String(row[cPhEx]||'') : ''),
+      PhotoInvalide: (photoInv === 'true' || photoInv === '1') ? 1 : 0,
+      CasierExpire: (String(casVal||'').toLowerCase()==='1' || String(casVal||'').toLowerCase()==='true') ? 1 : 0,
+      PhotoInvalideDuesLe: (cDue >= 0 ? String(row[cDue]||'') : ''),
+      LastUpdate: (cLast >= 0 ? String(row[cLast]||'') : ''),
+      StatutMembre: (cStat >= 0 ? String(row[cStat]||'') : '')
+    };
+  }
+
+  var result = { byPass: byPass, headers: H, key: key };
+
+  // 4) Écritures cache
+  __MG_CACHE = { at: now, key: key, data: result };
+  try { CacheService.getScriptCache().put(key, JSON.stringify(result), 300); } catch(_){}
+
+  return result;
+}

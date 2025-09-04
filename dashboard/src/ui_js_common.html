@@ -165,7 +165,6 @@ function doTestRules() {
   }).withFailureHandler(err => { Busy.hide('saison'); console.error('testRules', err); $('#dryOutput').textContent = String(err); })
     .testRules(sid);
 }
-$('#btnTestRules').addEventListener('click', doTestRules);
 
 // Exports
 $$('#tab-exports [data-preview]').forEach(btn => {

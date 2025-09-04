@@ -1,35 +1,105 @@
 /**
- * retro_groupes.gs — v0.8
- * - Construit l'export "Import Rétro - Groupes" (10 colonnes)
- * - Paramétrable: patterns d'ignorés, élite, soccer adapté, gabarits Groupe/Catégorie
- * - Support d’un mapping saisonnier via MAPPINGS (section "GROUPES")
- * - Respecte CANCELLED/EXCLUDE_FROM_EXPORT et le moteur de règles (RETRO_RULES_JSON)
- * - U / U2 robustes: DOB -> U/U2, fallback extraction libellé article
- *
- * Colonnes exportées:
- *  "Identifiant unique","Nom","Prénom","Date de naissance","#","Couleur","Sous-groupe","Position","Équipe/Groupe","Catégorie"
- */
+* retro_groupes.gs — v0.11
+* - AUCUN changement sur la construction des lignes (buildRetroGroupesRows)
+* - ✨ Nouveauté EXPORTEURS: capacité de filtrer par passeports «touchés»
+* via DocumentProperties.LAST_TOUCHED_PASSPORTS (CSV) ou via param {onlyPassports}
+* - Conserve exportRetroGroupesAllXlsxToDrive (Groupes + GroupeArticles)
+* - Compatible avec normalizePassportToText8_ / normalizePassportPlain8_
+*/
+
 
 /* ===================== Param keys ===================== */
 if (typeof PARAM_KEYS === 'undefined') { var PARAM_KEYS = {}; }
-PARAM_KEYS.RETRO_GROUP_SHEET_NAME        = PARAM_KEYS.RETRO_GROUP_SHEET_NAME        || 'RETRO_GROUP_SHEET_NAME';
+PARAM_KEYS.RETRO_GROUP_SHEET_NAME = PARAM_KEYS.RETRO_GROUP_SHEET_NAME || 'RETRO_GROUP_SHEET_NAME';
 PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID = PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID || 'RETRO_GROUP_EXPORTS_FOLDER_ID';
 
-PARAM_KEYS.RETRO_IGNORE_FEES_CSV         = PARAM_KEYS.RETRO_IGNORE_FEES_CSV         || 'RETRO_IGNORE_FEES_CSV';
-PARAM_KEYS.RETRO_GROUP_ELITE_KEYWORDS    = PARAM_KEYS.RETRO_GROUP_ELITE_KEYWORDS    || 'RETRO_GROUP_ELITE_KEYWORDS';
 
-PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS       = PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS       || 'RETRO_GROUP_SA_KEYWORDS';
-PARAM_KEYS.RETRO_GROUP_SA_GROUPE_LABEL   = PARAM_KEYS.RETRO_GROUP_SA_GROUPE_LABEL   || 'RETRO_GROUP_SA_GROUPE_LABEL';
-PARAM_KEYS.RETRO_GROUP_SA_CATEG_LABEL    = PARAM_KEYS.RETRO_GROUP_SA_CATEG_LABEL    || 'RETRO_GROUP_SA_CATEG_LABEL';
+PARAM_KEYS.RETRO_IGNORE_FEES_CSV = PARAM_KEYS.RETRO_IGNORE_FEES_CSV || 'RETRO_IGNORE_FEES_CSV';
+PARAM_KEYS.RETRO_GROUP_ELITE_KEYWORDS = PARAM_KEYS.RETRO_GROUP_ELITE_KEYWORDS || 'RETRO_GROUP_ELITE_KEYWORDS';
 
-PARAM_KEYS.RETRO_GROUP_GROUPE_FMT        = PARAM_KEYS.RETRO_GROUP_GROUPE_FMT        || 'RETRO_GROUP_GROUPE_FMT';
-PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT     = PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT     || 'RETRO_GROUP_CATEGORIE_FMT';
 
-PARAM_KEYS.RETRO_RULES_JSON              = PARAM_KEYS.RETRO_RULES_JSON              || 'RETRO_RULES_JSON';
+PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS = PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS || 'RETRO_GROUP_SA_KEYWORDS';
+PARAM_KEYS.RETRO_GROUP_SA_GROUPE_LABEL = PARAM_KEYS.RETRO_GROUP_SA_GROUPE_LABEL || 'RETRO_GROUP_SA_GROUPE_LABEL';
+PARAM_KEYS.RETRO_GROUP_SA_CATEG_LABEL = PARAM_KEYS.RETRO_GROUP_SA_CATEG_LABEL || 'RETRO_GROUP_SA_CATEG_LABEL';
+
+
+PARAM_KEYS.RETRO_GROUP_GROUPE_FMT = PARAM_KEYS.RETRO_GROUP_GROUPE_FMT || 'RETRO_GROUP_GROUPE_FMT';
+PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT = PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT || 'RETRO_GROUP_CATEGORIE_FMT';
+
+
+PARAM_KEYS.RETRO_RULES_JSON = PARAM_KEYS.RETRO_RULES_JSON
+
+
+// Cache global partagé (idempotent)
+var __retroRulesCache = (typeof __retroRulesCache !== 'undefined')
+  ? __retroRulesCache
+  : { at: 0, data: null };
+
+function loadRetroRules_(ss) {
+  if (typeof SR_loadRetroRules_ === 'function') {
+    return SR_loadRetroRules_(ss);
+  }
+  var now = Date.now();
+  if (__retroRulesCache.data && (now - __retroRulesCache.at) < 5 * 60 * 1000) return __retroRulesCache.data;
+
+  var raw = readParam_(ss, PARAM_KEYS.RETRO_RULES_JSON) || '';
+  if (!raw) {
+    var shJson = ss.getSheetByName('RETRO_RULES_JSON');
+    if (shJson && shJson.getLastRow() >= 1 && shJson.getLastColumn() >= 1) {
+      var vals = shJson.getDataRange().getDisplayValues();
+      var pieces = [];
+      for (var i = 0; i < vals.length; i++) for (var j = 0; j < vals[i].length; j++) {
+        var cell = vals[i][j]; if (cell != null && String(cell).trim() !== '') pieces.push(String(cell));
+      }
+      raw = pieces.join('\n');
+      appendImportLog_(ss, 'RETRO_RULES_JSON_SHEET_READ', 'chars=' + raw.length);
+    }
+  }
+  var rules = [];
+  if (raw) {
+    try { var arr = JSON.parse(raw); rules = Array.isArray(arr)?arr:[]; }
+    catch(e){ appendImportLog_(ss, 'RETRO_RULES_JSON_PARSE_FAIL', String(e)); }
+  }
+  if (!rules.length) {
+    var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-sé,adulte,ligue';
+    var adapteCsv = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte';
+    var campCsv   = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS)   || 'camp de sélection u13,camp selection u13,camp u13';
+    var photoOn   = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
+    var photoCol  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
+    var warnMmDd  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
+    var absDate   = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
+    rules = [
+      { id:'ignore_fees', enabled:true, scope:'both',
+        when:{ field:'Nom du frais', contains_any: ignoreCsv.split(',') },
+        action:{ type:'ignore_row' } },
+      { id:'adapte_flag', enabled:true, scope:'both',
+        when:{ field:'Nom du frais', contains_any: adapteCsv.split(',') },
+        action:{ type:'set_member_field', field:'adapte', value:1 } },
+      { id:'cdp_2', enabled:true, scope:'articles',
+        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT', text_contains_any:['2','2 entrainements'] },
+        action:{ type:'set_member_field_max', field:'cdp', value:2 } },
+      { id:'cdp_1', enabled:true, scope:'articles',
+        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT' },
+        action:{ type:'set_member_field_max', field:'cdp', value:1 } },
+      { id:'camp_u13', enabled:true, scope:'articles',
+        when:{ field:'Nom du frais', contains_any: campCsv.split(',') },
+        action:{ type:'set_member_field', field:'camp', value:'Oui' } }
+    ];
+    if (photoOn && photoCol) {
+      rules.push({ id:'photo_policy', enabled:true, scope:'member',
+        action:{ type:'compute_photo', expiry_col:photoCol, warn_mmdd:warnMmDd, abs_date:absDate }});
+    }
+    appendImportLog_(ss, 'RETRO_RULES_JSON_FALLBACK', 'using PARAMS-derived defaults');
+  }
+  __retroRulesCache = { at: now, data: rules };
+  return rules;
+}
+
 
 /* ===================== Helpers ===================== */
 function _rg_nrm_(s){ s=String(s==null?'':s); try{s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,'');}catch(e){} return s; }
 function _rg_low_(s){ return _rg_nrm_(s).toLowerCase().trim(); }
+function _rg_pad2_(n){ n=Number(n||0); return (n<10?('0'+n):String(n)); }
 
 function _rg_isActiveRow_(r){
   var can = String(r[CONTROL_COLS.CANCELLED]||'').toLowerCase()==='true';
@@ -50,9 +120,12 @@ function _rg_genreInitiale_(row){
   var g = (row['Identité de genre']||row['Identité de Genre']||row['Genre']||row['Sexe']||'').toString().trim().toUpperCase();
   return g ? g.charAt(0) : '';
 }
+function _tpl_(tpl, vars){ tpl = String(tpl==null?'':tpl); return tpl.replace(/{{\s*([\w.]+)\s*}}/g, function(_,k){ return (vars && k in vars && vars[k]!=null)? String(vars[k]) : ''; }); }
+function _low_(s){ try{ s=String(s==null?'':s).normalize('NFD').replace(/[\u0300-\u036f]/g,''); }catch(e){} return s.toLowerCase().trim(); }
+
 
 /* ====== U & U2 (DOB + fallback libellé article) ====== */
-function _rg_pad2_(n){ n=Number(n||0); return (n<10?('0'+n):String(n)); }
+
 function _rg_deriveBirthYearFromRow_(row){
   var dn = row['Date de naissance'] || row['Naissance'] || '';
   if (dn instanceof Date) return dn.getFullYear();
@@ -120,14 +193,6 @@ function _rg_applyRowRulesMaybeSkip_(rules, row, ctx){
   return !!(res && res.skip);
 }
 
-
-
-function _tpl_(tpl, vars){
-  tpl = String(tpl==null?'':tpl);
-  return tpl.replace(/{{\s*([\w.]+)\s*}}/g, function(_,k){ return (vars && k in vars && vars[k]!=null)? String(vars[k]) : ''; });
-}
-
-function _low_(s){ s=String(s==null?'':s); try{s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,'');}catch(e){} return s.toLowerCase().trim(); }
 
 /** Applique la première règle qui matche pour le type demandé. */
 function _applyUnifiedMapping_(maps, type, feeName, vars){
@@ -265,73 +330,192 @@ function buildRetroGroupesRows(seasonSheetId){
   return { header: header, rows: rows, nbCols: header.length };
 }
 
-/* ===================== Écriture feuille & export XLSX ===================== */
+/* ===================== FILTRAGE «passeports touchés» ===================== */
+function _normalizePassportText8_(v){
+var s = String(v==null?'':v).trim();
+try{ if (typeof normalizePassportToText8_==='function') return normalizePassportToText8_(s);}catch(_){ }
+try{ if (typeof normalizePassportPlain8_==='function') return normalizePassportPlain8_(s);}catch(_){ }
+return s;
+}
+function _readTouchedPassportSet_(ss, options){
+  options = options || {};
+  var set = {};
 
-function writeRetroGroupesSheet(seasonSheetId){
-  var ss  = getSeasonSpreadsheet_(seasonSheetId);
-  var out = buildRetroGroupesRows(seasonSheetId);
-
-  var sheetName = readParam_(ss, PARAM_KEYS.RETRO_GROUP_SHEET_NAME) || 'Import Rétro - Groupes';
-  var sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
-
-  sh.clearContents();
-  sh.getRange(1,1,1,out.nbCols).setValues([out.header]);
-  if (out.rows.length) {
-    sh.getRange(2,1,out.rows.length,out.nbCols).setValues(out.rows);
-    sh.autoResizeColumns(1, out.nbCols);
-    if (sh.getLastRow()>1) sh.getRange(2,1,sh.getLastRow()-1,1).setNumberFormat('@'); // Passeport texte
+  // 1) {onlyPassports: Array|Set}
+  var list = options.onlyPassports;
+  if (list && typeof list.forEach === 'function') {
+    list.forEach(function(p){ var t=_normalizePassportText8_(p); if(t) set[t]=true; });
   }
-  appendImportLog_(ss, 'RETRO_GROUPES_SHEET_OK', 'rows='+out.rows.length);
-  return out.rows.length;
+
+  // 2) Fallback: DocumentProperties.LAST_TOUCHED_PASSPORTS (JSON ou CSV)
+  if (!Object.keys(set).length) {
+    try{
+      var raw = (PropertiesService.getDocumentProperties().getProperty('LAST_TOUCHED_PASSPORTS')||'').trim();
+      if (raw) {
+        var arr = (raw.charAt(0) === '[') ? JSON.parse(raw) : raw.split(',');
+        arr.forEach(function(p){ var t=_normalizePassportText8_(p); if(t) set[t]=true; });
+      }
+    }catch(_){ /* ignore */ }
+  }
+  return set; // peut être vide -> aucun filtrage
 }
 
-/** Export XLSX rapide — Rétro Groupes */
-function exportRetroGroupesXlsxToDrive(seasonSheetId){
-  var ss  = getSeasonSpreadsheet_(seasonSheetId);
-  var out = buildRetroGroupesRows(seasonSheetId); // {header, rows, nbCols}
 
-  // 1) Classeur temporaire minimal
-  var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupes');
-  var tmp  = temp.getSheets()[0];
-  tmp.setName('Export');
+function _filterRowsByPassports_(rows, touchedSet){
+var keys = Object.keys(touchedSet||{});
+if (!keys.length) return rows; // aucun filtrage
+var out = [];
+for (var i=0;i<rows.length;i++){
+var row = rows[i];
+var p = _normalizePassportText8_(row && row[0]); // col A = Passeport
+if (p && touchedSet[p]) out.push(row);
+}
+return out;
+}
 
-  // 2) Écriture header + data
-  var all = [out.header].concat(out.rows);
+/* ===================== Écriture feuille & export XLSX ===================== */
 
-  // Normalise Passeport -> texte 'XXXXXXXX si helper dispo
-  if (typeof normalizePassportToText8_ === 'function') {
-    for (var i = 1; i < all.length; i++) {
-      all[i][0] = normalizePassportToText8_(all[i][0]);
-    }
-  }
-  if (all.length) {
-    tmp.getRange(1, 1, all.length, out.nbCols).setValues(all);
-    if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@'); // A en texte
-  }
-  SpreadsheetApp.flush();
+/* ===================== ÉCRITURE FEUILLE ===================== */
+function writeRetroGroupesSheet(seasonSheetId) {
+var ss = getSeasonSpreadsheet_(seasonSheetId);
+var out = buildRetroGroupesRows(seasonSheetId);
+var sheetName = readParam_(ss, PARAM_KEYS.RETRO_GROUP_SHEET_NAME) || 'Rétro - Groupes';
+var sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+sh.clearContents();
+sh.getRange(1,1,1,out.nbCols).setValues([out.header]);
+if (out.rows.length) {
+sh.getRange(2,1,out.rows.length,out.nbCols).setValues(out.rows);
+sh.autoResizeColumns(1, out.nbCols);
+if (sh.getLastRow() > 1) sh.getRange(2,1,sh.getLastRow()-1,1).setNumberFormat('@');
+}
+appendImportLog_(ss, 'RETRO_GROUPES_SHEET_OK', 'rows='+out.rows.length);
+return out.rows.length;
+}
 
-  // 3) Export XLSX
-  var url  = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-  var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
-  var ts   = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
-  blob.setName('Export_Retro_Groupes_' + ts + '.xlsx');
+/* ===================== EXPORT XLSX (Groupes SEUL) — avec filtre optionnel ===================== */
+function exportRetroGroupesXlsxToDrive(seasonSheetId, options){
+var ss = getSeasonSpreadsheet_(seasonSheetId);
+var out = buildRetroGroupesRows(seasonSheetId);
 
-  // 4) Destination
-  var folderId = readParam_(ss, PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID)
-              || readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
-  var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
-  var file = dest.createFile(blob);
 
-  // 5) Nettoyage + log
-  DriveApp.getFileById(temp.getId()).setTrashed(true);
-  appendImportLog_(ss, 'RETRO_GROUPES_XLSX_OK_FAST', file.getName() + ' -> ' + dest.getName() + ' (rows=' + out.rows.length + ')');
+// Filtrage
+var touched = _readTouchedPassportSet_(ss, options);
+var rows = _filterRowsByPassports_(out.rows, touched);
+var filtered = rows.length !== out.rows.length;
 
-  return { fileId:file.getId(), name:file.getName(), rows: out.rows.length };
+
+// Temp minimal
+var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupes');
+var tmp = temp.getSheets()[0];
+tmp.setName('Export');
+
+
+var all = [out.header].concat(rows);
+if (typeof normalizePassportToText8_ === 'function') {
+for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
+}
+if (all.length) {
+tmp.getRange(1, 1, all.length, out.nbCols).setValues(all);
+if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
+}
+SpreadsheetApp.flush();
+
+
+var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
+var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
+var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
+blob.setName('Export_Retro_Groupes_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
+
+
+var folderId = readParam_(ss, PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID)
+|| readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
+var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+var file = dest.createFile(blob);
+
+
+DriveApp.getFileById(temp.getId()).setTrashed(true);
+appendImportLog_(ss, 'RETRO_GROUPES_XLSX_OK_FAST', file.getName() + ' -> ' + dest.getName() + ' (rows=' + rows.length + ')');
+return { fileId:file.getId(), name:file.getName(), rows: rows.length, filtered: filtered };
+}
+
+
+/** ===================== NOUVEAU — Export XLSX Groupes ALL (Groupes + GroupeArticles) ===================== */
+/**
+ * Concatène:
+ *  - buildRetroGroupesRows(seasonSheetId)
+ *  - buildRetroGroupeArticlesRows(seasonSheetId)
+ * et exporte en un seul XLSX.
+ *
+ * Pas de dédoublonnage: "retro-groupes" couvre le mapping de base (ex: U12M),
+ * "retro-groupes-articles" ajoute des groupes complémentaires. Les headers sont identiques.
+ *
+ * Prévu pour optimisation future: on pourra brancher diffInscriptions_ / diffArticles_
+ * pour limiter aux lignes nouvelles/modifiées (sans changer la signature).
+ */
+/* ===================== EXPORT XLSX (Groupes ALL = Groupes + GroupeArticles) — avec filtre optionnel ===================== */
+function exportRetroGroupesAllXlsxToDrive(seasonSheetId, options){
+var ss = getSeasonSpreadsheet_(seasonSheetId);
+// 1) Build des deux sources
+var base = buildRetroGroupesRows(seasonSheetId); // { header, rows, nbCols }
+var addl = (typeof buildRetroGroupeArticlesRows === 'function')
+? buildRetroGroupeArticlesRows(seasonSheetId)
+: { header: base.header, rows: [], nbCols: base.nbCols };
+
+
+// 2) Header unifié
+var header = base && base.header ? base.header : (addl.header || []);
+var nbCols = header.length;
+
+
+// 3) Concaténer, puis filtrer si nécessaire
+var rows = []
+.concat(base && base.rows ? base.rows : [])
+.concat(addl && addl.rows ? addl.rows : []);
+
+
+var touched = _readTouchedPassportSet_(ss, options);
+var rowsFiltered = _filterRowsByPassports_(rows, touched);
+var filtered = rowsFiltered.length !== rows.length;
+
+
+// 4) Temp sheet → XLSX
+var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupes All');
+var tmp = temp.getSheets()[0];
+tmp.setName('Export');
+
+
+var all = [header].concat(rowsFiltered);
+if (typeof normalizePassportToText8_ === 'function') {
+for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
+}
+if (all.length) {
+tmp.getRange(1, 1, all.length, nbCols).setValues(all);
+if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
+}
+SpreadsheetApp.flush();
+
+
+var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
+var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
+var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
+blob.setName('Export_Retro_Groupes_All_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
+
+
+var folderId = readParam_(ss, PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID)
+|| readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
+var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+var file = dest.createFile(blob);
+
+
+DriveApp.getFileById(temp.getId()).setTrashed(true);
+appendImportLog_(ss, 'RETRO_GROUPES_ALL_XLSX_OK', file.getName() + ' -> ' + dest.getName() + ' (rows=' + rowsFiltered.length + ', filtered=' + filtered + ')');
+return { fileId: file.getId(), name: file.getName(), rows: rowsFiltered.length, filtered: filtered };
 }
 
 /* ========== Exposition facultative via Library ========== */
 if (typeof Library !== 'undefined') {
-  Library.buildRetroGroupesRows = buildRetroGroupesRows;
-  Library.writeRetroGroupesSheet = writeRetroGroupesSheet;
-  Library.exportRetroGroupesXlsxToDrive = exportRetroGroupesXlsxToDrive;
+Library.buildRetroGroupesRows = buildRetroGroupesRows;
+Library.writeRetroGroupesSheet = writeRetroGroupesSheet;
+Library.exportRetroGroupesXlsxToDrive = exportRetroGroupesXlsxToDrive;
+Library.exportRetroGroupesAllXlsxToDrive = exportRetroGroupesAllXlsxToDrive;
 }

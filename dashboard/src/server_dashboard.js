@@ -105,37 +105,37 @@ function getDashboardMetrics(){
 /**
  * Activité récente (10 lignes) : essaie IMPORT_LOG puis fallback ERREURS.
  */
-function getRecentActivity(){
-  const ss = openSeasonSpreadsheet_();
+// function getRecentActivity(){
+//   const ss = openSeasonSpreadsheet_();
 
-  // IMPORT_LOG prioritaire
-  const logT = readTable_(ss, DASH_SHEETS.IMPORT_LOG);
-  if (logT.rows.length){
-    const cDate = findCol_(logT.headers, ['date','timestamp','time','datetime']);
-    const cType = findCol_(logT.headers, ['type','level','categorie']);
-    const cMsg  = findCol_(logT.headers, ['message','details','detail','info','texte']);
-    return logT.rows.slice(-10).reverse().map(r=>({
-      date: formatDate_(cDate>=0 ? r[cDate] : ''),
-      type: cType>=0 ? String(r[cType]||'') : '',
-      details: cMsg>=0 ? String(r[cMsg]||'') : ''
-    }));
-  }
+//   // IMPORT_LOG prioritaire
+//   const logT = readTable_(ss, DASH_SHEETS.IMPORT_LOG);
+//   if (logT.rows.length){
+//     const cDate = findCol_(logT.headers, ['date','timestamp','time','datetime']);
+//     const cType = findCol_(logT.headers, ['type','level','categorie']);
+//     const cMsg  = findCol_(logT.headers, ['message','details','detail','info','texte']);
+//     return logT.rows.slice(-10).reverse().map(r=>({
+//       date: formatDate_(cDate>=0 ? r[cDate] : ''),
+//       type: cType>=0 ? String(r[cType]||'') : '',
+//       details: cMsg>=0 ? String(r[cMsg]||'') : ''
+//     }));
+//   }
 
-  // Fallback ERREURS
-  const errT = readTable_(ss, DASH_SHEETS.ERREURS);
-  if (errT.rows.length){
-    const cDate = findCol_(errT.headers, ['date','timestamp','time','datetime']);
-    const cType = findCol_(errT.headers, ['type','code','error','erreur']);
-    const cMsg  = findCol_(errT.headers, ['details','message','info','texte']);
-    return errT.rows.slice(-10).reverse().map(r=>({
-      date: formatDate_(cDate>=0 ? r[cDate] : ''),
-      type: cType>=0 ? String(r[cType]||'') : 'ERREUR',
-      details: cMsg>=0 ? String(r[cMsg]||'') : ''
-    }));
-  }
+//   // Fallback ERREURS
+//   const errT = readTable_(ss, DASH_SHEETS.ERREURS);
+//   if (errT.rows.length){
+//     const cDate = findCol_(errT.headers, ['date','timestamp','time','datetime']);
+//     const cType = findCol_(errT.headers, ['type','code','error','erreur']);
+//     const cMsg  = findCol_(errT.headers, ['details','message','info','texte']);
+//     return errT.rows.slice(-10).reverse().map(r=>({
+//       date: formatDate_(cDate>=0 ? r[cDate] : ''),
+//       type: cType>=0 ? String(r[cType]||'') : 'ERREUR',
+//       details: cMsg>=0 ? String(r[cMsg]||'') : ''
+//     }));
+//   }
 
-  return [];
-}
+//   return [];
+// }
 
 function formatDate_(v){
   if (v instanceof Date) {

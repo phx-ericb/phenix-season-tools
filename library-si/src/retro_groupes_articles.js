@@ -1,34 +1,107 @@
 /**
- * retro_groupe_articles.gs — v0.10-debug
- * - Export "Rétro - Groupe Articles" (10 colonnes)
- * - Unifie INSCRIPTIONS + ARTICLES (par passeport) pour compléter Nom/Prénom/DOB/Genre
- * - MAPPINGS unifiés (Type=article) pour Groupe/Catégorie (vars: U, U2, ageCat, genre/genreInitiale, article, saison, annee)
- * - Respecte CANCELLED/EXCLUDE_FROM_EXPORT + moteur de règles (RETRO_RULES_JSON)
- * - Écrit "Rétro - Erreurs"; logging détaillé si RETRO_DEBUG=TRUE
- */
+* retro_groupes_articles.gs — v0.11
+* - Conserve la logique existante de build (buildRetroGroupeArticlesRows)
+* - ✨ Ajout export incrémental : filtrage par passeports «touchés»
+* - options.onlyPassports (Array/Set)
+* - sinon: DocumentProperties.LAST_TOUCHED_PASSPORTS (CSV)
+* - Écrit XLSX dans le dossier paramétré; suffixe _INCR si filtré
+* - Forçage col. A (Passeport) en texte; normalisation 8 caractères si helpers dispo
+*/
 
 /* ===================== Param keys ===================== */
 if (typeof PARAM_KEYS === 'undefined') { var PARAM_KEYS = {}; }
-PARAM_KEYS.RETRO_GART_SHEET_NAME        = PARAM_KEYS.RETRO_GART_SHEET_NAME        || 'RETRO_GART_SHEET_NAME';
+PARAM_KEYS.RETRO_GART_SHEET_NAME = PARAM_KEYS.RETRO_GART_SHEET_NAME || 'RETRO_GART_SHEET_NAME';
 PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID = PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID || 'RETRO_GART_EXPORTS_FOLDER_ID';
 
-PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV   = PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV   || 'RETRO_GART_IGNORE_FEES_CSV';
-PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS    = PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS    || 'RETRO_GART_ELITE_KEYWORDS';
-PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING   = PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING   || 'RETRO_GART_REQUIRE_MAPPING';
+PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV = PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV || 'RETRO_GART_IGNORE_FEES_CSV';
+PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS = PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS || 'RETRO_GART_ELITE_KEYWORDS';
+PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING = PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING || 'RETRO_GART_REQUIRE_MAPPING';
 PARAM_KEYS.RETRO_GART_REQUIRE_INSCRIPTION = PARAM_KEYS.RETRO_GART_REQUIRE_INSCRIPTION || 'RETRO_GART_REQUIRE_INSCRIPTION';
-PARAM_KEYS.RETRO_DEBUG                  = PARAM_KEYS.RETRO_DEBUG                  || 'RETRO_DEBUG';
+PARAM_KEYS.RETRO_DEBUG = PARAM_KEYS.RETRO_DEBUG || 'RETRO_DEBUG';
 
-PARAM_KEYS.RETRO_RULES_JSON             = PARAM_KEYS.RETRO_RULES_JSON             || 'RETRO_RULES_JSON';
+PARAM_KEYS.RETRO_RULES_JSON = PARAM_KEYS.RETRO_RULES_JSON || 'RETRO_RULES_JSON';
 
-PARAM_KEYS.RETRO_GROUP_GROUPE_FMT       = PARAM_KEYS.RETRO_GROUP_GROUPE_FMT       || 'RETRO_GROUP_GROUPE_FMT';
-PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT    = PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT    || 'RETRO_GROUP_CATEGORIE_FMT';
+PARAM_KEYS.RETRO_GROUP_GROUPE_FMT = PARAM_KEYS.RETRO_GROUP_GROUPE_FMT || 'RETRO_GROUP_GROUPE_FMT';
+PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT = PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT || 'RETRO_GROUP_CATEGORIE_FMT';
 
 // Param erreurs
-PARAM_KEYS.RETRO_ERRORS_SHEET_NAME      = PARAM_KEYS.RETRO_ERRORS_SHEET_NAME      || 'RETRO_ERRORS_SHEET_NAME';
+PARAM_KEYS.RETRO_ERRORS_SHEET_NAME = PARAM_KEYS.RETRO_ERRORS_SHEET_NAME || 'RETRO_ERRORS_SHEET_NAME';
 
 // Adapté (pour exclure CDP0)
-PARAM_KEYS.RETRO_ADAPTE_KEYWORDS        = PARAM_KEYS.RETRO_ADAPTE_KEYWORDS        || 'RETRO_ADAPTE_KEYWORDS';
-PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS      = PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS      || 'RETRO_GROUP_SA_KEYWORDS';
+PARAM_KEYS.RETRO_ADAPTE_KEYWORDS = PARAM_KEYS.RETRO_ADAPTE_KEYWORDS || 'RETRO_ADAPTE_KEYWORDS';
+PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS = PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS || 'RETRO_GROUP_SA_KEYWORDS';
+PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID = PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID || 'RETRO_EXPORTS_FOLDER_ID';
+
+/* ===================== Fallbacks minimes ===================== */
+if (typeof CONTROL_COLS === 'undefined') {
+  var CONTROL_COLS = { ROW_HASH: 'ROW_HASH', CANCELLED: 'CANCELLED', EXCLUDE_FROM_EXPORT: 'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT: 'LAST_MODIFIED_AT' };
+}
+
+// Cache global partagé (idempotent)
+var __retroRulesCache = (typeof __retroRulesCache !== 'undefined')
+  ? __retroRulesCache
+  : { at: 0, data: null };
+
+function loadRetroRules_(ss) {
+  if (typeof SR_loadRetroRules_ === 'function') {
+    return SR_loadRetroRules_(ss);
+  }
+  var now = Date.now();
+  if (__retroRulesCache.data && (now - __retroRulesCache.at) < 5 * 60 * 1000) return __retroRulesCache.data;
+
+  var raw = readParam_(ss, PARAM_KEYS.RETRO_RULES_JSON) || '';
+  if (!raw) {
+    var shJson = ss.getSheetByName('RETRO_RULES_JSON');
+    if (shJson && shJson.getLastRow() >= 1 && shJson.getLastColumn() >= 1) {
+      var vals = shJson.getDataRange().getDisplayValues();
+      var pieces = [];
+      for (var i = 0; i < vals.length; i++) for (var j = 0; j < vals[i].length; j++) {
+        var cell = vals[i][j]; if (cell != null && String(cell).trim() !== '') pieces.push(String(cell));
+      }
+      raw = pieces.join('\n');
+      appendImportLog_(ss, 'RETRO_RULES_JSON_SHEET_READ', 'chars=' + raw.length);
+    }
+  }
+  var rules = [];
+  if (raw) {
+    try { var arr = JSON.parse(raw); rules = Array.isArray(arr)?arr:[]; }
+    catch(e){ appendImportLog_(ss, 'RETRO_RULES_JSON_PARSE_FAIL', String(e)); }
+  }
+  if (!rules.length) {
+    var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-sé,adulte,ligue';
+    var adapteCsv = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte';
+    var campCsv   = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS)   || 'camp de sélection u13,camp selection u13,camp u13';
+    var photoOn   = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
+    var photoCol  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
+    var warnMmDd  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
+    var absDate   = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
+    rules = [
+      { id:'ignore_fees', enabled:true, scope:'both',
+        when:{ field:'Nom du frais', contains_any: ignoreCsv.split(',') },
+        action:{ type:'ignore_row' } },
+      { id:'adapte_flag', enabled:true, scope:'both',
+        when:{ field:'Nom du frais', contains_any: adapteCsv.split(',') },
+        action:{ type:'set_member_field', field:'adapte', value:1 } },
+      { id:'cdp_2', enabled:true, scope:'articles',
+        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT', text_contains_any:['2','2 entrainements'] },
+        action:{ type:'set_member_field_max', field:'cdp', value:2 } },
+      { id:'cdp_1', enabled:true, scope:'articles',
+        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT' },
+        action:{ type:'set_member_field_max', field:'cdp', value:1 } },
+      { id:'camp_u13', enabled:true, scope:'articles',
+        when:{ field:'Nom du frais', contains_any: campCsv.split(',') },
+        action:{ type:'set_member_field', field:'camp', value:'Oui' } }
+    ];
+    if (photoOn && photoCol) {
+      rules.push({ id:'photo_policy', enabled:true, scope:'member',
+        action:{ type:'compute_photo', expiry_col:photoCol, warn_mmdd:warnMmDd, abs_date:absDate }});
+    }
+    appendImportLog_(ss, 'RETRO_RULES_JSON_FALLBACK', 'using PARAMS-derived defaults');
+  }
+  __retroRulesCache = { at: now, data: rules };
+  return rules;
+}
+
 
 /* ===================== DEBUG ===================== */
 function _dbg_(on, msg, obj) { if (!on) return; if (obj === undefined) { Logger.log(msg); } else { try { Logger.log(msg + ' ' + JSON.stringify(obj)); } catch (_) { Logger.log(msg); } } }
@@ -98,12 +171,12 @@ function _ga_extractUFromFeeText_(feeName) {
   return m ? ('U' + parseInt(m[1], 10)) : '';
 }
 function _ga_computeUandU2_(row, seasonYear, feeName) {
-   var by = _ga_deriveAgeYear_(row);
-   var U = '', U2 = '';
-   if (by) {
-     U2 = _ga_ageCat_(by, seasonYear);
-     if (U2) U = 'U' + parseInt(U2.slice(1), 10);
-   }
+  var by = _ga_deriveAgeYear_(row);
+  var U = '', U2 = '';
+  if (by) {
+    U2 = _ga_ageCat_(by, seasonYear);
+    if (U2) U = 'U' + parseInt(U2.slice(1), 10);
+  }
   return { U: U, U2: U2 };
 }
 
@@ -122,6 +195,8 @@ function _ga_applyRowRulesMaybeSkip_(rules, articleRow, ctx) {
   return !!(res && res.skip);
 }
 
+
+
 /* ==== Normalisation passeport ==== */
 function _ga_norm_passport_(ss, v) {
   var s = String(v == null ? '' : v).trim();
@@ -138,7 +213,7 @@ function _ga_norm_passport_(ss, v) {
 /* ==== Normalisation texte (espaces/tirets) ==== */
 function _low_(s) {
   s = String(s == null ? '' : s);
-  try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) {}
+  try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) { }
   s = s
     .replace(/\u00A0/g, ' ')                 // NBSP → espace
     .replace(/[\u2010-\u2015\u2212]/g, '-')  // tous les dashes → '-'
@@ -155,7 +230,7 @@ function _aliasMatchExplain_(feeName, alias) {
   var feeNorm = _low_(feeRaw);
   var aliNorm = _low_(aliRaw);
 
-  var rawContains  = !!(aliRaw && feeRaw.indexOf(aliRaw) !== -1);
+  var rawContains = !!(aliRaw && feeRaw.indexOf(aliRaw) !== -1);
   var normContains = !!(aliNorm && feeNorm.indexOf(aliNorm) !== -1);
 
   var tokensOk = false;
@@ -182,7 +257,7 @@ function _aliasMatchExplain_(feeName, alias) {
 function _findArticleMappingCandidates_(maps, feeName, vars, DEBUG) {
   var passed = [], failedU = [], tried = [], matched = [], debug = [];
   for (var i = 0; i < maps.length; i++) {
-    var m = maps[i]; 
+    var m = maps[i];
     if (m.Type !== 'article') continue;
     if (!m.AliasContains) continue;
 
@@ -198,15 +273,15 @@ function _findArticleMappingCandidates_(maps, feeName, vars, DEBUG) {
     if (m.Genre && m.Genre !== '*' && m.Genre !== (vars.genreInitiale || '')) continue;
 
     // U
-var uNum = parseInt(String(vars.U || '').replace(/^U/i, ''), 10) || 0;
+    var uNum = parseInt(String(vars.U || '').replace(/^U/i, ''), 10) || 0;
 
     if (vars.U) { var mm = String(vars.U).match(/^U(\d{1,2})$/i); if (mm) uNum = parseInt(mm[1], 10); }
-  var okU = true;
-if (uNum) {
-  if (m.Umin != null && uNum < m.Umin) okU = false;
-  if (m.Umax != null && uNum > m.Umax) okU = false;
-    if (okU) passed.push(m); else failedU.push(m);
-  }    
+    var okU = true;
+    if (uNum) {
+      if (m.Umin != null && uNum < m.Umin) okU = false;
+      if (m.Umax != null && uNum > m.Umax) okU = false;
+      if (okU) passed.push(m); else failedU.push(m);
+    }
   }
   return { passed: passed, failedU: failedU, triedAliases: tried, matchedAliases: matched, debug: debug };
 }
@@ -255,21 +330,60 @@ function _ga_buildMemberIndex_(ss) {
   return idx;
 }
 
+/* ===================== Lecture des «touchés» & filtre ===================== */
+function _ga_readTouchedPassportSet_(ss, options) {
+  options = options || {};
+  var set = {};
+
+  // 1) options.onlyPassports
+  var list = options.onlyPassports;
+  if (list && typeof list.forEach === 'function') {
+    list.forEach(function (p) { var t = _ga_norm_passport_(p); if (t) set[t] = true; });
+  }
+
+  // 2) Fallback: DocumentProperties.LAST_TOUCHED_PASSPORTS (JSON ou CSV)
+  if (!Object.keys(set).length) {
+    try {
+      var raw = (PropertiesService.getDocumentProperties().getProperty('LAST_TOUCHED_PASSPORTS') || '').trim();
+      if (raw) {
+        var arr = (raw.charAt(0) === '[') ? JSON.parse(raw) : raw.split(',');
+        arr.forEach(function (p) { var t = _ga_norm_passport_(p); if (t) set[t] = true; });
+      }
+    } catch (_) { }
+  }
+  return set; // possiblement vide → pas de filtrage
+}
+
+
+
+
+function _ga_filterRowsByPassports_(rows, touchedSet) {
+  var keys = Object.keys(touchedSet || {});
+  if (!keys.length) return rows;
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var p = _ga_norm_passport_(row && row[0]); // col A = Passeport
+    if (p && touchedSet[p]) out.push(row);
+  }
+  return out;
+}
+
 /* ===================== Construction + Erreurs ===================== */
 function buildRetroGroupeArticlesRows(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
   var DEBUG = String(readParam_(ss, PARAM_KEYS.RETRO_DEBUG) || 'FALSE').toUpperCase() === 'TRUE';
 
   var insc = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS);
-  var art  = readSheetAsObjects_(ss.getId(), SHEETS.ARTICLES);
+  var art = readSheetAsObjects_(ss.getId(), SHEETS.ARTICLES);
 
-  var rules    = _ga_loadRules_(ss);
+  var rules = _ga_loadRules_(ss);
   var mappings = _loadUnifiedGroupMappings_(ss);
-  _dbg_(DEBUG, '[GART] mappings loaded', { count: (mappings||[]).length });
+  _dbg_(DEBUG, '[GART] mappings loaded', { count: (mappings || []).length });
 
   // Filtres
   var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV) || readParam_(ss, 'RETRO_IGNORE_FEES_CSV') || 'senior,u-sé,adulte,ligue';
-  var eliteCsv  = readParam_(ss, PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS)  || 'D1+,LDP,Ligue';
+  var eliteCsv = readParam_(ss, PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS) || 'D1+,LDP,Ligue';
   var requireMp = (String(readParam_(ss, PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING) || 'TRUE').toUpperCase() === 'TRUE');
   var requireInsc = (String(readParam_(ss, PARAM_KEYS.RETRO_GART_REQUIRE_INSCRIPTION) || 'FALSE').toUpperCase() === 'TRUE');
 
@@ -288,7 +402,7 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
 
   // Saison/année
   var seasonLabel = readParam_(ss, 'SEASON_LABEL') || (activeArts[0] && activeArts[0]['Saison']) || '';
-  var seasonYear  = parseSeasonYear_(seasonLabel);
+  var seasonYear = parseSeasonYear_(seasonLabel);
   _dbg_(DEBUG, '[GART] season', { label: seasonLabel, year: seasonYear });
 
   var ctx = { ss: ss, catalog: (typeof _loadArticlesCatalog_ === 'function' ? _loadArticlesCatalog_(ss) : { match: function () { return null; } }) };
@@ -310,17 +424,17 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
 
   // Exclusivité & Adapté
   var perPassExclusive = {}; // pass -> { groupName -> [ {feeName, code} ] }
-  var perPassIsAdapte  = {}; // pass -> true si un article/inscription correspond aux mots-clés "Adapté"
+  var perPassIsAdapte = {}; // pass -> true si un article/inscription correspond aux mots-clés "Adapté"
 
   activeArts.forEach(function (a, idx) {
     if (_ga_applyRowRulesMaybeSkip_(rules, a, ctx)) { _dbg_(DEBUG, '[GART] skip by rules', { i: idx }); return; }
 
     var feeName = a['Nom du frais'] || a['Frais'] || a['Produit'] || '';
     if (_ga_containsAny_(feeName, ignoreCsv)) { _dbg_(DEBUG, '[GART] skip ignoreCsv', { fee: feeName }); return; }
-    if (_ga_containsAny_(feeName, eliteCsv))  { _dbg_(DEBUG, '[GART] skip eliteCsv',  { fee: feeName }); return; }
+    if (_ga_containsAny_(feeName, eliteCsv)) { _dbg_(DEBUG, '[GART] skip eliteCsv', { fee: feeName }); return; }
 
     var passRaw = a['Passeport #'];
-    var passK   = _ga_norm_passport_(ss, passRaw);
+    var passK = _ga_norm_passport_(ss, passRaw);
     if (!passK) { _dbg_(DEBUG, '[GART] no passport, skip', { fee: feeName }); return; }
 
     // Article sans inscription active ?
@@ -411,7 +525,7 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
       }
     } else {
       if (!requireMp) {
-        var gfmtFb = readParam_(ss, PARAM_KEYS.RETRO_GROUP_GROUPE_FMT)    || '{{U2}}{{genreInitiale}}';
+        var gfmtFb = readParam_(ss, PARAM_KEYS.RETRO_GROUP_GROUPE_FMT) || '{{U2}}{{genreInitiale}}';
         var cfmtFb = readParam_(ss, PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT) || '{{U2}} {{genreInitiale}}';
         mp = { groupe: _ga_tpl_(gfmtFb, vars), categorie: _ga_tpl_(cfmtFb, vars), exclude: false, exclusiveGroup: '', code: '' };
       } else {
@@ -422,9 +536,9 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     if (mp && mp.exclude) { _dbg_(DEBUG, '[GART] excluded by mapping', { fee: feeName }); return; }
 
     var groupe = (mp && mp.groupe) || '';
-    var categ  = (mp && mp.categorie) || '';
-    var exg    = (mp && mp.exclusiveGroup) || '';
-    var code   = (mp && mp.code) || '';
+    var categ = (mp && mp.categorie) || '';
+    var exg = (mp && mp.exclusiveGroup) || '';
+    var code = (mp && mp.code) || '';
 
     if (exg) {
       perPassExclusive[passK] = perPassExclusive[passK] || {};
@@ -470,7 +584,7 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
   Object.keys(inscActivePass).forEach(function (passK) {
     var m = memberIdx[passK] || {};
     var UU2m = _ga_computeUandU2_({ 'Date de naissance': m.dob, 'Naissance': m.dob }, seasonYear, '');
-    var Um  = UU2m.U  || '';
+    var Um = UU2m.U || '';
     var U2m = UU2m.U2 || '';
     var uNum = parseInt(String(Um).replace(/^U/i, ''), 10);
     if (!(uNum >= 9 && uNum <= 12)) return;
@@ -495,14 +609,14 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
       // **Ligne d'export synthétique CDP0**
       var gInitM = m.genreInit || (m.genreLabel === 'Féminin' ? 'F' : (m.genreLabel === 'Masculin' ? 'M' : (m.genreLabel === 'Mixte' ? 'X' : '')));
       var groupe = (U2m || '').concat(gInitM ? gInitM : '').concat(' CDP0'); // ex: U10M CDP0
-      var categ  = (U2m || '') + (gInitM ? (' ' + gInitM) : '');            // ex: U10 M
+      var categ = (U2m || '') + (gInitM ? (' ' + gInitM) : '');            // ex: U10 M
 
       var nbCols = header.length;
       var rowOut = new Array(nbCols).fill("");
       rowOut[0] = _ga_norm_passport_(ss, passK);
       rowOut[1] = m.nom || '';
       rowOut[2] = m.prenom || '';
-      rowOut[3] = m.dob || '';
+      rowOut[3] = m.dob || ''; 
       rowOut[8] = groupe;
       rowOut[9] = categ;
       rows.push(rowOut);
@@ -521,12 +635,10 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
 }
 
 
-/* ===================== Écriture feuilles ===================== */
-
+/* ===================== Feuille de travail (facultatif) ===================== */
 function writeRetroGroupeArticlesSheet(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
   var out = buildRetroGroupeArticlesRows(seasonSheetId);
-
   var sheetName = readParam_(ss, PARAM_KEYS.RETRO_GART_SHEET_NAME) || 'Rétro - Groupe Articles';
   var sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
   sh.clearContents();
@@ -534,14 +646,9 @@ function writeRetroGroupeArticlesSheet(seasonSheetId) {
   if (out.rows.length) {
     sh.getRange(2, 1, out.rows.length, out.nbCols).setValues(out.rows);
     sh.autoResizeColumns(1, out.nbCols);
-    if (sh.getLastRow() > 1) {
-      sh.getRange(2, 1, sh.getLastRow() - 1, 1).setNumberFormat('@');
-      sh.getRange('A:A').setNumberFormat('@');
-    }
+    if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, 1).setNumberFormat('@');
   }
   appendImportLog_(ss, 'RETRO_GART_SHEET_OK', 'rows=' + out.rows.length);
-
-  _writeRetroErrors_(ss, out.errors);
   return out.rows.length;
 }
 
@@ -572,55 +679,56 @@ function _writeRetroErrors_(ss, errors) {
   sh.autoResizeColumns(1, header.length);
 }
 
-/** Export XLSX rapide — Rétro Groupe Articles */
-function exportRetroGroupeArticlesXlsxToDrive(seasonSheetId) {
-  var ss = getSeasonSpreadsheet_(seasonSheetId);
-  var out = buildRetroGroupeArticlesRows(seasonSheetId);
+/* ===================== EXPORT XLSX (Groupe Articles SEUL) — avec filtre optionnel ===================== */
 
-  // 1) Temp minimal
-  var temp = SpreadsheetApp.create('Export temporaire - Retro Groupe Articles');
-  var tmp = temp.getSheets()[0];
-  tmp.setName('Export');
+function exportRetroGroupeArticlesXlsxToDrive(seasonSheetId, options){
+var ss = getSeasonSpreadsheet_(seasonSheetId);
+var out = buildRetroGroupeArticlesRows(seasonSheetId);
 
-  // 2) Écriture header + data
-  var all = [out.header].concat(out.rows);
 
-  // Normalise Passeport -> texte si helper dispo
-  if (typeof normalizePassportToText8_ === 'function') {
-    for (var i = 1; i < all.length; i++) {
-      all[i][0] = normalizePassportToText8_(all[i][0]);
-    }
-  }
-  if (all.length) {
-    tmp.getRange(1, 1, all.length, out.nbCols).setValues(all);
-    if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
-  }
-  SpreadsheetApp.flush();
+// Filtrage incrémental
+var touched = _ga_readTouchedPassportSet_(ss, options);
+var rows = _ga_filterRowsByPassports_(out.rows, touched);
+var filtered = rows.length !== out.rows.length;
 
-  // 3) Export XLSX
-  var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-  var blob = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
-  var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
-  blob.setName('Export_Retro_Groupe_Articles_' + ts + '.xlsx');
 
-  // 4) Destination
-  var folderId = readParam_(ss, PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID)
-    || readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
-  var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
-  var file = dest.createFile(blob);
+// Classeur temporaire minimal
+var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupe Articles');
+var tmp = temp.getSheets()[0];
+tmp.setName('Export');
 
-  // 5) Nettoyage + log
-  DriveApp.getFileById(temp.getId()).setTrashed(true);
-  appendImportLog_(ss, 'RETRO_GART_XLSX_OK_FAST', file.getName() + ' -> ' + dest.getName() + ' (rows=' + out.rows.length + ')');
 
-  // 6) Écrit/MAJ l’onglet Erreurs
-  _writeRetroErrors_(ss, out.errors);
-  return { fileId: file.getId(), name: file.getName(), rows: out.rows.length, errors: out.errors.length };
+var all = [out.header].concat(rows);
+if (typeof normalizePassportToText8_ === 'function') {
+for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
+}
+if (all.length) {
+tmp.getRange(1, 1, all.length, out.nbCols).setValues(all);
+if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
+}
+SpreadsheetApp.flush();
+
+
+var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
+var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
+var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
+blob.setName('Export_Retro_Groupe_Articles_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
+
+
+var folderId = readParam_(ss, PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID)
+|| readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
+var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+var file = dest.createFile(blob);
+
+
+DriveApp.getFileById(temp.getId()).setTrashed(true);
+appendImportLog_(ss, 'RETRO_GART_XLSX_OK', file.getName() + ' -> ' + dest.getName() + ' (rows=' + rows.length + ', filtered=' + filtered + ')');
+return { fileId:file.getId(), name:file.getName(), rows: rows.length, filtered: filtered };
 }
 
 /* ========== Exposition facultative via Library ========== */
 if (typeof Library !== 'undefined') {
-  Library.buildRetroGroupeArticlesRows = buildRetroGroupeArticlesRows;
-  Library.writeRetroGroupeArticlesSheet = writeRetroGroupeArticlesSheet;
-  Library.exportRetroGroupeArticlesXlsxToDrive = exportRetroGroupeArticlesXlsxToDrive;
+Library.buildRetroGroupeArticlesRows = buildRetroGroupeArticlesRows;
+Library.writeRetroGroupeArticlesSheet = writeRetroGroupeArticlesSheet;
+Library.exportRetroGroupeArticlesXlsxToDrive = exportRetroGroupeArticlesXlsxToDrive;
 }

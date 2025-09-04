@@ -10,6 +10,14 @@
  *  - "Muté" via une feuille de mutation configurable
  *  - (optionnel) colonne Photo selon date d’expiration + cutoff paramétrés
  *
+ * retro_members.gs — v0.11 (incrémental)
+* - Garde la logique de build existante (buildRetroMembresRows)
+* - ✨ Ajoute le filtrage des exports par passeports «touchés»
+* - options.onlyPassports (Array/Set)
+* - à défaut: DocumentProperties.LAST_TOUCHED_PASSPORTS (CSV)
+* - Force la col. A (Passeport) en texte et normalise en 8 chars si helpers dispo
+* - Suffixe le nom de fichier par _INCR si filtrage appliqué
+
  * Fonctions exposées:
  *  - buildRetroMembresRows(seasonSheetId) -> {header:[], rows:[[]], nbCols:int}
  *  - writeRetroMembresSheet(seasonSheetId) -> écrit "Rétro - Membres"
@@ -18,20 +26,110 @@
 
 /* ===================== Param keys (nouvelles) ===================== */
 if (typeof PARAM_KEYS === 'undefined') { var PARAM_KEYS = {}; }
-PARAM_KEYS.RETRO_IGNORE_FEES_CSV            = PARAM_KEYS.RETRO_IGNORE_FEES_CSV            || 'RETRO_IGNORE_FEES_CSV';
-PARAM_KEYS.RETRO_ADAPTE_KEYWORDS            = PARAM_KEYS.RETRO_ADAPTE_KEYWORDS            || 'RETRO_ADAPTE_KEYWORDS';
-PARAM_KEYS.RETRO_CAMP_KEYWORDS              = PARAM_KEYS.RETRO_CAMP_KEYWORDS              || 'RETRO_CAMP_KEYWORDS';
-PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID          = PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID          || 'RETRO_EXPORTS_FOLDER_ID';
-PARAM_KEYS.RETRO_MUTATION_SHEET             = PARAM_KEYS.RETRO_MUTATION_SHEET             || 'RETRO_MUTATION_SHEET';
-
-PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL          = PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL          || 'RETRO_PHOTO_INCLUDE_COL';     // TRUE/FALSE
-PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL           = PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL           || 'RETRO_PHOTO_EXPIRY_COL';      // header côté INSCRIPTIONS
-PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE        = PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE        || 'RETRO_PHOTO_WARN_ABS_DATE';   // YYYY-MM-DD (optionnel)
-PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD     = PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD     || 'RETRO_PHOTO_WARN_BEFORE_MMDD';// ex "03-01" (1er mars)
+PARAM_KEYS.RETRO_IGNORE_FEES_CSV = PARAM_KEYS.RETRO_IGNORE_FEES_CSV || 'RETRO_IGNORE_FEES_CSV';
+PARAM_KEYS.RETRO_ADAPTE_KEYWORDS = PARAM_KEYS.RETRO_ADAPTE_KEYWORDS || 'RETRO_ADAPTE_KEYWORDS';
+PARAM_KEYS.RETRO_CAMP_KEYWORDS = PARAM_KEYS.RETRO_CAMP_KEYWORDS || 'RETRO_CAMP_KEYWORDS';
+PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID = PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID || 'RETRO_EXPORTS_FOLDER_ID';
+PARAM_KEYS.RETRO_MUTATION_SHEET = PARAM_KEYS.RETRO_MUTATION_SHEET || 'RETRO_MUTATION_SHEET';
+PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL = PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL || 'RETRO_PHOTO_INCLUDE_COL';
+PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL = PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL || 'RETRO_PHOTO_EXPIRY_COL';
+PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE = PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE || 'RETRO_PHOTO_WARN_ABS_DATE';
+PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD = PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD || 'RETRO_PHOTO_WARN_BEFORE_MMDD';
 PARAM_KEYS.RETRO_EXCLUDE_MEMBER_IF_ONLY_IGN = PARAM_KEYS.RETRO_EXCLUDE_MEMBER_IF_ONLY_IGN || 'RETRO_EXCLUDE_MEMBER_IF_ONLY_IGN';
-PARAM_KEYS.RETRO_RULES_JSON                 = PARAM_KEYS.RETRO_RULES_JSON                 || 'RETRO_RULES_JSON';
+PARAM_KEYS.RETRO_RULES_JSON = PARAM_KEYS.RETRO_RULES_JSON || 'RETRO_RULES_JSON';
+
+// Cache global partagé (idempotent)
+var __retroRulesCache = (typeof __retroRulesCache !== 'undefined')
+  ? __retroRulesCache
+  : { at: 0, data: null };
+
+function loadRetroRules_(ss) {
+  // 1) Si la version centralisée est dispo (server_rules.js), on l’utilise.
+  if (typeof SR_loadRetroRules_ === 'function') {
+    return SR_loadRetroRules_(ss);
+  }
+
+  // 2) Fallback local avec cache 5 minutes
+  var now = Date.now();
+  if (__retroRulesCache.data && (now - __retroRulesCache.at) < 5 * 60 * 1000) {
+    return __retroRulesCache.data;
+  }
+
+  // PARAM direct
+  var raw = readParam_(ss, PARAM_KEYS.RETRO_RULES_JSON) || '';
+
+  // Feuille "RETRO_RULES_JSON" si vide
+  if (!raw) {
+    var shJson = ss.getSheetByName('RETRO_RULES_JSON');
+    if (shJson && shJson.getLastRow() >= 1 && shJson.getLastColumn() >= 1) {
+      var vals = shJson.getDataRange().getDisplayValues();
+      var pieces = [];
+      for (var i = 0; i < vals.length; i++) {
+        for (var j = 0; j < vals[i].length; j++) {
+          var cell = vals[i][j];
+          if (cell != null && String(cell).trim() !== '') pieces.push(String(cell));
+        }
+      }
+      raw = pieces.join('\n');
+      appendImportLog_(ss, 'RETRO_RULES_JSON_SHEET_READ', 'chars=' + raw.length);
+    }
+  }
+
+  // Parse JSON
+  var rules = [];
+  if (raw) {
+    try {
+      var arr = JSON.parse(raw);
+      rules = Array.isArray(arr) ? arr : [];
+    } catch (e) {
+      appendImportLog_(ss, 'RETRO_RULES_JSON_PARSE_FAIL', String(e));
+    }
+  }
+
+  // Defaults si rien
+  if (!rules.length) {
+    var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-sé,adulte,ligue';
+    var adapteCsv = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte';
+    var campCsv   = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS)   || 'camp de sélection u13,camp selection u13,camp u13';
+    var photoOn   = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
+    var photoCol  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
+    var warnMmDd  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
+    var absDate   = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
+
+    rules = [
+      { id:'ignore_fees', enabled:true, scope:'both',
+        when:{ field:'Nom du frais', contains_any: ignoreCsv.split(',') },
+        action:{ type:'ignore_row' } },
+      { id:'adapte_flag', enabled:true, scope:'both',
+        when:{ field:'Nom du frais', contains_any: adapteCsv.split(',') },
+        action:{ type:'set_member_field', field:'adapte', value:1 } },
+      { id:'cdp_2', enabled:true, scope:'articles',
+        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT', text_contains_any:['2','2 entrainements'] },
+        action:{ type:'set_member_field_max', field:'cdp', value:2 } },
+      { id:'cdp_1', enabled:true, scope:'articles',
+        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT' },
+        action:{ type:'set_member_field_max', field:'cdp', value:1 } },
+      { id:'camp_u13', enabled:true, scope:'articles',
+        when:{ field:'Nom du frais', contains_any: campCsv.split(',') },
+        action:{ type:'set_member_field', field:'camp', value:'Oui' } }
+    ];
+    if (photoOn && photoCol) {
+      rules.push({ id:'photo_policy', enabled:true, scope:'member',
+        action:{ type:'compute_photo', expiry_col:photoCol, warn_mmdd:warnMmDd, abs_date:absDate }});
+    }
+    appendImportLog_(ss, 'RETRO_RULES_JSON_FALLBACK', 'using PARAMS-derived defaults');
+  }
+
+  __retroRulesCache = { at: now, data: rules };
+  return rules;
+}
+
 
 /* ===================== Helpers bas niveau ===================== */
+
+if (typeof CONTROL_COLS === 'undefined') {
+var CONTROL_COLS = { ROW_HASH:'ROW_HASH', CANCELLED:'CANCELLED', EXCLUDE_FROM_EXPORT:'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT:'LAST_MODIFIED_AT' };
+}
 
 // ——— Birth year robuste: gère Date, ISO, FR, tout ce qui contient un yyyy ———
 function _extractBirthYearLoose_(v){
@@ -170,69 +268,7 @@ function _computePhotoCell_(ss, row){
  *  2) onglet feuille nommé "RETRO_RULES_JSON" (JSON dans A1 ou multi-lignes concaténées)
  *  (fallback) dérive depuis d'autres PARAMS si rien n’est trouvé
  */
-function loadRetroRules_(ss){
-  // 1) PARAM direct
-  var raw = readParam_(ss, PARAM_KEYS.RETRO_RULES_JSON) || '';
-  if (!raw) {
-    // 2) Feuille "RETRO_RULES_JSON"
-    var shJson = ss.getSheetByName('RETRO_RULES_JSON');
-    if (shJson && shJson.getLastRow() >= 1 && shJson.getLastColumn() >= 1) {
-      var vals = shJson.getDataRange().getDisplayValues();
-      // a) si A1 contient tout le JSON, on le prend; sinon on concatène toutes les cellules avec des retours
-      var pieces = [];
-      for (var i=0;i<vals.length;i++){
-        for (var j=0;j<vals[i].length;j++){
-          var cell = vals[i][j];
-          if (cell != null && String(cell).trim() !== '') pieces.push(String(cell));
-        }
-      }
-      raw = pieces.join('\n');
-      appendImportLog_(ss, 'RETRO_RULES_JSON_SHEET_READ', 'chars='+raw.length);
-    }
-  }
-  if (raw) {
-    try {
-      var arr = JSON.parse(raw);
-      return (Array.isArray(arr) ? arr : []);
-    } catch(e) {
-      appendImportLog_(ss, 'RETRO_RULES_JSON_PARSE_FAIL', String(e));
-    }
-  }
 
-  // Fallback: déduire depuis tes PARAMS actuels
-  var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-sé,adulte,ligue';
-  var adapteCsv = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte,adapte';
-  var campCsv   = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS)   || 'camp de sélection u13,camp selection u13,camp u13';
-  var photoOn   = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL)||'FALSE').toUpperCase()==='TRUE';
-  var photoCol  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
-  var warnMmDd  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
-  var absDate   = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
-
-  var rules = [
-    { id:'ignore_fees', enabled:true, scope:'both',
-      when:{ field:'Nom du frais', contains_any: ignoreCsv.split(',') },
-      action:{ type:'ignore_row' } },
-    { id:'adapte_flag', enabled:true, scope:'both',
-      when:{ field:'Nom du frais', contains_any: adapteCsv.split(',') },
-      action:{ type:'set_member_field', field:'adapte', value:1 } },
-    // CDP via catalogue: 2 séances avant 1 séance
-    { id:'cdp_2', enabled:true, scope:'articles',
-      when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT', text_contains_any:['2','2 entrainements'] },
-      action:{ type:'set_member_field_max', field:'cdp', value:2 } },
-    { id:'cdp_1', enabled:true, scope:'articles',
-      when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT' },
-      action:{ type:'set_member_field_max', field:'cdp', value:1 } },
-    { id:'camp_u13', enabled:true, scope:'articles',
-      when:{ field:'Nom du frais', contains_any: campCsv.split(',') },
-      action:{ type:'set_member_field', field:'camp', value:'Oui' } }
-  ];
-  if (photoOn && photoCol) {
-    rules.push({ id:'photo_policy', enabled:true, scope:'member',
-      action:{ type:'compute_photo', expiry_col:photoCol, warn_mmdd:warnMmDd, abs_date:absDate }});
-  }
-  appendImportLog_(ss, 'RETRO_RULES_JSON_FALLBACK', 'using PARAMS-derived defaults');
-  return rules;
-}
 
 function _r_normLower_(s){ return _nrmLower_(s); }
 function _r_getFieldText_(row, field){
@@ -533,69 +569,91 @@ row[0] = (typeof normalizePassportToText8_ === 'function')
   return { header: header, rows: rows, nbCols: header.length };
 }
 
+/* ===================== Filtrage incrémental (touchés) ===================== */
+function _rm_norm_passport_(v) { var s = String(v == null ? '' : v).trim(); try { if (typeof normalizePassportToText8_ === 'function') return normalizePassportToText8_(s); } catch (_) { } try { if (typeof normalizePassportPlain8_ === 'function') return normalizePassportPlain8_(s); } catch (_) { } return s; }
+function _rm_readTouchedPassportSet_(options) {
+  options = options || {};
+  var set = {};
+
+  // 1) options.onlyPassports
+  var list = options.onlyPassports;
+  if (list && typeof list.forEach === 'function') {
+    list.forEach(function (p) { var t = _rm_norm_passport_(p); if (t) set[t] = true; });
+  }
+
+  // 2) Fallback: DocumentProperties.LAST_TOUCHED_PASSPORTS (JSON ou CSV)
+  if (!Object.keys(set).length) {
+    try {
+      var raw = (PropertiesService.getDocumentProperties().getProperty('LAST_TOUCHED_PASSPORTS') || '').trim();
+      if (raw) {
+        var arr = (raw.charAt(0) === '[') ? JSON.parse(raw) : raw.split(',');
+        arr.forEach(function (p) { var t = _rm_norm_passport_(p); if (t) set[t] = true; });
+      }
+    } catch (_) { }
+  }
+  return set;
+}
+
+
+function _rm_filterRowsByPassports_(rows, touchedSet){ var keys=Object.keys(touchedSet||{}); if(!keys.length) return rows; var out=[]; for(var i=0;i<rows.length;i++){ var row=rows[i]; var p=_rm_norm_passport_(row && row[0]); if(p && touchedSet[p]) out.push(row); } return out; }
+
 /* ===================== Écriture feuille & export XLSX ===================== */
-
-function writeRetroMembresSheet(seasonSheetId) {
-  var ss = getSeasonSpreadsheet_(seasonSheetId);
-  var res = buildRetroMembresRows(seasonSheetId);
-
-  var sh = ss.getSheetByName('Rétro - Membres') || ss.insertSheet('Rétro - Membres');
-  // reset
-  sh.clearContents();
-  sh.getRange(1,1,1,res.header.length).setValues([res.header]);
-  if (res.rows.length) {
-    sh.getRange(2,1,res.rows.length,res.nbCols).setValues(res.rows);
-    sh.autoResizeColumns(1, res.nbCols);
-    if (sh.getLastRow() > 1) sh.getRange(2,1,sh.getLastRow()-1,1).setNumberFormat('@'); // passeport en texte
-  }
-  appendImportLog_(ss, 'RETRO_MEMBRES_SHEET_OK', 'rows='+res.rows.length);
-  return res.rows.length;
+function writeRetroMembresSheet(seasonSheetId){
+var ss = getSeasonSpreadsheet_(seasonSheetId);
+var res = buildRetroMembresRows(seasonSheetId);
+var sh = ss.getSheetByName('Rétro - Membres') || ss.insertSheet('Rétro - Membres');
+sh.clearContents();
+sh.getRange(1,1,1,res.header.length).setValues([res.header]);
+if(res.rows.length){ sh.getRange(2,1,res.rows.length,res.nbCols).setValues(res.rows); sh.autoResizeColumns(1, res.nbCols); if(sh.getLastRow()>1) sh.getRange(2,1,sh.getLastRow()-1,1).setNumberFormat('@'); }
+appendImportLog_(ss,'RETRO_MEMBRES_SHEET_OK','rows='+res.rows.length);
+return res.rows.length;
 }
 
-/** Export XLSX rapide: évite copyTo, écrit directement dans un classeur temporaire minimal. */
-function exportRetroMembresXlsxToDrive(seasonSheetId) {
-  var ss = getSeasonSpreadsheet_(seasonSheetId);
+/** Export XLSX rapide (avec filtrage incrémental optionnel) */
+function exportRetroMembresXlsxToDrive(seasonSheetId, options){
+var ss = getSeasonSpreadsheet_(seasonSheetId);
+var res = buildRetroMembresRows(seasonSheetId); // {header, rows, nbCols}
 
-  // 1) Construit les données (sans écrire dans "Rétro - Membres")
-  var res = buildRetroMembresRows(seasonSheetId); // {header, rows, nbCols}
 
-  // 2) Classeur temporaire minimal
-  var temp = SpreadsheetApp.create('Export temporaire - Retro Membres');
-  var tmp = temp.getSheets()[0];
-  tmp.setName('Export');
+// Filtrage incrémental
+var touched = _rm_readTouchedPassportSet_(options);
+var rows = _rm_filterRowsByPassports_(res.rows, touched);
+var filtered = rows.length !== res.rows.length;
 
-  // 3) Ecriture en un seul setValues (header + data)
-  var all = [res.header].concat(res.rows);
-  if (all.length) {
-    tmp.getRange(1, 1, all.length, res.nbCols).setValues(all);
-    // Passeport texte (ceinture+bretelles: on garde aussi l’apostrophe côté build si dispo)
-    if (all.length > 1) {
-      tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
-    }
-  }
-  SpreadsheetApp.flush();
 
-  // 4) Export XLSX (une seule feuille, pas de formatting lourd)
-  var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-  var blob = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
-  var fileName = 'Export_Retro_Membres_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm') + '.xlsx';
-  blob.setName(fileName);
+// Classeur temporaire minimal
+var temp = SpreadsheetApp.create('Export temporaire - Retro Membres');
+var tmp = temp.getSheets()[0];
+tmp.setName('Export');
 
-  var folderId = readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
-  var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
-  var xlsx = dest.createFile(blob);
 
-  // 5) Nettoyage
-  DriveApp.getFileById(temp.getId()).setTrashed(true);
-
-  appendImportLog_(ss, 'RETRO_MEMBRES_XLSX_OK_FAST', xlsx.getName() + ' -> ' + dest.getName() + ' (rows=' + res.rows.length + ')');
-  return { fileId: xlsx.getId(), name: xlsx.getName(), rows: res.rows.length };
+var all = [res.header].concat(rows);
+if (typeof normalizePassportToText8_ === 'function') {
+for (var i=1; i<all.length; i++){ if(all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
 }
+if (all.length){ tmp.getRange(1,1,all.length,res.nbCols).setValues(all); if(all.length>1) tmp.getRange(2,1,all.length-1,1).setNumberFormat('@'); }
+SpreadsheetApp.flush();
 
+
+var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
+var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer '+ScriptApp.getOAuthToken() } }).getBlob();
+var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
+blob.setName('Export_Retro_Membres_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
+
+
+var folderId = readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
+var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+var xlsx = dest.createFile(blob);
+
+
+DriveApp.getFileById(temp.getId()).setTrashed(true);
+appendImportLog_(ss,'RETRO_MEMBRES_XLSX_OK_FAST', xlsx.getName() + ' -> ' + dest.getName() + ' (rows=' + rows.length + ', filtered=' + filtered + ')');
+return { fileId: xlsx.getId(), name: xlsx.getName(), rows: rows.length, filtered: filtered };
+}
 
 /* ========== Exposition facultative via Library ========== */
 if (typeof Library !== 'undefined') {
-  Library.buildRetroMembresRows = buildRetroMembresRows;
-  Library.writeRetroMembresSheet = writeRetroMembresSheet;
-  Library.exportRetroMembresXlsxToDrive = exportRetroMembresXlsxToDrive;
+Library.buildRetroMembresRows = buildRetroMembresRows;
+Library.writeRetroMembresSheet = writeRetroMembresSheet;
+Library.exportRetroMembresXlsxToDrive = exportRetroMembresXlsxToDrive;
 }

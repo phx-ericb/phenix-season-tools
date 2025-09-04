@@ -10,11 +10,59 @@ const PARAM_GROUPS = [
   { id:'retro-m', label:'Rétro — Membres' },
   { id:'retro-g', label:'Rétro — Groupes' },
   { id:'retro-ga', label:'Rétro — Groupe Articles' },
+  { id:'season', label:'Saison' },            // ← AJOUTÉ
   { id:'others', label:'Autres' },
 ];
 
+
 // Titre & aide par clé
 const PARAM_META = {
+
+  DRIVE_FOLDER_VALIDATION_MEMBRES: { 
+    group:'import', 
+    title:'Dossier Drive Validation_Membres',
+    desc:'ID du dossier Drive contenant le fichier Validation_Membres (1 fichier actif + sous-dossier Archives)' 
+  },
+  SHEET_MEMBRES_GLOBAL: { 
+    group:'import', 
+    title:'Feuille MEMBRES_GLOBAL',
+    desc:'Nom de la feuille centrale qui contient les membres avec expiration photo/casier'
+  },
+  SEASON_YEAR: { 
+    group:'season', 
+    title:'Année de saison courante',
+    desc:'Année utilisée pour invalider les photos (ex. 2025)'
+  },
+  PHOTO_INVALID_FROM_MMDD: { 
+    group:'season', 
+    title:'Date de début invalidité photo',
+    desc:'Mois-jour à partir duquel les photos expirant dans l’année deviennent invalides (ex. 04-01)'
+  },
+  MAIL_USE_GMAILAPP: {
+  group:'mail',
+  title:'Utiliser GmailApp',
+  help:'TRUE ➜ GmailApp (labels/filtres Gmail possibles). FALSE ➜ MailApp.'
+},
+DRY_REDIRECT_EMAIL: {
+  group:'mail',
+  title:'Redirection en mode DRY_RUN',
+  help:'Si DRY_RUN=TRUE, tous les envois sont redirigés vers cette adresse.'
+},
+
+// --- Rétro — Membres ---
+RETRO_COACH_FEES_CSV: {
+  group:'retro-m',
+  title:'Frais « entraîneur/coach »',
+  help:'Liste CSV. Ces frais seront exclus des règles joueurs et des exports membres.'
+},
+
+// --- Règles (optionnel) ---
+RETRO_RULES_JSON: {
+  group:'rules',
+  title:'Règles JSON (RETRO_RULES_JSON)',
+  help:'JSON brut des règles. Laisse vide pour utiliser les valeurs PARAMS par défaut.'
+},
+
   // Imports
   DRIVE_FOLDER_IMPORTS: { group:'import', title:'Dossier Drive des imports', help:'ID du dossier Drive contenant les fichiers sources à importer.' },
   FILE_PATTERN_INSCRIPTIONS: { group:'import', title:'Filtre fichiers — Inscriptions', help:'Sous-chaîne à trouver dans les noms de fichiers.' },
@@ -25,7 +73,7 @@ const PARAM_META = {
   INCREMENTAL_ON: { group:'diff', title:'Import incrémental', help:'Idempotent — ajoute/met à jour sans tout réécrire.' },
   KEY_COLS: { group:'diff', title:'Clé d’unicité', help:'Colonnes exactes (entêtes) séparées par des virgules.' },
   SEASON_LABEL: { group:'diff', title:'Libellé humain de la saison', help:'Ex. 2025-Aut-Hiv (affichage/exports).' },
-  SEASON_YEAR: { group:'diff', title:'Année de saison (SEASON_YEAR)', help:'Ex. 2025. Utilisée pour calculer U = saison - année de naissance.' },
+  
 
   // Annulations
   ANNULATIONS_ACTIVE: { group:'annul', title:'Activer le traitement des annulations', help:'Met à jour flags + logs ANNULATIONS_*.' },
@@ -87,6 +135,7 @@ const PARAM_META = {
   RETRO_GART_ELITE_KEYWORDS: { group:'retro-ga', title:'Clés « élite » à exclure', help:'Virgules.' },
   RETRO_GART_REQUIRE_MAPPING: { group:'retro-ga', title:'Exiger un mapping valide', help:'N’écrire que si un mapping GROUPES_ARTICLES matche.' },
 };
+
 
 let _paramsLoadedForSeasonId = null;
 let _paramsCache = { items: [], byKey: {} };

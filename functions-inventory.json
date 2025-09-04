@@ -57,6 +57,7 @@
     "isAdapteMember_",
     "loadArticlesCatalog_",
     "norm",
+    "rowPassInFilter_",
     "shouldWrite_",
     "writeErr_"
   ],
@@ -74,6 +75,9 @@
     "_r_getFieldText_",
     "_r_matchWhen_",
     "_r_normLower_",
+    "_rm_filterRowsByPassports_",
+    "_rm_norm_passport_",
+    "_rm_readTouchedPassportSet_",
     "_safeDate_",
     "_yyyy_mm_dd_",
     "applyRetroMemberRules_",
@@ -99,12 +103,14 @@
     "_ga_deriveAgeYear_",
     "_ga_extractGenreSmart_",
     "_ga_extractUFromFeeText_",
+    "_ga_filterRowsByPassports_",
     "_ga_isActiveArticle_",
     "_ga_loadRules_",
     "_ga_low_",
     "_ga_norm_passport_",
     "_ga_nrm_",
     "_ga_pad2_",
+    "_ga_readTouchedPassportSet_",
     "_ga_tpl_",
     "_low_",
     "_nrmLow",
@@ -112,12 +118,16 @@
     "buildRetroGroupeArticlesRows",
     "ensure",
     "exportRetroGroupeArticlesXlsxToDrive",
+    "loadRetroRules_",
     "mergeFromRow",
     "writeRetroGroupeArticlesSheet"
   ],
   "library-si\\src\\retro_groupes.js": [
     "_applyUnifiedMapping_",
+    "_filterRowsByPassports_",
     "_low_",
+    "_normalizePassportText8_",
+    "_readTouchedPassportSet_",
     "_rg_U_",
     "_rg_ageCat_",
     "_rg_applyRowRulesMaybeSkip_",
@@ -136,7 +146,9 @@
     "_rg_tpl_",
     "_tpl_",
     "buildRetroGroupesRows",
+    "exportRetroGroupesAllXlsxToDrive",
     "exportRetroGroupesXlsxToDrive",
+    "loadRetroRules_",
     "writeRetroGroupesSheet"
   ],
   "library-si\\src\\index.js": [
@@ -147,14 +159,20 @@
     "applyIncrementalForInscriptions_",
     "ensureSpreadsheetFromFile_",
     "extToContentType_",
+    "getLastTouchedPassports_",
+    "hIdx",
     "importerDonneesSaison",
     "inferTargetFromName_",
     "initSeasonFile",
     "isConvertibleSpreadsheetMime_",
     "isSpreadsheetMime_",
+    "keyOf_",
+    "log_",
     "nettoyerConversionsSaison",
     "readFirstSheetValues_",
-    "scanImportFiles_"
+    "scanImportFiles_",
+    "trimErreursIncremental_",
+    "unionPassportArrays_"
   ],
   "library-si\\src\\email.js": [
     "_U_U2_FromRow_",
@@ -163,11 +181,15 @@
     "_ensureMailSectorsSheet_",
     "_excludedReasonForMail_",
     "_genreInitFromRow_",
+    "_getAttachBlobsByIds_",
     "_loadMailSectors_",
     "_matchSectorForType_",
     "_normFold_",
     "_normText",
     "_normUpper_",
+    "_parseAttachIdsCsv_",
+    "_rg_csvEsc_",
+    "_toProperCase_",
     "appendImportLog_",
     "birthYearFromRow_",
     "buildDataFromRow_",
@@ -210,7 +232,8 @@
     "getKeyColsFromParams_",
     "occurrenceLabel_",
     "rowHash_",
-    "rowIsActive_"
+    "rowIsActive_",
+    "touch_"
   ],
   "library-si\\src\\diff_articles.js": [
     "_isCancelledStatus_",
@@ -221,9 +244,11 @@
     "ensureControlCols_",
     "ensureLogSheetWithHeaders_",
     "getKeyColsFromParams_",
+    "jsonCompact_",
     "occurrenceLabel_",
     "rowHash_",
-    "rowIsActive_"
+    "rowIsActive_",
+    "touch_"
   ],
   "library-si\\src\\constants.js": [],
   "library-si\\src\\admin_migration.js": [
@@ -244,7 +269,8 @@
     "_registry_",
     "_upsertParam_",
     "_wrap",
-    "getSeasonSpreadsheet_"
+    "getSeasonSpreadsheet_",
+    "getSheet_"
   ],
   "dashboard\\src\\server_seasons.js": [
     "cloneSeason",
@@ -253,6 +279,7 @@
     "setActiveSeason"
   ],
   "dashboard\\src\\server_rules.js": [
+    "SR_loadRetroRules_",
     "getRules",
     "setRules"
   ],
@@ -261,6 +288,25 @@
     "getParamsDetailed",
     "idxOf",
     "setParams"
+  ],
+  "dashboard\\src\\server_membres.js": [
+    "_vm_convertXlsxBlobToSpreadsheet_",
+    "_vm_ensureHeader_",
+    "_vm_ensureSpreadsheetFromFile_",
+    "_vm_findLatestActiveFile_",
+    "_vm_groupRuns_",
+    "_vm_hashRow_",
+    "_vm_indexCols_",
+    "_vm_notifyImportMembres_",
+    "_vm_nowISO_",
+    "_vm_readFileAsSheetValues_",
+    "_vm_rowValues_",
+    "_vm_to01_",
+    "_vm_toISODate_",
+    "getSheetOrCreate_",
+    "getSheet_",
+    "importValidationMembresToGlobal_",
+    "normalizePassportPlain8_"
   ],
   "dashboard\\src\\server_mappings.js": [
     "esc",
@@ -272,18 +318,24 @@
   ],
   "dashboard\\src\\server_mail.js": [
     "_birthYearFromRow_",
+    "_blobsFromProbe_",
     "_computeUForYear_",
     "_findFinalRowByPassport_",
     "_genreInitFromRow_",
+    "_getAttachBlobs_",
     "_ms_headers_",
     "_ms_readAll_",
     "_ms_sheet_",
     "_ms_writeRow_",
     "_normEmail_",
+    "_parseAttachIdsCsv_",
     "_parseSeasonYear_",
+    "_probeAttachIds_",
     "_resolveCcForRow_",
     "_resolveSubjectBody_",
     "_resolveToForRow_",
+    "_stripHtml_",
+    "_toProperCase_",
     "buildDataFromRow_",
     "cell",
     "collectEmailsFromRow_",
@@ -291,6 +343,7 @@
     "deriveSectorFromRow_",
     "deriveUFromRow_",
     "duplicateMailSector",
+    "fetchStagingRowByKeyHash_",
     "getMailSectors",
     "getSeasonSpreadsheet_",
     "previewErrorForPassport",
@@ -306,17 +359,30 @@
   "dashboard\\src\\server_logs.js": [
     "getLogs"
   ],
+  "dashboard\\src\\server_export_entraineurs.js": [
+    "_ex_fetchMembresEntraineurs_",
+    "_ex_fetchRoles_",
+    "_ex_writeXlsxToDrive_",
+    "exportRetroEntraineursGroupesXlsxToDrive",
+    "exportRetroEntraineursMembresXlsxToDrive",
+    "getJoueursPhotosProblemes",
+    "getKpisBoth"
+  ],
   "dashboard\\src\\server_exports.js": [
+    "_getTouchedPassportsArray_",
     "previewErrorForPassport",
     "previewExport",
     "runExport",
+    "runExportIncr",
     "runImportDry",
     "sendErrorTest",
     "testRules"
   ],
   "dashboard\\src\\server_entrypoint.js": [
     "doGet",
-    "include"
+    "include",
+    "includeEval",
+    "log_"
   ],
   "dashboard\\src\\server_dashboard.js": [
     "countRows_",
@@ -351,16 +417,25 @@
   ],
   "dashboard\\src\\Code.js": [
     "appendImportLog_",
+    "countRows_",
     "debugRetroFns",
     "debugSeasonId",
     "debug_tailImportLog",
+    "getDashboardMetrics",
+    "getEntraineursAggreges",
+    "getKpiPhotosCasierByType",
+    "getMembreFlagsMetrics",
     "getSeasonId_",
-    "resetSeasonData",
+    "readParamValue",
     "runEvaluateRules",
-    "runExportRetroGroupeArticles",
+    "runExportEntraineursGroupes",
+    "runExportEntraineursMembres",
     "runExportRetroGroupes",
+    "runExportRetroGroupesIncr",
     "runExportRetroMembres",
+    "runExportRetroMembresIncr",
     "runImportAndExports",
+    "runImportValidationMembres",
     "runImporterDonneesSaison",
     "seedSeasonYearOnce",
     "setParamValue",

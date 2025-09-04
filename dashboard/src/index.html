@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Back-Office Phénix</title>
+  <?!= include('dashboard.css.html'); ?>
+  <style>
+    .app{display:grid;grid-template-columns:260px 1fr;height:100vh;}
+    nav{background:var(--blue);color:#fff;padding:16px 12px;display:flex;flex-direction:column;gap:8px;}
+    nav h1{font-size:16px;margin:0 0 8px;font-weight:700;letter-spacing:.2px}
+    .link{display:block;padding:10px 12px;border-radius:10px;text-decoration:none;color:#fff;opacity:.85}
+    .link.active{background:rgba(255,255,255,.18);opacity:1}
+    main{background:#fafafa;padding:18px;overflow:auto;}
+    .view{display:none}.view.active{display:block}
+    .fade{opacity:.5;pointer-events:none;transition:opacity .2s}
+  </style>
+  <script>
+    // Promisify google.script.run
+    function call_(fn, args = []) {
+      return new Promise((resolve, reject) => {
+        google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn].apply(null, args);
+      });
+    }
+
+    // Router
+    function routeTo(h) {
+      const r = (h || location.hash || '#/dashboard');
+      document.querySelectorAll('a.link').forEach(a => a.classList.toggle('active', a.getAttribute('href') === r));
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      const id = 'view-' + r.replace('#/', '');
+      const el = document.getElementById(id);
+      if (el) el.classList.add('active');
+
+      // Hook: ouvrir Imports => rafraîchir le journal
+      if (id === 'view-imports') {
+        try { refreshImportLog(); } catch(_) {}
+      }
+    }
+    window.addEventListener('hashchange', () => routeTo());
+    window.addEventListener('DOMContentLoaded', () => routeTo());
+
+    // Redirection douce vers ?view=ui (Paramètres intégrés)
+    function goParams(ev) {
+      ev && ev.preventDefault();
+      const base = window.location.href.split('#')[0].split('?')[0];
+      document.querySelector('nav')?.classList.add('fade');
+      document.querySelector('main')?.classList.add('fade');
+      window.location.href = base + '?view=ui';
+    }
+
+    // ==== EXPORTS ENTRAÎNEURS (existant) ====
+    async function doExportEntraineursMembres(btn) {
+      if (btn) btn.disabled = true;
+      try {
+        const res = await call_('runExportEntraineursMembres');
+        alert('Export membres OK: ' + (res?.name || 'fichier généré'));
+      } catch (e) { console.error(e); alert('Erreur export membres.'); }
+      finally { if (btn) btn.disabled = false; }
+    }
+    async function doExportEntraineursGroupes(btn) {
+      if (btn) btn.disabled = true;
+      try {
+        const res = await call_('runExportEntraineursGroupes');
+        alert('Export groupes OK: ' + (res?.name || 'fichier généré'));
+      } catch (e) { console.error(e); alert('Erreur export groupes.'); }
+      finally { if (btn) btn.disabled = false; }
+    }
+
+    // ==== IMPORTS (NOUVEAU ONGLET) ====
+    async function doImportGlobal(btn){
+      if (btn) btn.disabled = true;
+      try{
+        const res = await call_('runImportAndExports');      // import global + exports rétro
+        alert(res?.ok ? 'Import global terminé ✅' : 'Import global terminé (vérifie Journal).');
+        try { await refreshImportLog(); } catch(_) {}
+        try { await loadKpisBoth(); } catch(_) {}
+        try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}        
+
+      }catch(e){
+        console.error(e); alert('Erreur: import global.');
+      }finally{
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function doImportValidationMembres(btn){
+      if (btn) btn.disabled = true;
+      try {
+        const res = await call_('runImportValidationMembres'); // met à jour MEMBRES_GLOBAL
+        alert(`Import Membres: +${res?.created ?? 0} créés, ${res?.updated ?? 0} maj, ${res?.unchanged ?? 0} inchangés`);
+        try { await refreshImportLog(); } catch(_) {}
+        try { await loadKpisBoth(); } catch(_) {}
+        try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}
+      } catch(e){ console.error(e); alert('Erreur import Membres Spordle.'); }
+      finally { if (btn) btn.disabled = false; }
+    }
+
+  async function refreshImportLog(){
+    const tb = document.querySelector('#tabImportLog tbody');
+    if (tb) tb.innerHTML = '<tr><td colspan="3">Chargement…</td></tr>';
+    try{
+      const mode = document.getElementById('importLogMode')?.value || 'essential';
+      const rows = await call_('getRecentActivity', [mode, 50]); // mode + limit
+      renderImportLog(rows || []);
+    }catch(e){
+      console.warn(e);
+      if (tb) tb.innerHTML = '<tr><td colspan="3">Impossible de lire le journal.</td></tr>';
+    }
+  }
+
+
+    function renderImportLog(rows){
+      const tb = document.querySelector('#tabImportLog tbody');
+      if (!tb) return;
+      tb.innerHTML = '';
+      (rows||[]).forEach(r=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${r.date||''}</td><td>${r.type||''}</td><td>${r.details||''}</td>`;
+        tb.appendChild(tr);
+      });
+      if (!rows || !rows.length){
+        tb.innerHTML = '<tr><td colspan="3">Aucune activité récente.</td></tr>';
+      }
+    }
+
+    // ==== KPI (existant) ====
+    async function loadKpisBoth(){
+      try{
+        const k = await call_('getKpisBoth');
+        if (!k) return;
+        // joueurs
+        document.getElementById('kji').textContent = k.joueurs?.photosEchues ?? '—';
+        document.getElementById('kjd').textContent = k.joueurs?.photosARenouv ?? '—';
+        document.getElementById('kjt').textContent = k.joueurs?.total ?? '—';
+        // entraineurs
+        document.getElementById('kei').textContent = k.entraineurs?.photosEchues ?? '—';
+        document.getElementById('ked').textContent = k.entraineurs?.photosARenouv ?? '—';
+        document.getElementById('kec').textContent = k.entraineurs?.casiersExp ?? '—';
+        document.getElementById('ket').textContent = k.entraineurs?.total ?? '—';
+      }catch(e){ console.warn(e); }
+    }
+    window.addEventListener('DOMContentLoaded', loadKpisBoth);
+
+    async function showJoueursPhotosProblemes(){
+      try{
+        const list = await call_('getJoueursPhotosProblemes');
+        if (!list || !list.length) { alert('Aucun joueur à corriger.'); return; }
+        const lines = list.map(x => `${x.Nom}, ${x.Prenom} — ${x.Passeport} — ${x.StatutPhoto}${x.PhotoExpireLe?(' ('+x.PhotoExpireLe+')'):''}`);
+        alert(lines.join('\n').slice(0, 3000));
+      }catch(e){
+        console.error(e); alert('Erreur lors de la récupération des joueurs à corriger.');
+      }
+    }
+
+    // ===== ENTRAINEURS (existant) =====
+    let ENTRAINEURS_CACHE = [];
+
+// helpers UI
+function _parseDateSafe_(s){
+  if (!s) return null;
+  const t = Date.parse(String(s).replace(/(\d{2})-(\d{2})-(\d{4})/, '$3-$2-$1')); // tolère dd-mm-yyyy
+  return isNaN(t) ? null : new Date(t);
+}
+function _isPastOrToday_(d){
+  if (!d) return false;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const x = new Date(d); x.setHours(0,0,0,0);
+  return x.getTime() <= today.getTime();
+}
+
+// Fabrique des statuts lisibles depuis les flags colonnes
+function deriveCoachRowComputed_(x){
+  // Photo
+  const photoInvalid = Number(x.PhotoInvalideFlag) === 1 || String(x.PhotoInvalideFlag).toLowerCase()==='true';
+  const due = _parseDateSafe_(x.PhotoInvalideDuesLe);
+  let StatutPhoto = 'OK';
+  if (photoInvalid) {
+    StatutPhoto = 'ÉCHUE';
+  } else if (due && _isPastOrToday_(due)) {
+    StatutPhoto = 'À RENOUVELER';
+  }
+
+  // Casier
+  const casierBad = Number(x.CasierExpireFlag) === 1 || String(x.CasierExpireFlag).toLowerCase()==='true';
+  const StatutCasier = casierBad ? 'EXPIRÉ' : 'OK';
+
+  // Validité coach
+  const coachValid = Number(x.CoachValid) === 1 || String(x.CoachValid).toLowerCase()==='true';
+  const ValidBadge = coachValid ? '✅ VALIDE' : '❌ NON VALIDE';
+  const Reason = (x.InvalidReason || '').trim();
+
+  return {
+    ...x,
+    StatutPhoto,
+    StatutCasier,
+    ValidBadge,
+    Reason,
+  };
+}
+
+async function loadEntraineurs(){
+  try{
+    // getEntraineursAggreges doit retourner au minimum :
+    // Passeport, Nom, Prenom, Roles[], PhotoExpireLe, PhotoInvalideFlag, PhotoInvalideDuesLe,
+    // CasierExpireFlag, CoachValid, InvalidReason
+    const list = await call_('getEntraineursAggreges');
+    ENTRAINEURS_CACHE = (list || []).map(deriveCoachRowComputed_);
+    renderEntraineurs();
+  }catch(e){ console.error(e); alert('Erreur chargement entraîneurs.'); }
+}
+
+function renderEntraineurs(){
+  const q = (document.getElementById('fSearch')?.value || '').toLowerCase();
+  const fP = document.getElementById('fPhoto')?.value;   // '', 'OK', 'ÉCHUE', 'À RENOUVELER'
+  const fC = document.getElementById('fCasier')?.value;  // '', 'OK', 'EXPIRÉ'
+
+  const rows = ENTRAINEURS_CACHE.filter(x=>{
+    if (q) {
+      const bag = [
+        x.Passeport, x.Nom, x.Prenom,
+        (x.Roles||[]).join(' | '),
+        x.PhotoExpireLe, x.StatutPhoto, x.StatutCasier,
+        x.Reason || ''
+      ].join(' ').toLowerCase();
+      if (!bag.includes(q)) return false;
+    }
+    if (fP && x.StatutPhoto !== fP) return false;
+    if (fC && x.StatutCasier !== fC) return false;
+    return true;
+  });
+
+  const tb = document.querySelector('#tabEntraineurs tbody');
+  if (!tb) return;
+  tb.innerHTML = '';
+  rows.forEach(x=>{
+    const tr = document.createElement('tr');
+    const rolesText = (x.Roles||[]).join('\n');
+    const reason = x.Reason ? `<div class="sub" style="font-size:12px;opacity:.85">${x.Reason}</div>` : '';
+    tr.innerHTML = `
+      <td>${x.Passeport||''}</td>
+      <td>${x.Nom||''}</td>
+      <td>${x.Prenom||''}</td>
+      <td><pre style="margin:0; white-space:pre-wrap;">${rolesText}</pre></td>
+      <td>${x.PhotoExpireLe||''}</td>
+      <td>${x.StatutPhoto||''}</td>
+      <td>${x.StatutCasier||''}</td>
+      <td>${x.ValidBadge}${reason}</td>
+    `;
+    tb.appendChild(tr);
+  });
+
+  if (!rows.length) {
+    tb.innerHTML = `<tr><td colspan="8" style="text-align:center;opacity:.7">Aucun entraîneur ne correspond aux filtres.</td></tr>`;
+  }
+}
+
+// Brancher filtres & trigger initial
+document.addEventListener('DOMContentLoaded', ()=>{
+  loadEntraineurs();
+  ['fSearch','fPhoto','fCasier'].forEach(id=>{
+    const el = document.getElementById(id);
+    el && el.addEventListener('input', renderEntraineurs);
+    el && el.addEventListener('change', renderEntraineurs);
+  });
+});
+  </script>
+</head>
+
+<body>
+  <div class="app">
+    <nav>
+      <h1>Back-Office Phénix</h1>
+      <a class="link" href="#/dashboard">Tableau de bord</a>
+      <a class="link" href="#/imports">Imports</a> <!-- NOUVEL ONGLET -->
+      <a class="link" href="#/entraineurs">Entraîneurs</a>
+      <a class="link" href="#/parametres" id="nav-params">Paramètres</a>
+    </nav>
+
+    <main>
+      <!-- DASHBOARD (existant) -->
+      <section id="view-dashboard" class="view active">
+        <div class="card">
+          <h3>Tableau de bord</h3>
+          <div class="grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:16px;">
+            <div class="subcard">
+              <h4>Joueurs (inscriptions)</h4>
+              <div class="stats" style="display:flex; gap:16px; flex-wrap:wrap;">
+                <div class="stat"><div class="kpi" id="kji">—</div><div class="lbl">Photos</div><div class="sub">Échues</div></div>
+                <div class="stat"><div class="kpi" id="kjd">—</div><div class="lbl">Photos</div><div class="sub">À renouveler</div></div>
+                <div class="stat"><div class="kpi" id="kjt">—</div><div class="lbl">Total</div><div class="sub">Joueurs</div></div>
+              </div>
+              <div class="toolbar" style="margin-top:8px;">
+                <button class="btn secondary" onclick="showJoueursPhotosProblemes()">Voir joueurs à corriger</button>
+              </div>
+            </div>
+
+            <div class="subcard">
+              <h4>Entraîneurs</h4>
+              <div class="stats" style="display:flex; gap:16px; flex-wrap:wrap;">
+                <div class="stat"><div class="kpi" id="kei">—</div><div class="lbl">Photos</div><div class="sub">Échues</div></div>
+                <div class="stat"><div class="kpi" id="ked">—</div><div class="lbl">Photos</div><div class="sub">À renouveler</div></div>
+                <div class="stat"><div class="kpi" id="kec">—</div><div class="lbl">Casiers</div><div class="sub">Expirés</div></div>
+                <div class="stat"><div class="kpi" id="ket">—</div><div class="lbl">Total</div><div class="sub">Entraîneurs</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- IMPORTS (NOUVEAU) -->
+      <section id="view-imports" class="view">
+        <div class="card" style="margin-bottom:14px;">
+          <h3>Imports</h3>
+          <div class="toolbar" style="gap:8px; margin-top:6px;">
+            <button class="btn" onclick="doImportGlobal(this)">Importation globale (inscriptions + articles → exports)</button>
+            <button class="btn secondary" onclick="doImportValidationMembres(this)">Importer Membres Spordle → MEMBRES_GLOBAL</button>
+            <button class="btn" onclick="call_('runSyncInscriptionsEntraineurs', [/* seasonSheetId */])">  Rafraîchir INSCRIPTIONS_ENTRAINEURS
+</button>
+
+          </div>
+          <p class="note" style="margin-top:8px;">
+            Astuce&nbsp;: lance d’abord <b>Membres</b>, puis l’<b>Importation globale</b> pour que photo/casier soient à jour dans les exports.
+          </p>
+        </div>
+
+<div class="card">
+  <h3>Journal des imports</h3>
+  <div class="toolbar" style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+    <label>Vue:</label>
+    <select id="importLogMode" onchange="refreshImportLog()" style="min-width:140px;">
+      <option value="essential" selected>Essentiel</option>
+      <option value="all">Complet</option>
+    </select>
+    <button class="btn secondary" onclick="refreshImportLog()">Actualiser</button>
+  </div>
+  <div class="table-wrap" style="overflow:auto; max-height:420px;">
+    <table id="tabImportLog" class="table">
+      <thead><tr><th style="width:170px;">Date</th><th>Type</th><th>Détails</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+      </section>
+
+      <!-- ENTRAÎNEURS (existant) -->
+      <section id="view-entraineurs" class="view">
+        <div class="card" style="margin-bottom:14px;">
+          <h3>Exports Entraîneurs</h3>
+          <div class="toolbar" style="margin-top:6px;">
+            <button class="btn" onclick="doExportEntraineursMembres(this)">Exporter <b>retro-entraineurs-membres.xlsx</b></button>
+            <button class="btn secondary" onclick="doExportEntraineursGroupes(this)">Exporter <b>retro-entraineurs-groupes.xlsx</b></button>
+          </div>
+          <p class="note" style="margin-top:8px;">Les rôles proviennent de la feuille <code>ENTRAINEURS_ROLES</code>.</p>
+        </div>
+
+        <div class="card">
+          <h3>Entraîneurs — liste unique</h3>
+          <div class="toolbar" style="gap:8px; margin-bottom:8px;">
+            <input id="fSearch" placeholder="Filtrer (nom, rôle, équipe…)" style="padding:8px; min-width:240px;">
+            <select id="fPhoto">
+              <option value="">Photo: tous</option>
+              <option value="OK">Photo: OK</option>
+              <option value="ÉCHUE">Photo: ÉCHUE</option>
+              <option value="À RENOUVELER">Photo: À RENOUVELER</option>
+            </select>
+            <select id="fCasier">
+              <option value="">Casier: tous</option>
+              <option value="OK">Casier: OK</option>
+              <option value="EXPIRÉ">Casier: EXPIRÉ</option>
+            </select>
+            <button class="btn" onclick="loadEntraineurs()">Rafraîchir</button>
+          </div>
+          <div class="table-wrap" style="overflow:auto;">
+            <table id="tabEntraineurs" class="table">
+<thead>
+  <tr>
+    <th>Passeport</th><th>Nom</th><th>Prénom</th><th>Rôles</th>
+    <th>Photo (expire)</th><th>Statut photo</th><th>Casier</th><th>Valide ?</th>
+  </tr>
+</thead>
+
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- PARAMÈTRES : embed UI complet -->
+      <section id="view-parametres" class="view">
+        <div class="card" style="padding:0;">
+          <div id="ui-embed-root" style="border-radius:12px; overflow:hidden;">
+            <?!= includeEval('ui_embed'); ?>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,27 +1,22 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Suivi Inscriptions – Dashboard</title>
-  <?!= include('dashboard.css.html'); ?>
-</head>
+<!-- ui_embed.html — version “partial” à inclure dans index.html -->
 
-<body>
-<header>
-  <div class="brand">
-    <img
-      src="https://i0.wp.com/phenixdesrivieres.com/wp-content/uploads/2024/11/logo-phenix-des-rivieres-principal.png?w=800&ssl=1"
-      alt="Phénix des Rivières"
-    />
-    <h1>Tableau de bord Phénix des Rivières</h1>
-  </div>
+<!-- ===== START BODY from ui.html ===== -->
+<div id="phenix-ui-embed">
+  <header>
+    <div class="brand">
+      <img
+        src="https://i0.wp.com/phenixdesrivieres.com/wp-content/uploads/2024/11/logo-phenix-des-rivieres-principal.png?w=800&ssl=1"
+        alt="Phénix des Rivières"
+      />
+      <h1>Tableau de bord Phénix des Rivières</h1>
+    </div>
 
-  <div class="toolbar">
-    <label>Saison</label>
-    <select id="seasonSelect"></select>
-    <button class="btn secondary" id="btnSetActive">Définir active</button>
-  </div>
-</header>
+    <div class="toolbar">
+      <label>Saison</label>
+      <select id="seasonSelect"></select>
+      <button class="btn secondary" id="btnSetActive">Définir active</button>
+    </div>
+  </header>
 
   <div class="tabs">
     <div class="tab active" data-tab="saison">Saison</div>
@@ -32,6 +27,8 @@
     <div class="tab" data-tab="exports">Exports</div>
     <div class="tab" data-tab="journal">Journal</div>
   </div>
+
+  <!-- on colle ici tout le contenu <section>... de ui.html, tel quel -->
 
   <div class="container">
     <!-- SAISON (Accueil) -->
@@ -290,171 +287,15 @@
       </div>
     </div>
 
-  </div>
+  </div>  <!-- (voir note ci-dessous) -->
+</div>
+<!-- ===== END BODY ===== -->
 
-  <div class="toast" id="toast"></div>
-
-  <?!= include('ui_js_common'); ?>
-  <?!= include('ui_js_params'); ?>
-  <?!= include('ui_js_rules'); ?>
-  <?!= include('ui_js_mappings'); ?>
-  <?!= include('ui_js_journal'); ?>
-  <?!= include('ui_js_boot'); ?>
-  <?!= include('ui_js_mail'); ?>
-
-  <!-- ===== Hooks KPI, Import Flow & Modal suivi ===== -->
-  <script>
-    // Promisify google.script.run (à utiliser pour nos appels KPI)
-    function call_(fn, args = []) {
-      return new Promise((resolve, reject) => {
-        const runner = google.script.run
-          .withSuccessHandler(resolve)
-          .withFailureHandler(reject);
-        runner[fn].apply(runner, args);
-      });
-    }
-
-
-
-    // --- Modal helpers pour le suivi en direct
-    let __importPoll = null;
-    function openImportModal(){
-      const m = document.getElementById('importModal');
-      if (!m) return;
-      m.hidden = false;
-      refreshImportSteps();
-      stopImportPolling();
-      __importPoll = setInterval(refreshImportSteps, 1500000);
-    }
-    function closeImportModal(){
-      const m = document.getElementById('importModal');
-      if (!m) return;
-      m.hidden = true;
-      stopImportPolling();
-    }
-    function stopImportPolling(){
-      if (__importPoll){ clearInterval(__importPoll); __importPoll = null; }
-    }
-    async function refreshImportSteps(){
-      try {
-        const rows = await call_('getRecentActivity'); // lit IMPORT_LOG côté serveur
-        renderSteps_(rows || []);
-      } catch(e){ console.warn('refreshImportSteps', e); }
-    }
-    function renderSteps_(rows){
-      const tb = document.getElementById('importSteps');
-      if (!tb) return;
-      tb.innerHTML = '';
-      (rows||[]).forEach(r=>{
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${r.date||''}</td><td>${r.type||''}</td><td>${r.details||''}</td>`;
-        tb.appendChild(tr);
-      });
-    }
-
-    // Boutons du modal
-    document.addEventListener('DOMContentLoaded', ()=>{
-      document.getElementById('btnImportClose')?.addEventListener('click', closeImportModal);
-      document.getElementById('btnImportRefresh')?.addEventListener('click', refreshImportSteps);
-    });
-
-    // === Flux principal déclenché par le bouton Import (ouvre le modal immédiatement) ===
-async function runImportFlow(){
-  const btn = document.getElementById('btnImportDry');
-  if (btn) btn.disabled = true;
-
-  // Nettoyer badge
-  const badge = document.getElementById('exportBadge');
-  if (badge) { badge.style.display = 'none'; }
-
-  try {
-    openImportModal(); // Ouvre le modal et démarre le suivi
-
-    // 1) Lancer l'import + exports (seule partie "critique")
-    let res;
-    try {
-      res = await call_('runImportAndExports'); // <-- si ça plante ici: vrai échec d'import
-    } catch (e) {
-      console.error('runImportAndExports error', e);
-      alert('Échec import/exports (appel serveur). Voir console.');
-      return; // on sort ici : import non terminé
-    }
-
-    // 2) Si le serveur a répondu, on affiche le badge même si res.ok est absent
-    if (res && res.ok) {
-      if (badge) {
-        badge.textContent = 'Fichiers rétroaction générés';
-        badge.style.display = 'inline-block';
-      }
-    } else {
-      // Import probablement OK (cf. journal), mais réponse non standard
-      console.warn('runImportAndExports non-ok/undefined', res);
-      if (badge) {
-        badge.textContent = 'Import terminé (vérifie Journal)';
-        badge.style.display = 'inline-block';
-      }
-    }
-
-    // 3) Ces étapes ne doivent JAMAIS faire échouer l’import côté UI
-    try { await refreshImportSteps(); } catch (e) { console.warn('refreshImportSteps failed', e); }
-    try { await refreshKPI(); } catch (e) { console.warn('refreshKPI failed (ignoré)', e); }
-
-    // 4) Feedback discret
-    try { toast('Import terminé ✅'); } catch(_) {}
-  } finally {
-    if (btn) btn.disabled = false;
-    // on laisse le modal ouvert pour consultation
-  }
-}
-
-    // Accrocher le bouton Import (évite les doubles listeners)
-    document.addEventListener('DOMContentLoaded', () => {
-      const b = document.getElementById('btnImportDry');
-      if (!b) return;
-      b.replaceWith(b.cloneNode(true));
-      document.getElementById('btnImportDry')?.addEventListener('click', (e)=>{ e.preventDefault(); runImportFlow(); });
-    });
-
-// Gestion des onglets (sans refresh KPI)
-document.addEventListener('DOMContentLoaded', () => {
-  document.querySelectorAll('.tab').forEach(t=>{
-    t.addEventListener('click', ()=>{
-      document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-      t.classList.add('active');
-      const name = t.getAttribute('data-tab');
-      document.querySelectorAll('.container section').forEach(s=>s.classList.add('hidden'));
-      document.getElementById('tab-'+name).classList.remove('hidden');
-      // plus de refreshKPI ici
-    });
-  });
-});
-
-
-    // toolbar rich text (modal courriels)
-    function fmt(cmd, val){ document.execCommand(cmd, false, val); }
-
-function insertLink() {
-  const url = prompt("Entrez l'URL du lien :");
-  if (url) {
-    document.execCommand("createLink", false, url);
-  }
-}
- (function(){
-    try{
-      var params = new URLSearchParams(location.search);
-      if (params.get('view') === 'ui') {
-        var hdr = document.querySelector('header .toolbar') || document.querySelector('header');
-        if (hdr) {
-          var a = document.createElement('a');
-          a.textContent = '← Back-Office';
-          a.className = 'btn secondary';
-          a.style.marginRight = '8px';
-          a.href = (function(){ var b = location.href.split('?')[0]; return b; })();
-          hdr.prepend(a);
-        }
-      }
-    } catch(e){}
-  })();
-  </script>
-</body>
-</html>
+<!-- ===== Scripts de ui.html (inchangés) ===== -->
+<?!= include('ui_js_common'); ?>
+<?!= include('ui_js_params'); ?>
+<?!= include('ui_js_rules'); ?>
+<?!= include('ui_js_mappings'); ?>
+<?!= include('ui_js_journal'); ?>
+<?!= include('ui_js_boot'); ?>
+<?!= include('ui_js_mail'); ?>

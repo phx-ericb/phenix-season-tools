@@ -103,24 +103,39 @@ if (typeof buildDataFromRow_ !== 'function') {
     var g=String(row['Identité de genre']||row['Identité de Genre']||row['Genre']||'').toUpperCase();
     if (!g) return ''; if (g[0]==='M') return 'M'; if (g[0]==='F') return 'F'; return 'X';
   }
-  function buildDataFromRow_(row){
-    var U = deriveUFromRow_(row)||''; var n=parseInt(String(U).replace(/^U/i,''),10);
-    var U2 = !isNaN(n) ? ('U'+(n<10?('0'+n):n)) : '';
-    return {
-      passeport: row['Passeport #']||'',
-      nom: row['Nom']||'',
-      prenom: row['Prénom']||row['Prenom']||'',
-      nomcomplet: (((row['Prénom']||row['Prenom']||'')+' '+(row['Nom']||'')).trim()),
-      saison: row['Saison']||'',
-      frais: row['Nom du frais']||row['Frais']||row['Produit']||'',
-      categorie: row['Catégorie']||row['Categorie']||'',
-      secteur: deriveSectorFromRow_(row)||'',
-      U: U||'', U2: U2||'', U_num: n||'',
-      genre: row['Identité de genre']||row['Identité de Genre']||row['Genre']||'',
-      genreInitiale: _genreInitFromRow_(row)
-    };
-  }
+function buildDataFromRow_(row){
+  var U = deriveUFromRow_(row)||''; 
+  var n = parseInt(String(U).replace(/^U/i,''),10);
+  var U2 = !isNaN(n) ? ('U'+(n<10?('0'+n):n)) : '';
+
+  var prenomRaw = row['Prénom']||row['Prenom']||'';
+  var nomRaw    = row['Nom']||'';
+
+  var prenomPC  = _toProperCase_(prenomRaw);
+  var nomPC     = _toProperCase_(nomRaw);
+
+  return {
+    passeport: row['Passeport #']||'',
+    nom: nomPC,
+    prenom: prenomPC,
+    nomcomplet: (prenomPC + ' ' + nomPC).trim(),
+    saison: row['Saison']||'',
+    frais: row['Nom du frais']||row['Frais']||row['Produit']||'',
+    categorie: row['Catégorie']||row['Categorie']||'',
+    secteur: deriveSectorFromRow_(row)||'',
+    U: U||'', U2: U2||'', U_num: n||'',
+    genre: row['Identité de genre']||row['Identité de Genre']||row['Genre']||'',
+    genreInitiale: _genreInitFromRow_(row)
+  };
 }
+}
+
+
+function _toProperCase_(s) {
+  s = String(s||'').toLowerCase();
+  return s.replace(/\b\w/g, function(c){ return c.toUpperCase(); });
+}
+
 
 /* -------------------- Constantes feuille secteurs -------------------- */
 var MAIL_SECTORS_SHEET  = 'MAIL_SECTEURS';
@@ -130,6 +145,96 @@ var MAIL_SECTORS_HEADER = ['SecteurId','Label','Umin','Umax','Genre','To','Cc','
 /* -------------------- Constantes feuille secteurs -------------------- */
 var MAIL_SECTORS_SHEET  = 'MAIL_SECTEURS';
 var MAIL_SECTORS_HEADER = ['SecteurId','Label','Umin','Umax','Genre','To','Cc','ReplyTo','SubjectTpl','BodyTpl','AttachIdsCSV','Active','ErrorCode'];
+
+
+function fetchStagingRowByKeyHash_(ss, keyHash){
+  keyHash = String(keyHash||'').trim();
+  if (!keyHash) return null;
+  var names = ['STAGING_INSCRIPTIONS', 'STAGING_ARTICLES'];
+  for (var si=0; si<names.length; si++){
+    var d = readSheetAsObjects_(ss.getId(), names[si]);
+    var rows = d.rows || [];
+    for (var i=0; i<rows.length; i++){
+      if (String(rows[i]['KeyHash']||'').trim() === keyHash) return rows[i];
+    }
+  }
+  return null;
+}
+
+
+
+/** "id1, id2 ; id3" -> ['id1','id2','id3'] */
+function _parseAttachIdsCsv_(csv) {
+  if (!csv) return [];
+  return String(csv)
+    .split(/[,\s;]+/)
+    .map(function(s){ return String(s||'').trim(); })
+    .filter(Boolean);
+}
+
+/** Charge les blobs Drive à partir d’IDs. Ignore l’ID si introuvable / accès refusé. */
+function _getAttachBlobs_(ids) {
+  var blobs = [];
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    try {
+      var f = DriveApp.getFileById(id);
+      blobs.push(f.getBlob());
+    } catch (e) {
+      // Facultatif : journaliser pour debug
+      try { Logger.log('ATTACH_WARN: ' + id + ' (' + e + ')'); } catch(_){}
+    }
+  }
+  return blobs;
+}
+
+
+function _probeAttachIds_(csv) {
+  var ids = _parseAttachIdsCsv_(csv);
+  var res = [];
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    try {
+      var f = DriveApp.getFileById(id);
+      res.push({
+        id: id,
+        ok: true,
+        name: f.getName(),
+        mimeType: f.getMimeType(),
+        size: (function(b){ try { return b.getBytes().length; } catch(e){ return null; } })(f.getBlob())
+      });
+    } catch (e) {
+      res.push({ id: id, ok: false, error: String(e) });
+    }
+  }
+  return res;
+}
+
+function _blobsFromProbe_(probe) {
+  var blobs = [];
+  for (var i = 0; i < probe.length; i++) {
+    var p = probe[i];
+    if (!p.ok) continue;
+    try { blobs.push(DriveApp.getFileById(p.id).getBlob()); } catch(e){}
+  }
+  return blobs;
+}
+
+
+
+/** (optionnel) strip du HTML pour textBody/plain */
+function _stripHtml_(html) {
+  html = String(html || '');
+  html = html.replace(/<style[\s\S]*?<\/style>/gi, '')
+             .replace(/<script[\s\S]*?<\/script>/gi, '')
+             .replace(/<[^>]+>/g, ' ')
+             .replace(/&nbsp;/g, ' ')
+             .replace(/\s{2,}/g, ' ')
+             .trim();
+  return html;
+}
+
+
 
 function _ms_sheet_(ss){
   var sh = ss.getSheetByName(MAIL_SECTORS_SHEET);
@@ -353,19 +458,37 @@ function sendSectorTest(seasonId, item, passport, toTest){
     var payload = buildDataFromRow_(row);
     var sb = _resolveSubjectBody_(ss, item||{}, payload);
 
-    var to = String(toTest||'').trim(); if (!to) to = Session.getActiveUser().getEmail();
+    var to = String(toTest||'').trim() || Session.getActiveUser().getEmail();
+    var cc = item && item.Cc ? String(item.Cc).trim() : '';
+    var replyTo = item && item.ReplyTo ? String(item.ReplyTo).trim() : '';
     var fromName = readParam_(ss, 'MAIL_FROM') || undefined;
 
+    // ---- Attachments (probe + blobs)
+    var probe = _probeAttachIds_(item && item.AttachIdsCSV);
+    var blobs = _blobsFromProbe_(probe);
+
+    // ---- Envoi
     MailApp.sendEmail({
       to: to,
       subject: sb.subject,
       htmlBody: sb.bodyHtml,
-      name: fromName
+      name: fromName,
+      cc: cc || undefined,
+      replyTo: replyTo || undefined,
+      attachments: (blobs.length ? blobs : undefined)
     });
 
-    return { ok:true };
-  } catch(e){ return { ok:false, error:String(e) }; }
+    // ---- Feedback pour l’UI
+    return { ok:true, data:{ 
+      attached: blobs.length,
+      probe: probe  // [{id, ok, name?, mimeType?, size?, error?}, ...]
+    }};
+  } catch(e){ 
+    return { ok:false, error:String(e) }; 
+  }
 }
+
+
 
 // Lance le worker d’envoi d’outbox (respecte MAIL_BATCH_MAX et DRY_RUN)
 // Essaie d'abord la version locale, sinon tombe sur la version librairie (LIB.*).

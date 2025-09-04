@@ -1,20 +1,30 @@
 /**
- * v0.7 — Diff incrémental INSCRIPTIONS (optimisé)
- * - Nouveaux: append + ROW_HASH + OUTBOX (INSCRIPTION_NEW)
+ * v0.8.1 — Diff incrémental INSCRIPTIONS (optimisé + filtre entraîneurs)
+ * - Nouveaux: append + ROW_HASH + OUTBOX (INSCRIPTION_NEW)  ❗(hors entraîneurs)
  * - Modifiés: update ciblé + ROW_HASH + LAST_MODIFIED_AT + log MODIFS_INSCRIPTIONS (batch)
  * - Annulations (batch):
- *    a) disparition -> CANCELLED/EXCLUDE + log ANNULATIONS_INSCRIPTIONS
+ *    a) disparition -> CANCELLED/EXCLUDE + LAST_MODIFIED_AT + log ANNULATIONS_INSCRIPTIONS
  *    b) statut "annulé" en staging -> idem
+ * - ✨ Nouveau (v0.8): retourne touchedPassports (ensemble des passeports touchés)
+ * - ✨ v0.8.1: entraîneurs exclus du FINAL; lignes existantes d'entraîneurs forcées en annulées/exclues
  */
 
 /*** Fallbacks sûrs ***/
-
-
-
 if (typeof CONTROL_COLS === 'undefined') {
-  var CONTROL_COLS = { ROW_HASH: 'ROW_HASH', CANCELLED: 'CANCELLED', EXCLUDE_FROM_EXPORT: 'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT: 'LAST_MODIFIED_AT' };
+  var CONTROL_COLS = {
+    ROW_HASH: 'ROW_HASH',
+    CANCELLED: 'CANCELLED',
+    EXCLUDE_FROM_EXPORT: 'EXCLUDE_FROM_EXPORT',
+    LAST_MODIFIED_AT: 'LAST_MODIFIED_AT'
+  };
 }
-
+if (typeof _norm_ !== 'function') {
+  function _norm_(s){
+    s = String(s == null ? '' : s).trim().toLowerCase();
+    try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g,''); } catch(_){}
+    return s;
+  }
+}
 if (typeof _isCancelledStatus_ !== 'function') {
   function _isCancelledStatus_(val, cancelListCsv) {
     var norm = _norm_(val);
@@ -22,9 +32,6 @@ if (typeof _isCancelledStatus_ !== 'function') {
     return list.indexOf(norm) >= 0;
   }
 }
-
-
-
 
 /*** Helpers locaux ***/
 function ensureControlCols_(finalsInfo) {
@@ -78,6 +85,28 @@ function occurrenceLabel_(row) {
   return (saison + ' — ' + frais).trim();
 }
 
+/*** Détection entraîneur (lib -> fallback) ***/
+function _isCoachFromFeeName_(ss, feeRaw){
+  var fee = String(feeRaw || '');
+  // lib si dispo
+  try { if (typeof isCoachFeeByName_ === 'function') return !!isCoachFeeByName_(ss, fee); } catch(_){}
+  // param CSV + fallback lexical
+  var v = _norm_(fee);
+  if (!v) return false;
+  var csv = (typeof readParam_==='function') ? (readParam_(ss,'RETRO_COACH_FEES_CSV')||'') : '';
+  var toks = csv.split(',').map(_norm_).filter(Boolean);
+  if (toks.length){
+    if (toks.indexOf(v) >= 0) return true;
+    for (var i=0;i<toks.length;i++) if (v.indexOf(toks[i]) >= 0) return true;
+  }
+  return /(entraineur|entra[îi]neur|coach)/i.test(fee);
+}
+function _isCoachMemberSafe_(ss, row){
+  try { if (typeof isCoachMember_ === 'function') return !!isCoachMember_(ss, row); } catch(_){}
+  var fee = (row && (row['Nom du frais']||row['Frais']||row['Produit'])) || '';
+  return _isCoachFromFeeName_(ss, fee);
+}
+
 /** Diff principal */
 function diffInscriptions_(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
@@ -110,6 +139,13 @@ function diffInscriptions_(seasonSheetId) {
   var toAppend = [];
   var toUpdate = [];
   var outboxRows = [];
+  var touchedSet = {}; // ✨ nouveau
+  function touch_(row){
+    var p = String((row && (row['Passeport #'] || row['Passeport'])) || '').trim();
+    if (!p) return;
+    try { if (typeof normalizePassportPlain8_ === 'function') p = normalizePassportPlain8_(p); } catch(_){ }
+    touchedSet[p] = true;
+  }
 
   // Logs batch
   var HEADERS_ANN = ['Horodatage', 'Passeport', 'Nom', 'Prénom', 'NomComplet', 'Saison', 'Frais', 'DateAnnulation', 'A_ENCORE_ACTIF', 'ACTIFS_RESTANTS'];
@@ -125,23 +161,32 @@ function diffInscriptions_(seasonSheetId) {
     var fRow = idxFinalByKey[key];
     var sCancelled = _isCancelledStatus_(sRow[statusCol], cancelListCsv);
 
+    // *** Détermine si COACH ***
+    var isCoach = _isCoachMemberSafe_(ss, sRow);
+
     if (!fRow) {
       // NEW
+      if (isCoach) {
+        // → on ignore totalement les coachs côté FINAL (pas d'append, pas d'outbox, pas de log)
+        return;
+      }
+
       var newRow = {};
       finals.headers.forEach(function (h) { newRow[h] = sRow[h] == null ? '' : sRow[h]; });
       newRow[CONTROL_COLS.CANCELLED] = !!sCancelled;
       newRow[CONTROL_COLS.EXCLUDE_FROM_EXPORT] = !!sCancelled;
       newRow[CONTROL_COLS.ROW_HASH] = rowHash_(newRow);
       toAppend.push(newRow);
+      touch_(newRow);
 
       if (!sCancelled) {
-        // Outbox (INSCRIPTION_NEW)
+        // Outbox (INSCRIPTION_NEW) — on compte seulement ici; l'enqueue réel se fait ailleurs si souhaité
         var keyHash = Utilities.base64EncodeWebSafe(key);
-        // --- enrichit l’OUTBOX (lisible dans la feuille) ---
+
         var passRaw = newRow['Passeport #'] || '';
         var passText8 = (typeof normalizePassportToText8_ === 'function')
           ? normalizePassportToText8_(passRaw)
-          : String(passRaw); // fallback
+          : String(passRaw);
 
         var prenom = newRow['Prénom'] || newRow['Prenom'] || '';
         var nom = newRow['Nom'] || '';
@@ -149,14 +194,12 @@ function diffInscriptions_(seasonSheetId) {
         var saison = newRow['Saison'] || '';
         var frais = newRow['Nom du frais'] || newRow['Frais'] || newRow['Produit'] || '';
 
-        // candidats emails (pour lecture; le worker résoudra To/Cc final)
         var colsCsv = readParam_(ss, 'TO_FIELDS_INSCRIPTIONS') || readParam_(ss, 'TO_FIELD_INSCRIPTIONS') ||
           'Courriel,Parent 1 - Courriel,Parent 2 - Courriel';
         var emailsCandidates = '';
         if (typeof collectEmailsFromRow_ === 'function') {
           emailsCandidates = collectEmailsFromRow_(newRow, colsCsv) || '';
         } else {
-          // petit fallback : concatène les 3 colonnes usuelles si présentes
           var cand = [];
           ['Courriel', 'Parent 1 - Courriel', 'Parent 2 - Courriel'].forEach(function (c) {
             var v = newRow[c]; if (v) cand.push(String(v).trim());
@@ -164,38 +207,28 @@ function diffInscriptions_(seasonSheetId) {
           emailsCandidates = cand.filter(Boolean).join(',');
         }
 
-        // construit la ligne alignée sur l’entête enrichie
         var hdr = getMailOutboxHeaders_();
         var out = new Array(hdr.length).fill('');
-
-        // colonnes “système”
-        out[0] = 'INSCRIPTION_NEW';  // Type
-        out[1] = '';                  // To (résolu par le worker)
-        out[2] = '';                  // Cc
-        out[3] = '';                  // Sujet
-        out[4] = '';                  // Corps
-        out[5] = '';                  // Attachments
-        out[6] = keyHash;             // KeyHash
-        out[7] = 'pending';           // Status
-        out[8] = new Date();          // CreatedAt
-        out[9] = '';                  // SentAt
-        out[10] = '';                  // Error
-
-        // nouvelles colonnes d’info (debug/tri)
-        out[11] = passText8;           // Passeport8
-        out[12] = nom;                 // Nom
-        out[13] = prenom;              // Prénom
-        out[14] = nomComplet;          // NomComplet
-        out[15] = saison;              // Saison
-        out[16] = frais;               // Frais
-        out[17] = emailsCandidates;    // EmailsCandidates
+        out[0]  = 'INSCRIPTION_NEW';
+        out[6]  = keyHash;
+        out[7]  = 'pending';
+        out[8]  = new Date();
+        // colonnes facultatives de lisibilité (si présentes côté projet):
+        // on met ce qu'on peut sans casser (les index exacts peuvent différer selon upgrade local)
+        try {
+          var idxHdr = {};
+          hdr.forEach(function(h,i){ idxHdr[h]=i; });
+          function setIf(colName, val){ var i = idxHdr[colName]; if (typeof i==='number' && i>=0) out[i]=val; }
+          setIf('Passeport', passText8);
+          setIf('NomComplet', nomComplet);
+          setIf('Frais', frais);
+        } catch(_){}
 
         outboxRows.push(out);
-
       } else {
         // arrive déjà annulé → log (batch)
         var pass = String(newRow['Passeport #'] || '').trim();
-        var actifs = (activeByPassport[pass] || []).slice(0); // autres lignes actives (s'il y en a)
+        var actifs = (activeByPassport[pass] || []).slice(0); // autres lignes actives
         annRows.push([
           new Date(),
           normalizePassportToText8_(pass),
@@ -212,7 +245,41 @@ function diffInscriptions_(seasonSheetId) {
       return;
     }
 
-    // EXISTANT → merge
+    // EXISTANT
+    if (isCoach) {
+      // Politique v0.8.1 : un coach ne doit PAS rester dans FINAL → force CANCEL/EXCLUDE si pas déjà fait
+      var alreadyCancelled = String(fRow[CONTROL_COLS.CANCELLED] || '').toLowerCase() === 'true';
+      var alreadyExcluded  = String(fRow[CONTROL_COLS.EXCLUDE_FROM_EXPORT] || '').toLowerCase() === 'true';
+      if (!alreadyCancelled || !alreadyExcluded) {
+        fRow[CONTROL_COLS.CANCELLED] = true;
+        fRow[CONTROL_COLS.EXCLUDE_FROM_EXPORT] = true;
+        fRow[CONTROL_COLS.LAST_MODIFIED_AT] = new Date();
+        toUpdate.push({ rownum: fRow.__rownum__, data: fRow });
+        touch_(fRow);
+
+        var passC = String(fRow['Passeport #'] || '').trim();
+        var listC = (activeByPassport[passC] || []).slice(0);
+        var occC = occurrenceLabel_(fRow);
+        var ixC = listC.indexOf(occC);
+        if (ixC >= 0) listC.splice(ixC, 1);
+
+        annRows.push([
+          new Date(),
+          normalizePassportToText8_(passC),
+          fRow['Nom'] || '',
+          fRow['Prénom'] || fRow['Prenom'] || '',
+          ((fRow['Prénom'] || fRow['Prenom'] || '') + ' ' + (fRow['Nom'] || '')).trim(),
+          fRow['Saison'] || '',
+          fRow['Nom du frais'] || fRow['Frais'] || fRow['Produit'] || '',
+          readParam_(ss, PARAM_KEYS.STATUS_CANCEL_DATE_COL) ? (fRow[readParam_(ss, PARAM_KEYS.STATUS_CANCEL_DATE_COL)] || '') : '',
+          listC.length > 0,
+          listC.join(' ; ')
+        ]);
+      }
+      return; // rien d'autre à faire pour un coach
+    }
+
+    // EXISTANT non-coach → merge normal
     var oldHash = fRow[CONTROL_COLS.ROW_HASH] || '';
     var merged = {};
     finals.headers.forEach(function (h) { merged[h] = (sRow[h] == null ? fRow[h] : sRow[h]); });
@@ -242,18 +309,15 @@ function diffInscriptions_(seasonSheetId) {
       ]);
 
       toUpdate.push({ rownum: fRow.__rownum__, data: merged });
+      touch_(merged);
 
-      // si ce merge entraîne une annulation, on la loguera plus bas (via test du statut)
-      if (newCancelled && !rowIsActive_(fRow, statusCol, cancelListCsv)) {
-        // already cancelled before, nothing new
-      }
     } else if (newCancelled !== (String(fRow[CONTROL_COLS.CANCELLED] || '').toLowerCase() === 'true')) {
       // Changement de statut uniquement → log annulation (batch)
       toUpdate.push({ rownum: fRow.__rownum__, data: merged });
+      touch_(merged);
 
       var passU = String(merged['Passeport #'] || '').trim();
       var list = (activeByPassport[passU] || []).slice(0);
-      // retirer l'occurrence en cours (elle est en train de passer à annulée)
       var occ = occurrenceLabel_(merged);
       var idx = list.indexOf(occ);
       if (idx >= 0) list.splice(idx, 1);
@@ -273,7 +337,7 @@ function diffInscriptions_(seasonSheetId) {
     }
   });
 
-  // --- 2) Disparitions = annulations
+  // --- 2) Disparitions = annulations (⚠️ ajoute LAST_MODIFIED_AT + touch_)
   var indexStagingKeys = {};
   staging.rows.forEach(function (s) { indexStagingKeys[buildKeyFromRow_(s, keyCols)] = true; });
 
@@ -281,7 +345,9 @@ function diffInscriptions_(seasonSheetId) {
     if (!indexStagingKeys[fRow.__key__]) {
       fRow[CONTROL_COLS.CANCELLED] = true;
       fRow[CONTROL_COLS.EXCLUDE_FROM_EXPORT] = true;
+      fRow[CONTROL_COLS.LAST_MODIFIED_AT] = new Date(); // ✨ pour qu'un export incrémente bien
       toUpdate.push({ rownum: fRow.__rownum__, data: fRow });
+      touch_(fRow);
 
       var passD = String(fRow['Passeport #'] || '').trim();
       var listD = (activeByPassport[passD] || []).slice(0);
@@ -334,8 +400,16 @@ function diffInscriptions_(seasonSheetId) {
     shMod.getRange(startM, 1, modRows.length, HEADERS_MOD.length).setValues(modRows);
   }
 
-  // --- 5) Outbox des nouveaux
+  // --- 5) Outbox des nouveaux (toujours désactivé ici; le worker s'en charge ailleurs)
   // if (outboxRows.length) enqueueOutboxRows_(ss.getId(), outboxRows);
 
-  return { added: toAppend.length, updated: toUpdate.length, outbox: outboxRows.length, annuls: annRows.length, mods: modRows.length };
+  var touchedPassports = Object.keys(touchedSet);
+  return {
+    added: toAppend.length,
+    updated: toUpdate.length,
+    outbox: outboxRows.length,
+    annuls: annRows.length,
+    mods: modRows.length,
+    touchedPassports: touchedPassports
+  };
 }
