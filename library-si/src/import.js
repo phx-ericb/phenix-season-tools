@@ -7,6 +7,14 @@
  */
 // ============ import.js ============
 // v0.8 — Import & Archives (incrémental v1) — VERSION NETTOYÉE
+/**
+ * v0.9 — Import ONLY
+ * - Scan + convert → STAGING
+ * - STAGING → FINALS (FULL ou INCR selon INCREMENTAL_ON)
+ * - Archivage (respecte DRY_RUN / MOVE_CONVERTED_TO_ARCHIVE)
+ * - Résumé + persist des passeports "touchés" (pour l’INCR)
+ * - Aucune règle / aucun queue mail / aucun worker / aucun export ici
+ */
 function importerDonneesSaison(seasonSheetId) {
   var ss  = getSeasonSpreadsheet_(seasonSheetId);
   ensureCoreSheets_(ss);
@@ -39,14 +47,14 @@ function importerDonneesSaison(seasonSheetId) {
       var values = readFirstSheetValues_(tempSheetId); // tableau 2D
       var stagingName = (target === 'INSCRIPTIONS') ? SHEETS.STAGING_INSCRIPTIONS : SHEETS.STAGING_ARTICLES;
 
-      // Normalisations (Passeport texte + Saison injectée si absente)
+      // Normalisations (Passeport en texte + Saison injectée si absente)
       writeStaging_(ss, stagingName, values);
 
       log_(ss, 'CONVERT_OK', info.name + ' -> ' + stagingName + ' (' + (values ? values.length : 0) + ' lignes)');
       converted.push({ fileId: info.id, name: info.name, target: target, tempId: tempSheetId });
     } catch (e) {
       var msg = (e && e.message) ? e.message : String(e);
-      if (e && e.name === 'UNSUPPORTED_MIME')        log_(ss, 'SKIP_UNSUPPORTED_MIME', info.name + ' (mime=' + info.mime + ')');
+      if (e && e.name === 'UNSUPPORTED_MIME')         log_(ss, 'SKIP_UNSUPPORTED_MIME', info.name + ' (mime=' + info.mime + ')');
       else if (e && e.name === 'CONVERTED_NOT_SHEET') log_(ss, 'SKIP_BAD_CONVERSION', info.name + ' -> ' + msg);
       else                                            log_(ss, 'CONVERT_FAIL', info.name + ' -> ' + msg);
     }
@@ -55,11 +63,12 @@ function importerDonneesSaison(seasonSheetId) {
   // --- 2) STAGING -> FINALS ---
   var incrResInsc = null, incrResArt = null;
   if (!incrOn) {
+    // FULL overwrite: copie brute du STAGING
     if (converted.some(function (c) { return c.target === 'INSCRIPTIONS'; })) {
       var shStInsc = ss.getSheetByName(SHEETS.STAGING_INSCRIPTIONS);
       if (shStInsc && shStInsc.getLastRow() > 0) {
         var vInsc = shStInsc.getRange(1,1, shStInsc.getLastRow(), shStInsc.getLastColumn()).getValues();
-        vInsc = prefixFirstColWithApostrophe_(vInsc); // legacy compat
+        vInsc = prefixFirstColWithApostrophe_(vInsc); // compat legacy
         overwriteSheet_(getSheetOrCreate_(ss, SHEETS.INSCRIPTIONS), vInsc);
         log_(ss, 'WRITE_OK', 'INSCRIPTIONS <- STAGING (' + vInsc.length + ' lignes)');
       }
@@ -73,7 +82,7 @@ function importerDonneesSaison(seasonSheetId) {
       }
     }
   } else {
-    // Incrémental
+    // INCR: applique diffs (renvoie touchedPassports pour chaque table)
     incrResInsc = applyIncrementalForInscriptions_(sid);
     incrResArt  = applyIncrementalForArticles_(sid);
   }
@@ -106,74 +115,36 @@ function importerDonneesSaison(seasonSheetId) {
     var shArt2 = ss.getSheetByName(SHEETS.ARTICLES);
     if (shArt2) rowsArt = Math.max(0, shArt2.getLastRow() - 1);
   } catch (_e2) {}
-  var summary = Utilities.formatString(
+  var summaryText = Utilities.formatString(
     'Fichiers détectés: %s, INSCRIPTIONS: %s lignes, ARTICLES: %s lignes%s%s',
     filesInfo.length, rowsInsc, rowsArt, (dryRun ? ' (DRY_RUN ON)' : ''), (incrOn ? ' [INCR]' : ' [FULL]')
   );
-  log_(ss, 'SCAN_OK', summary);
+  log_(ss, 'SCAN_OK', summaryText);
 
-  // --- 4b) Calcul "touchés" + maintenance ERREURS ciblée (v2 — diff-only)
+  // --- 4b) Persistance des "touched" (INCR seulement)
+  var touchedFromDiffs = unionPassportArrays_(
+    (incrResInsc && incrResInsc.touchedPassports) || [],
+    (incrResArt  && incrResArt.touchedPassports)  || []
+  );
   try {
-    // Uniquement les passeports touchés par les diffs incrémentaux
-    var touchedFromDiffs = unionPassportArrays_(
-      (incrResInsc && incrResInsc.touchedPassports) || [],
-      (incrResArt && incrResArt.touchedPassports) || []
-    );
-    var touchedAll = touchedFromDiffs; // on NE scanne PLUS le STAGING ici
-
-    // Persist pour debug / autres jobs (CSV + JSON)
     var props = PropertiesService.getDocumentProperties();
-    try {
-      props.setProperty('LAST_TOUCHED_PASSPORTS', (touchedAll || []).join(','));
-      props.setProperty('LAST_TOUCHED_PASSPORTS_JSON', JSON.stringify(touchedAll || []));
-    } catch (__){}
+    props.setProperty('LAST_TOUCHED_PASSPORTS', (touchedFromDiffs || []).join(','));
+    props.setProperty('LAST_TOUCHED_PASSPORTS_JSON', JSON.stringify(touchedFromDiffs || []));
+  } catch (__){}
 
-    // Règles ciblées (incrémental)
-    try {
-      evaluateSeasonRules(seasonSheetId || getSeasonId_(), touchedAll);
-    } catch (e) {
-      log_(ss, 'RULES_FAIL_WRAP', '' + e);
-    }
-
-    // Maintenance erreurs ciblée (dédup + purge des résolues) sur les mêmes passeports
-    try {
-      var trimRes = trimErreursIncremental_(seasonSheetId || getSeasonId_(), touchedAll);
-      log_(ss, 'ERR_MAINTENANCE', JSON.stringify(trimRes));
-    } catch (eTrim) {
-      log_(ss, 'ERR_MAINTENANCE_FAIL', '' + eTrim);
-    }
-  } catch (eOuter) {
-    log_(ss, 'ERR_MAINTENANCE_WRAP_FAIL', '' + eOuter);
-  }
-
-
-  // --- 5) Enqueue des courriels ---
-  try { enqueueInscriptionNewBySectors(sid); }
-  catch (eQ) { log_(ss, 'QUEUE_NEW_FAIL', String(eQ)); }
-
-  ['U9_12_SANS_CDP', 'U7_8_SANS_2E_SEANCE'].forEach(function (code) {
-    try {
-      var qRes = enqueueValidationEmailsByErrorCode(sid, code);
-      log_(ss, 'QUEUE_ERRMAIL_OK', JSON.stringify({ code: code, queued: qRes.queued }));
-    } catch (eQE) {
-      log_(ss, 'QUEUE_ERRMAIL_FAIL', JSON.stringify({ code: code, error: String(eQE) }));
-    }
-  });
-
-  // --- 6) Worker d’envoi ---
-  try {
-    log_(ss, 'MAIL_WORKER_BEGIN', 'start');
-    var workerRes = sendPendingOutbox(sid);
-    log_(ss, 'MAIL_WORKER_DONE', JSON.stringify(workerRes));
-  } catch (eW) {
-    log_(ss, 'MAIL_WORKER_FAIL', String(eW));
-  }
-
-  // --- 7) Exports rétro ---
-  // ⚠️ SUPPRIMÉ ICI pour éviter les doublons — le runner UI s’en charge (voir Code.js).
-
-  return summary;
+  // IMPORTANT : on s'arrête ici. Pas de règles, pas de trim, pas de queue, pas de worker, pas d'exports.
+  return {
+    ok: true,
+    filesDetected: filesInfo.length,
+    rowsInscriptions: rowsInsc,
+    rowsArticles: rowsArt,
+    mode: incrOn ? 'INCR' : 'FULL',
+    converted: converted.map(function(c){ return { name: c.name, target: c.target }; }),
+    touchedPassports: touchedFromDiffs
+  };
 }
+
+
 
 
 /* ========= Logger compatible (1-arg ou 3-args) ========= */
@@ -374,98 +345,91 @@ function nettoyerConversionsSaison(seasonSheetId) {
 /* ======================= Incr v1 — helpers ERREURS ======================= */
 
 
-/** Trim ciblé de la feuille ERREURS : supprime doublons et purges résolues pour passeports touchés */
-function trimErreursIncremental_(seasonSheetId, touchedPassports) {
-  var ss = getSeasonSpreadsheet_(seasonSheetId);
-  var shE = ss.getSheetByName(SHEETS.ERREURS);
-  if (!shE) return { deduped: 0, removedResolved: 0, scanned: 0 };
+function trimErreursIncremental_(ssOrId, passports) {
+  var ss = ensureSpreadsheet_(ssOrId); // <= CLÉ
+  if (!passports || passports.length === 0) {
+    log_ && log_('TRIM_ERR_SKIP', { reason: 'no-passports' });
+    return { trimmed: 0, resolved: 0, total: 0 };
+  }
+  var errSh = safeGetSheet_(ss, 'ERREURS');
+  var range = errSh.getDataRange();
+  var values = range.getValues(); // IMPORTANT: objets Date natifs (pas displayValues)
+  if (!values || values.length <= 1) {
+    return { trimmed: 0, resolved: 0, total: 0 };
+  }
 
-  var rng = shE.getDataRange();
-  var val = rng.getDisplayValues();
-  if (!val || val.length <= 1) return { deduped: 0, removedResolved: 0, scanned: 0 };
+  var header = values[0];
+  var idx = {};
+  for (var i = 0; i < header.length; i++) idx[header[i]] = i;
 
-  var headers = val[0];
-  var data = val.slice(1);
+  function keyOf(row) {
+    return [
+      row[idx['Passeport #']] || '',
+      row[idx['Type']] || '',
+      row[idx['Saison']] || '',
+      row[idx['Frais']] || '',
+      row[idx['Message']] || ''
+    ].join('¦');
+  }
 
-  function hIdx(name) { return headers.indexOf(name); }
-  var iPass = hIdx('Passeport');
-  var iNom = hIdx('Nom');
-  var iPre = hIdx('Prénom');
-  var iScope = hIdx('Scope');
-  var iType = hIdx('Type');
-  var iSais = hIdx('Saison');
-  var iFrais = hIdx('Frais');
-  var iMsg = hIdx('Message');
-  var iCtx = hIdx('Contexte');
-  var iCreated = hIdx('CreatedAt');
-
-  // Dédup (key simple: Passeport||Type||Saison||Frais||Message)
-  function keyOf_(row) { return [row[iPass], row[iType], row[iSais], row[iFrais], row[iMsg]].join('||'); }
-
-  var keepNewest = {}; // key -> {t:timestamp, r:rowIndex}
-  var toDelete = [];
-  data.forEach(function (row, idx) {
-    var k = keyOf_(row);
-    var created = row[iCreated] instanceof Date ? row[iCreated].getTime() : new Date(row[iCreated] || new Date()).getTime();
-    if (!(k in keepNewest) || keepNewest[k].t < created) {
-      keepNewest[k] = { t: created, r: idx };
+  // 1) Déduplication: on garde la plus récente par clé
+  var best = new Map();
+  for (var r = 1; r < values.length; r++) {
+    var row = values[r];
+    var k = keyOf(row);
+    var created = row[idx['CreatedAt']] instanceof Date ? row[idx['CreatedAt']] : new Date();
+    if (!best.has(k) || created > best.get(k).created) {
+      best.set(k, { row: row, r: r, created: created });
     }
-  });
-  data.forEach(function (row, idx) {
-    var k = keyOf_(row);
-    if (keepNewest[k] && keepNewest[k].r !== idx) toDelete.push(idx);
-  });
+  }
 
-  // Purge résolues pour les passeports touchés (quelques types fréquents couverts)
-  var touchedSet = {};
-  (touchedPassports || []).forEach(function (p) { touchedSet[String(p || '').trim()] = true; });
+  // 2) Reconstruire la table “dédupliquée”
+  var dedupRows = [header];
+  best.forEach(function (obj) { dedupRows.push(obj.row); });
+  if (dedupRows.length !== values.length) {
+    errSh.clearContents();
+    errSh.getRange(1,1,dedupRows.length,dedupRows[0].length).setValues(dedupRows);
+    values = dedupRows;
+  }
 
-  var removedResolved = 0, scanned = 0;
-  data.forEach(function (row, idx) {
-    var pass = String(row[iPass] || '').trim();
-    if (!pass || !touchedSet[pass]) return;
-    // Ne re-supprime pas une ligne déjà marquée pour dédup
-    if (toDelete.indexOf(idx) >= 0) return;
+  // 3) Purge des erreurs “résolues” pour les passeports touchés
+  var setTouched = new Set(passports.map(String));
+  // Charge INSCRIPTIONS finales 1 seule fois
+  var inscSh = safeGetSheet_(ss, 'INSCRIPTIONS');
+  var inscVals = inscSh.getDataRange().getValues();
+  var inscHeader = inscVals[0] || [];
+  var iIdx = {};
+  for (var j = 0; j < inscHeader.length; j++) iIdx[inscHeader[j]] = j;
+  var inscPassSet = new Set();
+  for (var rr = 1; rr < inscVals.length; rr++) {
+    var p = (inscVals[rr][iIdx['Passeport #']] || '').toString().trim();
+    if (p) inscPassSet.add(p);
+  }
 
-    var scope = String(row[iScope] || '').trim();
-    var type = String(row[iType] || '').trim();
-    var sais = String(row[iSais] || '').trim();
-    var psKey = pass + '||' + sais;
-    var okStill = true; // par défaut on garde
-
-    scanned++;
-
-    // Exemple de règles de purge «résolu» (à étendre au besoin)
-    if (type === 'MembreIntrouvable' || type === 'DoubleInscription') {
-      // Considère comme résolu si la clé passeport/saison réapparaît dans FINALS:INSCRIPTIONS
-      try {
-        var finalsI = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS);
-        var cols = getKeyColsFromParams_(ss);
-        var idxByKey = {};
-        finalsI.rows.forEach(function (r) { idxByKey[buildKeyFromRow_(r, cols)] = true; });
-        // s’il y a au moins UNE ligne de cette saison pour ce passeport -> résolu
-        var resolved = finalsI.rows.some(function (r) { return String(r['Passeport #'] || '').trim() === pass && String(r['Saison'] || '').trim() === sais; });
-        if (resolved) { okStill = false; }
-      } catch (_) { }
+  var kept = [header];
+  var resolved = 0;
+  for (var r2 = 1; r2 < values.length; r2++) {
+    var row2 = values[r2];
+    var p2 = (row2[idx['Passeport #']] || '').toString().trim();
+    if (setTouched.has(p2)) {
+      // logique “résolue”: si le passeport existe encore dans INSCRIPTIONS et que l’erreur est de type orphelin/doublon, on peut la purger
+      var type = (row2[idx['Type']] || '').toString();
+      if (type === 'MembreIntrouvable' || type === 'DoubleInscription') {
+        if (inscPassSet.has(p2)) { resolved++; continue; }
+      }
+      // autres types: on garde (elles ont été recalculées juste avant de toute façon)
     }
+    kept.push(row2);
+  }
 
-    if (!okStill) {
-      toDelete.push(idx);
-      removedResolved++;
-      log_(ss, 'ERR_RESOLVED', JSON.stringify({
-        passeport: pass, type: type, saison: sais
-      }));
-    }
-  });
+  if (kept.length !== values.length) {
+    errSh.clearContents();
+    errSh.getRange(1,1,kept.length,kept[0].length).setValues(kept);
+  }
 
-  // Suppressions physiques (du bas vers le haut)
-  toDelete.sort(function (a, b) { return b - a; });
-  toDelete.forEach(function (idx) {
-    shE.deleteRow(idx + 2); // +2 = header + 1-index
-  });
-
-  return { deduped: (toDelete.length - removedResolved), removedResolved: removedResolved, scanned: scanned };
+  return { trimmed: values.length - kept.length, resolved: resolved, total: kept.length - 1 };
 }
+
 
 /* ======================= Utilitaires incrémentaux (union + cache) ======================= */
 function unionPassportArrays_() {

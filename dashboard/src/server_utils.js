@@ -1,3 +1,77 @@
+/** ======================== Config de la cible saison ======================== */
+/** 1) Option A : définis la constante ci-dessous et basta */
+var SEASON_SHEET_ID = '1IVVHi17Jyo8jvWtrSuenbPW8IyEZqlY1bXx-WbnXPkk'; // ← colle l'ID du classeur saison ici ou laisse vide
+
+/** 2) Option B : stocke l’ID en Script Property une fois pour toutes
+ *    exécute setSeasonSheetIdOnce() une seule fois puis laisse SEASON_SHEET_ID vide
+ */
+function setSeasonSheetIdOnce() {
+  var id = '1IVVHi17Jyo8jvWtrSuenbPW8IyEZqlY1bXx-WbnXPkk';
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty('PHENIX_SEASON_SHEET_ID', id);
+  props.setProperty('ACTIVE_SEASON_ID', id);
+
+  // Ajoute au registre si absent (pour l’UI)
+  var ss = SpreadsheetApp.openById(id);
+  var list = JSON.parse(props.getProperty('SEASONS_JSON') || '[]');
+  if (!list.some(function(s){ return s.id === id; })) {
+    list.push({ id:id, title:ss.getName(), url:ss.getUrl() });
+    props.setProperty('SEASONS_JSON', JSON.stringify(list));
+  }
+}
+
+/** Écriture simple d’un param dans PARAMS (sans dépendre des helpers internes de la lib) */
+function setParamValue(key, value) {
+  var ss = getSeasonSpreadsheet_(getSeasonId_());
+  var sh = ss.getSheetByName('PARAMS') || ss.insertSheet('PARAMS');
+  if (sh.getLastRow() < 1) sh.getRange(1,1,1,4).setValues([['Clé','Valeur','Type','Description']]);
+
+  var last = sh.getLastRow();
+  if (last < 2) { sh.appendRow([key, value, '', '']); return; }
+
+  var keys = sh.getRange(2,1,last-1,1).getValues().map(function(r){return String(r[0]||'');});
+  var row = -1;
+  for (var i=0;i<keys.length;i++){ if (keys[i] === key) { row = 2+i; break; } }
+  if (row === -1) sh.appendRow([key, value, '', '']);
+  else sh.getRange(row,2).setValue(value);
+}
+
+/** Récupère l’ID du classeur saison (constante > ScriptProperty) */
+function getSeasonId_() {
+  var props = PropertiesService.getScriptProperties();
+  var id =
+    props.getProperty('ACTIVE_SEASON_ID') ||
+    (SEASON_SHEET_ID && String(SEASON_SHEET_ID).trim()) ||
+    props.getProperty('PHENIX_SEASON_SHEET_ID') ||
+    props.getProperty('SEASON_SPREADSHEET_ID');
+
+  if (!id) {
+    throw new Error(
+      "Aucun ID de classeur saison. Définis SEASON_SHEET_ID " +
+      "ou exécute setSeasonSheetIdOnce() / clique 'Définir active' dans l'UI."
+    );
+  }
+  return String(id).trim();
+}
+
+/** Lecture simple d’un param dans PARAMS (utilisée par runImportAndExports pour DRY_RUN) */
+function readParamValue(key) {
+  var ss = getSeasonSpreadsheet_(getSeasonId_());
+  var sh = ss.getSheetByName('PARAMS');
+  if (!sh || sh.getLastRow() < 2) return '';
+  var vals = sh.getRange(2,1, sh.getLastRow()-1, 2).getValues(); // Col A=Clé, B=Valeur
+  for (var i=0;i<vals.length;i++) {
+    if (String(vals[i][0]||'') === key) return String(vals[i][1]||'');
+  }
+  return '';
+}
+function readBoolParam_(key, def){
+  var v = (readParamValue(key) || '').toLowerCase();
+  if (['1','true','yes','oui'].indexOf(v) >= 0) return true;
+  if (['0','false','no','non'].indexOf(v) >= 0) return false;
+  return !!def;
+}
+
 // Utils communs
 function _ok(data, message) { return { ok: true, data: data || null, message: message || '' }; }
 function _err(e) { var msg = (e && e.stack) ? String(e.stack) : String(e); return { ok: false, error: msg }; }

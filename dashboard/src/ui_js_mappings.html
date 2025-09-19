@@ -11,10 +11,12 @@ const MAP_FIELDS = [
   {key:'CategorieFmt',  kind:'text'},
   {key:'Exclude',       kind:'bool'},
   {key:'Priority',      kind:'int'},
-  {key:'Code', kind:'text'},
-  {key:'ExclusiveGroup', kind:'text'}
-
+  {key:'Code',          kind:'text'},
+  {key:'ExclusiveGroup',kind:'text'},
+  // 👇 nouveau
+  {key:'AllowOrphan',   kind:'bool'}
 ];
+
 
 const MAP_HEADER = MAP_FIELDS.map(f => f.key);
 

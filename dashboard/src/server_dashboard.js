@@ -52,6 +52,25 @@ function getDashboardMetrics(){
   const inscriptionsTotal = countRows_(ss, DASH_SHEETS.INSCRIPTIONS);
   const articlesTotal     = countRows_(ss, DASH_SHEETS.ARTICLES);
 
+
+  // NOUVEAU: compte JOUEURS + LEDGER
+  const joueursTotal = countRows_(ss, 'JOUEURS');
+  const ledgerTotal  = countRows_(ss, 'ACHATS_LEDGER');
+
+  // NOUVEAU: stats Photo depuis JOUEURS
+  const jTab = readTable_(ss, 'JOUEURS'); // {headers, rows}
+  const h = jTab.headers || [];
+  const iPhotoStr = h.indexOf('PhotoStr');
+  let photoExp = 0, photoSoon = 0;
+  if (iPhotoStr >= 0) {
+    jTab.rows.forEach(r => {
+      const s = String(r[iPhotoStr]||'').toLowerCase();
+      if (s.indexOf('expirée') !== -1 || s.indexOf('expiree') !== -1) photoExp++;
+      else if (s.indexOf('expire bientôt') !== -1 || s.indexOf('expire bientot') !== -1) photoSoon++;
+    });
+  }
+
+
   // ERREURS
   let erreursTotal = 0, erreursDernierImport = null, errSubtitle = 'Dernier import';
   const errT = readTable_(ss, DASH_SHEETS.ERREURS);
@@ -143,4 +162,104 @@ function formatDate_(v){
     return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())} ${pad(v.getHours())}:${pad(v.getMinutes())}`;
   }
   return String(v||'');
+}
+
+function getMembreFlagsMetrics() {
+  var ss = getSeasonSpreadsheet_(getSeasonId_());
+  var sh = ss.getSheetByName(readParam_ ? readParam_(ss, 'SHEET_MEMBRES_GLOBAL') || 'MEMBRES_GLOBAL' : 'MEMBRES_GLOBAL');
+  if (!sh || sh.getLastRow() < 2) return { photosInvalides: 0, casiersExpires: 0, total: 0 };
+
+  var vals = sh.getRange(2,1, sh.getLastRow()-1, sh.getLastColumn()).getValues();
+  var header = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
+  var col = {}; header.forEach(function(h,i){ col[String(h)]=i; });
+
+  var ciPhotoInv = col['PhotoInvalide'] ?? -1;
+  var ciCasier   = col['CasierExpiré'] ?? -1;
+
+  var photosInvalides = 0, casiersExpires = 0, total = vals.length;
+  for (var i=0;i<vals.length;i++){
+    if (ciPhotoInv>=0 && Number(vals[i][ciPhotoInv])===1) photosInvalides++;
+    if (ciCasier>=0   && Number(vals[i][ciCasier])===1)   casiersExpires++;
+  }
+  return { photosInvalides: photosInvalides, casiersExpires: casiersExpires, total: total };
+}
+
+/** KPIs par type (entraineurs | joueurs) basés sur MEMBRES_GLOBAL,
+ *  avec la source "inscriptions" pour déterminer les joueurs réellement inscrits.
+ */
+function getKpiPhotosCasierByType(type /* 'entraineurs' | 'joueurs' */) {
+  var seasonId = getSeasonId_();
+  var ss = SpreadsheetApp.openById(seasonId);
+
+  var seasonYear = Number(readParam_(ss, 'SEASON_YEAR') || new Date().getFullYear());
+  var invalidFrom = (readParam_(ss, 'PHOTO_INVALID_FROM_MMDD') || '04-01').trim(); // ex "04-01"
+  var cutoffNextJan1 = (seasonYear + 1) + '-01-01';        // ex "2026-01-01"
+  var seasonInvalidDate = seasonYear + '-' + invalidFrom;  // ex "2025-04-01"
+  var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+  // 1) Construire l’ensemble des passeports "inscrits", selon le type
+  var passportsSet = new Set();
+
+  if (type === 'entraineurs') {
+    // À partir de ENTRAINEURS_ROLES (unique par passeport)
+    var shR = ss.getSheetByName('ENTRAINEURS_ROLES');
+    if (shR && shR.getLastRow() > 1) {
+      var R = shR.getDataRange().getValues();
+      var h = R[0];
+      var ciPass = h.indexOf('Passeport');
+      for (var i=1;i<R.length;i++){
+        var p = normalizePassportPlain8_(R[i][ciPass]);
+        if (p) passportsSet.add(p);
+      }
+    }
+  } else {
+    // JOUEURS : on lit la feuille finale "inscriptions"
+    var shJ = ss.getSheetByName('inscriptions');
+    if (shJ && shJ.getLastRow() > 1) {
+      var J = shJ.getDataRange().getValues();
+      var hj = J[0]; 
+      var jp = hj.indexOf('Passeport');      // colonne attendue
+      var js = hj.indexOf('Statut');         // optionnel : si tu veux filtrer "inscrit", "actif", etc.
+      for (var j=1;j<J.length;j++){
+        if (jp < 0) break;
+        // si tu veux forcer un statut, décommente la ligne suivante:
+        // if (js >= 0 && !/inscrit|actif/i.test(String(J[j][js]||''))) continue;
+        var pj = normalizePassportPlain8_(J[j][jp]);
+        if (pj) passportsSet.add(pj);
+      }
+    }
+  }
+
+  // 2) Parcours MEMBRES_GLOBAL pour les passeports retenus
+  var sh = ss.getSheetByName(readParam_(ss,'SHEET_MEMBRES_GLOBAL') || 'MEMBRES_GLOBAL');
+  if (!sh || sh.getLastRow() < 2) return { photosInvalides:0, dues:0, casiersExpires:0, total:0 };
+
+  var V = sh.getDataRange().getValues();
+  var H = V[0];
+  var cPass  = H.indexOf('Passeport'),
+      cPhoto = H.indexOf('PhotoExpireLe'),
+      cCas   = H.indexOf('CasierExpiré');
+
+  var photosInvalides = 0, dues = 0, casiersExpires = 0, total = 0;
+
+  for (var r=1; r<V.length; r++){
+    var p = normalizePassportPlain8_(V[r][cPass]);
+    if (!p) continue;
+
+    // Si on a un set (entraineurs ou joueurs) -> filtrer
+    if (passportsSet.size && !passportsSet.has(p)) continue;
+
+    total++;
+    var exp   = String(V[r][cPhoto] || '');
+    var inval = (exp && exp < cutoffNextJan1) ? 1 : 0; // même règle que l’import
+    if (inval) {
+      if (today >= seasonInvalidDate) photosInvalides++;
+      else dues++; // invalide mais "à renouveler" (due) à partir du 1er avril
+    }
+
+    var cas = Number(V[r][cCas] || 0);
+    if (cas === 1) casiersExpires++;
+  }
+
+  return { photosInvalides: photosInvalides, dues: dues, casiersExpires: casiersExpires, total: total };
 }

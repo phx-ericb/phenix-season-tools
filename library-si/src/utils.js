@@ -1,3 +1,6 @@
+/***** utils.js — révisé (robuste ID/URL/DriveFile/Spreadsheet) *****/
+
+/** Définis une saison active (script properties) */
 function setSeasonIdGlobalOnce() {
   var id = '1IVVHi17Jyo8jvWtrSuenbPW8IyEZqlY1bXx-WbnXPkk'; // ton ID
   var p = PropertiesService.getScriptProperties();
@@ -6,34 +9,140 @@ function setSeasonIdGlobalOnce() {
   p.setProperty('SEASON_SPREADSHEET_ID', id);  // alias supplémentaire
 }
 
+/* -------------------- Helpers robustes Spreadsheet -------------------- */
 
-/** Ouvre le classeur de la saison ou lève une erreur claire */
-function getSeasonSpreadsheet_(seasonSheetId) {
-  if (seasonSheetId) return SpreadsheetApp.openById(seasonSheetId);
+if (typeof extractSpreadsheetId_ !== 'function') {
+  /** Extrait un ID depuis un ID pur OU une URL Google Sheets */
+  function extractSpreadsheetId_(s) {
+    var m = String(s || '').match(/[-\w]{25,}/);
+    if (m && m[0]) return m[0];
+    throw new Error('extractSpreadsheetId_: ID/URL invalide: ' + s);
+  }
+}
 
-  // ↙️ mêmes clés que celles que tu utilises dans Code.js
-  var props = PropertiesService.getScriptProperties();
-  var id =
-    props.getProperty('ACTIVE_SEASON_ID') ||
-    props.getProperty('PHENIX_SEASON_SHEET_ID') ||
-    props.getProperty('SEASON_SPREADSHEET_ID');
+if (typeof _debugType_ !== 'function') {
+  /** Petit helper pour logger le type d’input passé aux utils */
+  function _debugType_(x) {
+    if (x == null) return 'null/undefined';
+    if (typeof x === 'string') return 'string';
+    if (typeof x.getSheetByName === 'function') return 'Spreadsheet';
+    if (typeof x.getId === 'function') return 'DriveFile(id=' + x.getId() + ')';
+    return Object.prototype.toString.call(x);
+  }
+}
 
-  if (id) return SpreadsheetApp.openById(id);
+/** Garantit un Spreadsheet (accepte Spreadsheet | id|url string | DriveFile | rien) */
+function ensureSpreadsheet_(ssOrId) {
+  // 1) Déjà un Spreadsheet ?
+  if (ssOrId && typeof ssOrId.getSheetByName === 'function' && typeof ssOrId.getId === 'function') {
+    return ssOrId;
+  }
+  // 2) DriveFile ?
+  if (ssOrId && typeof ssOrId.getId === 'function' && typeof ssOrId.getBlob === 'function') {
+    return SpreadsheetApp.openById(ssOrId.getId());
+  }
+  // 3) String: ID pur ou URL
+  if (typeof ssOrId === 'string' && ssOrId.trim()) {
+    return SpreadsheetApp.openById(extractSpreadsheetId_(ssOrId));
+  }
 
-  // Dernier filet: si exécuté depuis un classeur (rare côté lib), prends l’actif
+  // 4) Rien de fourni → essaie les Script Properties (IDs de saison)
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var pid =
+      (props && (props.getProperty('ACTIVE_SEASON_ID')
+              ||  props.getProperty('PHENIX_SEASON_SHEET_ID')
+              ||  props.getProperty('SEASON_SPREADSHEET_ID'))) || '';
+    if (pid) return SpreadsheetApp.openById(pid);
+  } catch (_){}
+
+  // 5) Dernier filet: classeur actif — et si absent, on lève une erreur claire
   try {
     var active = SpreadsheetApp.getActiveSpreadsheet();
     if (active) return active;
-  } catch (e) {}
+  } catch (_){}
 
-  throw new Error("seasonSheetId manquant. Passe l’ID ou définis ACTIVE_SEASON_ID/PHENIX_SEASON_SHEET_ID.");
+  throw new Error('ensureSpreadsheet_: impossible d’obtenir un Spreadsheet valide (input=' + _debugType_(ssOrId) + ')');
+}
+
+/* ---------- DROP-IN: assertions & shims Spreadsheet ---------- */
+
+// log neutre si absent
+if (typeof log_ !== 'function') {
+  function log_(action, details) {
+    try {
+      var ss = (typeof getSeasonSpreadsheet_ === 'function') ? getSeasonSpreadsheet_() : SpreadsheetApp.getActiveSpreadsheet();
+      if (ss && typeof appendImportLog_ === 'function') {
+        appendImportLog_(ss, String(action || 'LOG'), (typeof details === 'string' ? details : JSON.stringify(details || {})));
+      }
+    } catch (_){}
+  }
+}
+
+/** Vérifie/convertit en Spreadsheet et *garantit* un objet valide, sinon jette une erreur claire. */
+if (typeof assertSpreadsheet_ !== 'function') {
+  function assertSpreadsheet_(ssOrId, contextMsg) {
+    var ss = ensureSpreadsheet_(ssOrId);
+    if (!ss || typeof ss.getSheetByName !== 'function') {
+      throw new Error('assertSpreadsheet_: Spreadsheet invalide' + (contextMsg ? ' (' + contextMsg + ')' : ''));
+    }
+    return ss;
+  }
+}
+
+/** Variante pratique : renvoie directement une feuille, jette si absente. */
+if (typeof assertSheet_ !== 'function') {
+  function assertSheet_(ssOrId, sheetName, contextMsg) {
+    var ss = assertSpreadsheet_(ssOrId, contextMsg);
+    var sh = ss.getSheetByName(sheetName);
+    if (!sh) throw new Error('assertSheet_: feuille "' + sheetName + '" introuvable' + (contextMsg ? ' (' + contextMsg + ')' : ''));
+    return sh;
+  }
+}
+
+/** Sécurisée: essaye d’ouvrir une feuille; si absente et header fourni → la crée. */
+if (typeof getSheetOrCreate_ !== 'function') {
+  function getSheetOrCreate_(ssOrId, name, header) {
+    var ss = assertSpreadsheet_(ssOrId, 'getSheetOrCreate_');
+    var sh = ss.getSheetByName(name);
+    if (!sh) {
+      sh = ss.insertSheet(name);
+      if (header && header.length) sh.getRange(1,1,1,header.length).setValues([header]);
+    } else if (header && header.length && sh.getLastRow() === 0) {
+      sh.getRange(1,1,1,header.length).setValues([header]);
+    }
+    return sh;
+  }
 }
 
 
-  
+/** Ouvre le classeur de la saison (robuste sur Spreadsheet/DriveFile/URL/ID) */
+function getSeasonSpreadsheet_(seasonSheetLike) {
+  // Si on nous donne quelque chose (Spreadsheet/DriveFile/URL/ID), on laisse ensureSpreadsheet_ gérer.
+  if (seasonSheetLike) return ensureSpreadsheet_(seasonSheetLike);
+
+  // Sinon, on tente via Script Properties
+  var props = PropertiesService.getScriptProperties();
+  var id =
+    (props && (props.getProperty('ACTIVE_SEASON_ID')
+            ||  props.getProperty('PHENIX_SEASON_SHEET_ID')
+            ||  props.getProperty('SEASON_SPREADSHEET_ID'))) || '';
+  if (id) return ensureSpreadsheet_(id);
+
+  // Puis l’actif si présent
+  try {
+    var active = SpreadsheetApp.getActiveSpreadsheet();
+    if (active) return active;
+  } catch (_){}
+
+  throw new Error("getSeasonSpreadsheet_: seasonSheetId manquant. Passe un Spreadsheet/ID/URL, ou définis ACTIVE_SEASON_ID/PHENIX_SEASON_SHEET_ID.");
+}
+
+/* -------------------- Sheets utils -------------------- */
 
 /** Récupère une feuille, ou la crée vide avec un header si fourni */
 function getSheetOrCreate_(ss, name, header) {
+  ss = ensureSpreadsheet_(ss);
   var sh = ss.getSheetByName(name);
   if (!sh) {
     sh = ss.insertSheet(name);
@@ -48,6 +157,7 @@ function getSheetOrCreate_(ss, name, header) {
 
 /** Assure les feuilles cœur (et leurs entêtes) */
 function ensureCoreSheets_(ss) {
+  ss = ensureSpreadsheet_(ss);
   getSheetOrCreate_(ss, SHEETS.PARAMS);
   getSheetOrCreate_(ss, SHEETS.IMPORT_LOG, ['Horodatage','Action','Détails']);
   ensureMailOutbox_(ss);
@@ -64,6 +174,7 @@ function ensureCoreSheets_(ss) {
 
 /** Lit un paramètre depuis PARAMS (fallback DocumentProperties) */
 function readParam_(ss, key) {
+  ss = ensureSpreadsheet_(ss);
   var sh = ss.getSheetByName(SHEETS.PARAMS);
   if (sh) {
     var last = sh.getLastRow();
@@ -82,6 +193,7 @@ function readParam_(ss, key) {
 
 /** Petit logger d’import */
 function appendImportLog_(ss, action, details) {
+  ss = ensureSpreadsheet_(ss);
   var sh = getSheetOrCreate_(ss, SHEETS.IMPORT_LOG, ['Horodatage','Action','Détails']);
   sh.appendRow([new Date(), action, details || '']);
 }
@@ -141,7 +253,7 @@ function moveFileIdToFolderIdV3_(fileId, targetFolderId) {
  *  Utilise getDisplayValues() pour préserver les zéros en tête (ex.: Passeport #).
  */
 function readSheetAsObjects_(ssId, sheetName) {
-  var sh = SpreadsheetApp.openById(ssId).getSheetByName(sheetName);
+  var sh = SpreadsheetApp.openById(extractSpreadsheetId_(ssId)).getSheetByName(sheetName);
   if (!sh) return { headers: [], rows: [], sheet: null, lastRow: 0, lastCol: 0 };
 
   var rng = sh.getDataRange();
@@ -160,6 +272,7 @@ function readSheetAsObjects_(ssId, sheetName) {
 
 /** KEY_COLS depuis PARAMS (fallback raisonnable) */
 function getKeyColsFromParams_(ss) {
+  ss = ensureSpreadsheet_(ss);
   var raw = (readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison');
   return raw.split(',').map(function(s){ return s.trim(); }).filter(String);
 }
@@ -217,6 +330,7 @@ function computeRowHash_(row) {
  *  - Normalise 'Passeport #' en TEXTE avec zéro-padding (8) + apostrophe
  */
 function writeStaging_(seasonSs, stagingSheetName, values) {
+  seasonSs = ensureSpreadsheet_(seasonSs);
   var sh = getSheetOrCreate_(seasonSs, stagingSheetName);
   sh.clearContents();
   if (!values || !values.length) return;
@@ -263,33 +377,26 @@ function writeStaging_(seasonSs, stagingSheetName, values) {
   }
 }
 
-/** Normalise Passeport #:
- * - null/'' → ''
- * - si numérique → pad à 8 (garde >8 tel quel)
- * - retour toujours en TEXTE via apostrophe en tête
- */
+/** Normalise Passeport # en TEXTE avec padding 8 (retourne "'00123456") */
 function normalizePassportToText8_(val) {
   if (val == null) return '';
   var s = String(val).trim();
   if (s === '') return '';
-  if (s[0] === "'") s = s.slice(1); // strip apostrophe éventuelle
+  if (s[0] === "'") s = s.slice(1);
   if (/^\d+$/.test(s)) {
     if (s.length < 8) s = ('00000000' + s).slice(-8);
   }
-  return "'" + s; // force texte
+  return "'" + s;
 }
-/** Version "export" : réutilise normalizePassportToText8_ mais retire l’apostrophe.
- *  -> On conserve le padding à 8, on écrit une chaîne "00123456" (sans '),
- *  -> et on met la colonne A en format texte côté export.
- */
+/** Version "export" : chaîne "00123456" (sans apostrophe) */
 function normalizePassportPlain8_(val) {
-  var s = normalizePassportToText8_(val); // ex: "'00123456"
-  return (s && s[0] === "'") ? s.slice(1) : s; // -> "00123456"
+  var s = normalizePassportToText8_(val);
+  return (s && s[0] === "'") ? s.slice(1) : s;
 }
 
-
-// ---- Params & statut helpers ----
+/* ---- Params & statut helpers ---- */
 function _paramOr_(ss, key, dflt) {
+  ss = ensureSpreadsheet_(ss);
   var v = readParam_(ss, key);
   return (v == null || v === '') ? String(dflt) : String(v);
 }
@@ -304,12 +411,12 @@ function _isCancelledStatus_(val, cancelListCsv) {
   return list.indexOf(norm) >= 0;
 }
 
-// ---- MAIL_OUTBOX helpers (globalisés) ----
+/* ---- MAIL_OUTBOX helpers ---- */
 function getMailOutboxHeaders_() {
   return ['Type','To','Cc','Sujet','Corps','Attachments','KeyHash','Status','CreatedAt','SentAt','Error'];
 }
-/** MAIL_OUTBOX: garantit l’entête attendue (et répare si besoin). */
 function ensureMailOutbox_(ss) {
+  ss = ensureSpreadsheet_(ss);
   var headers = getMailOutboxHeaders_();
   var sh = ss.getSheetByName(SHEETS.MAIL_OUTBOX);
 
@@ -338,15 +445,14 @@ function ensureMailOutbox_(ss) {
  * Ajoute N lignes dans MAIL_OUTBOX (idempotence via KeyHash+Type gérée par l’appelant).
  * rows = array of [Type,To,Cc,Sujet,Corps,Attachments,KeyHash,'pending',now,'','']
  */
-/** Ecrit les lignes en respectant la largeur d’entête (pad/troncature) */
 function enqueueOutboxRows_(ssId, rows) {
   if (!rows || !rows.length) return 0;
-  var ss = SpreadsheetApp.openById(ssId);
-  var sh = ensureMailOutbox_(ss);
+  var ss = ensureSpreadsheet_(ssId);
+  // ⬇️ Assure l’upgrade pour afficher Passeport/NomComplet/Frais
+  var sh = upgradeMailOutboxForDisplay_(ss);
   var headers = getMailOutboxHeaders_();
   var W = headers.length;
 
-  // normalise la largeur de chaque ligne
   var toWrite = rows.map(function(r){
     var arr = (r && r.slice) ? r.slice(0, W) : [];
     while (arr.length < W) arr.push('');
@@ -360,6 +466,7 @@ function enqueueOutboxRows_(ssId, rows) {
   }
   return toWrite.length;
 }
+
 
 function setCancelFlags_(sheet, rowNumber, headers, cancelled, exclude) {
   var idxC = headers.indexOf(CONTROL_COLS.CANCELLED);
@@ -375,7 +482,7 @@ function getHeadersIndex_(sh, width) {
   return idx;
 }
 
-/** ====== Helpers v0.7 (nouveaux) ====== */
+/* ====== Helpers v0.7 (nouveaux) ====== */
 function norm_(s) {
   s = String(s == null ? '' : s);
   try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch(e){}
@@ -443,6 +550,7 @@ function collectEmailsFromRow_(row, fieldsCsv) {
 
 /** Liste des occurrences actives (non annulées) pour un passeport dans une feuille donnée */
 function listActiveOccurrencesForPassport_(ss, sheetName, passport) {
+  ss = ensureSpreadsheet_(ss);
   var info = readSheetAsObjects_(ss.getId(), sheetName);
   var act = info.rows.filter(function(r){
     return norm_(r['Passeport #']) === norm_(passport)
@@ -459,13 +567,7 @@ function jsonCompact_(obj) {
   try { return JSON.stringify(obj); } catch(e){ return '{}'; }
 }
 
-/** Harmonise une valeur "Genre" provenant de MAPPINGS.
- *  - '' | '*'                    -> '*'
- *  - MF | M/F | F/M | FEM/MASC   -> '*'
- *  - MIXTE | MIX | NB | X        -> 'X' (catégorie "neutre")
- *  - M | F                       -> inchangé
- *  - Autre                       -> '*' (par défaut: mixte)
- */
+/** Harmonise une valeur "Genre" provenant de MAPPINGS. */
 function _normMapGenre(g) {
   var v = String(g == null ? '' : g).trim().toUpperCase();
   if (!v || v === '*') return '*';
@@ -478,18 +580,16 @@ function _normMapGenre(g) {
   if (AS_ALL.indexOf(vClean) >= 0) return '*';
   if (vClean === 'M' || vClean === 'F') return vClean;
 
-  // Valeur inconnue → considérer "tous" pour ne pas bloquer
   return '*';
 }
 
 /* ===== Lecture MAPPINGS unifiés (incl. ExclusiveGroup) ===== */
-/* ===== Lecture MAPPINGS unifiés (incl. ExclusiveGroup) ===== */
 function _loadUnifiedGroupMappings_(ss) {
-  // 1) feuille
+  ss = ensureSpreadsheet_(ss);
+
   var sh = ss.getSheetByName(SHEETS.MAPPINGS) || ss.getSheetByName('MAPPINGS');
   if (!sh) return [];
 
-  // 2) données + détection d’entête « première ligne valable » (≥2 cellules non vides)
   var data = sh.getDataRange().getValues();
   var headerIdx = -1;
   for (var r = 0; r < data.length; r++) {
@@ -502,7 +602,6 @@ function _loadUnifiedGroupMappings_(ss) {
   }
   if (headerIdx === -1) return [];
 
-  // 3) index des colonnes
   var H = (data[headerIdx] || []).map(function(h){ return String(h || '').trim(); });
   function idx(k) { var i = H.indexOf(k); return i < 0 ? null : i; }
 
@@ -512,53 +611,37 @@ function _loadUnifiedGroupMappings_(ss) {
 
   if (iType == null || iAli == null) return [];
 
-  // helpers de nettoyage
-  function _t(v) {
-    // trim + supprime les espaces insécables
-    return String(v == null ? '' : v).replace(/\u00A0/g, ' ').trim();
-  }
-  function _toIntOrNull(v) {
-    var s = _t(v); if (s === '') return null;
-    var n = parseInt(s, 10); return isNaN(n) ? null : n;
-  }
-  function _normGenreCell(g) {
-    var v = _t(g).toUpperCase();
-    // on n'accepte QUE M, F, ou '*' (joker). Tout le reste => joker.
-    if (v === 'M' || v === 'F' || v === '*') return v;
-    if (!v) return '*';
-    return '*';
-  }
+  function _t(v){ return String(v == null ? '' : v).replace(/\u00A0/g, ' ').trim(); }
+  function _toIntOrNull(v){ var s=_t(v); if(!s) return null; var n=parseInt(s,10); return isNaN(n)?null:n; }
 
-  // 4) lecture des lignes
   var out = [];
-  for (var r = headerIdx + 1; r < data.length; r++) {
-    var row = data[r] || [];
+  for (var r2 = headerIdx + 1; r2 < data.length; r2++) {
+    var row2 = data[r2] || [];
 
-    // ligne complètement vide ?
     var isEmpty = true;
-    for (var c = 0; c < row.length; c++) {
-      if (_t(row[c]) !== '') { isEmpty = false; break; }
+    for (var c2 = 0; c2 < row2.length; c2++) {
+      if (_t(row2[c2]) !== '') { isEmpty = false; break; }
     }
     if (isEmpty) continue;
 
-    var type = (iType == null) ? '' : String(_t(row[iType])).toLowerCase(); // "article"/"member"
-    var ali  = (iAli  == null) ? '' : _t(row[iAli]);
-    var umin = (iUmin == null) ? null : _toIntOrNull(row[iUmin]);
-    var umax = (iUmax == null) ? null : _toIntOrNull(row[iUmax]);
-    var gen  = (iGen  == null) ? '*' : _normGenreCell(row[iGen]);
-    var grp  = (iG    == null) ? '' : _t(row[iG]);
-    var cat  = (iC    == null) ? '' : _t(row[iC]);
-    var ex   = (iEx   == null) ? '' : String(_t(row[iEx])).toLowerCase();
-    var pri  = (iPr   == null) ? null : _toIntOrNull(row[iPr]);
-    var exg  = (iX    == null) ? '' : _t(row[iX]);
-    var code = (iCode == null) ? '' : _t(row[iCode]);
+    var type = (iType == null) ? '' : String(_t(row2[iType])).toLowerCase();
+    var ali  = (iAli  == null) ? '' : _t(row2[iAli]);
+    var umin = (iUmin == null) ? null : _toIntOrNull(row2[iUmin]);
+    var umax = (iUmax == null) ? null : _toIntOrNull(row2[iUmax]);
+    var gen  = (iGen  == null) ? '*' : _normMapGenre(row2[iGen]);
+    var grp  = (iG    == null) ? '' : _t(row2[iG]);
+    var cat  = (iC    == null) ? '' : _t(row2[iC]);
+    var ex   = (iEx   == null) ? '' : String(_t(row2[iEx])).toLowerCase();
+    var pri  = (iPr   == null) ? null : _toIntOrNull(row2[iPr]);
+    var exg  = (iX    == null) ? '' : _t(row2[iX]);
+    var code = (iCode == null) ? '' : _t(row2[iCode]);
 
     out.push({
-      Type: type,                 // "article" / "member"
-      AliasContains: ali,         // propre (trim + nbsp fix)
-      Umin: umin,                 // number | null
+      Type: type,
+      AliasContains: ali,
+      Umin: umin,
       Umax: umax,
-      Genre: gen,                 // 'M' | 'F' | '*'
+      Genre: gen,
       GroupeFmt: grp,
       CategorieFmt: cat,
       Exclude: ex === 'true',
@@ -568,7 +651,6 @@ function _loadUnifiedGroupMappings_(ss) {
     });
   }
 
-  // 5) tri (priorité desc, puis alias plus long)
   out.sort(function(a, b) {
     if (a.Priority !== b.Priority) return b.Priority - a.Priority;
     return (b.AliasContains || '').length - (a.AliasContains || '').length;
@@ -576,34 +658,30 @@ function _loadUnifiedGroupMappings_(ss) {
 
   return out;
 }
-// ========= MEMBRES_GLOBAL: index & cache (lib/server) =========
 
-// Cache process local (mémoire de l'instance)
+/* ========= MEMBRES_GLOBAL: index & cache ========= */
+
 var __MG_CACHE = (typeof __MG_CACHE !== 'undefined') ? __MG_CACHE : { at:0, key:'', data:null };
 
-/** Fallback passport normalizer (au cas où) */
 if (typeof normalizePassportPlain8_ !== 'function') {
   function normalizePassportPlain8_(v){
     var s = String(v == null ? '' : v).replace(/\D/g,'').trim();
     if (!s) return '';
-    // garde les 8 derniers chiffres; pad à gauche si besoin
     s = s.slice(-8);
     while (s.length < 8) s = '0' + s;
     return s;
   }
 }
 
-/** Construit une clé de cache rapide pour MEMBRES_GLOBAL (id feuille + taille + header) */
 function _mg_cacheKey_(ss){
+  ss = ensureSpreadsheet_(ss);
   try {
     var name = (typeof readParam_==='function' ? (readParam_(ss,'SHEET_MEMBRES_GLOBAL') || 'MEMBRES_GLOBAL') : 'MEMBRES_GLOBAL');
     var sh = ss.getSheetByName(name);
     if (!sh) return ss.getId() + '|MG:none';
     var lr = sh.getLastRow() || 0, lc = sh.getLastColumn() || 0;
-    // header (limité à 30 colonnes pour rester léger)
     var hdr = (lr >= 1 && lc >= 1) ? sh.getRange(1,1,1, Math.min(lc,30)).getDisplayValues()[0].join('|') : '';
     var sig = [ss.getId(), name, lr, lc, hdr].join('|');
-    // hash court (MD5) pour avoir une clé compacte dans CacheService
     var md5 = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, sig);
     var b64 = Utilities.base64EncodeWebSafe(md5).slice(0,22);
     return 'MG:' + b64;
@@ -612,26 +690,15 @@ function _mg_cacheKey_(ss){
   }
 }
 
-/**
- * Lit MEMBRES_GLOBAL et renvoie un index:
- * {
- *   byPass: { '00012345': { Passeport, PhotoExpireLe, PhotoInvalide:0/1, CasierExpire:0/1, LastUpdate, PhotoInvalideDuesLe, StatutMembre } },
- *   headers: [...],
- *   rows: <optionnel>,
- *   key: <clé de cache>
- * }
- * Cache mémoire + CacheService (5 min).
- */
 function getMembresIndex_(ss){
+  ss = ensureSpreadsheet_(ss);
   var key = _mg_cacheKey_(ss);
   var now = Date.now();
 
-  // 1) Mémoire locale (process) — très rapide
   if (__MG_CACHE.data && __MG_CACHE.key === key && (now - __MG_CACHE.at) < 5*60*1000) {
     return __MG_CACHE.data;
   }
 
-  // 2) CacheService (partagé entre invocations)
   try {
     var sc = CacheService.getScriptCache();
     var cached = sc.get(key);
@@ -644,7 +711,6 @@ function getMembresIndex_(ss){
     }
   } catch(_){}
 
-  // 3) Lecture live
   var name = (typeof readParam_==='function' ? (readParam_(ss,'SHEET_MEMBRES_GLOBAL') || 'MEMBRES_GLOBAL') : 'MEMBRES_GLOBAL');
   var sh = ss.getSheetByName(name);
   if (!sh || sh.getLastRow() < 2 || sh.getLastColumn() < 1) {
@@ -657,7 +723,6 @@ function getMembresIndex_(ss){
   var H = V[0].map(String);
   var col = {};
   H.forEach(function(h,i){ col[h]=i; });
-
   function colIdx(n){ var i = col[n]; return (typeof i==='number') ? i : -1; }
 
   var cPass = colIdx('Passeport'),
@@ -691,9 +756,248 @@ function getMembresIndex_(ss){
 
   var result = { byPass: byPass, headers: H, key: key };
 
-  // 4) Écritures cache
   __MG_CACHE = { at: now, key: key, data: result };
   try { CacheService.getScriptCache().put(key, JSON.stringify(result), 300); } catch(_){}
 
   return result;
+}
+
+/** Accès feuille sécurisé (throw si manquante) */
+function safeGetSheet_(ssOrId, name) {
+  var ss = ensureSpreadsheet_(ssOrId);
+  var sh = ss.getSheetByName(name);
+  if (!sh) throw new Error('Feuille introuvable "' + name + '" dans ss=' + ss.getId());
+  return sh;
+}
+
+/* ====== Allow-Orphan — Sources: MAPPINGS, PARAMS, RULES_JSON ====== */
+
+/** Optionnel : si ta feuille MAPPINGS a une colonne "AllowOrphan" (TRUE/FALSE),
+ *  tu peux l’exposer via catalog.match(...) → item.AllowOrphan.
+ *  Ci-dessous, on tolère son absence sans erreur. */
+
+/** Parsing simple d’un JSON paramétré côté PARAMS, clé RULES_JSON (optionnel) */
+function _readRulesJson_(ss){
+  try {
+    var raw = (typeof readParam_==='function') ? (readParam_(ss, 'RULES_JSON') || '') : '';
+    if (!raw) return null;
+    return JSON.parse(String(raw));
+  } catch(e){ return null; }
+}
+
+function _csvToSetU_(csv){
+  var S = Object.create(null);
+  String(csv||'').split(',').map(function(t){ return String(t||'').trim(); })
+    .filter(Boolean).forEach(function(k){ S[k.toUpperCase()] = true; });
+  return S;
+}
+
+function _safeRegex_(s){
+  if (!s) return null;
+  try { return new RegExp(String(s), 'i'); } catch(_){ return null; }
+}
+
+/** Construit un "matcher" d’allow-orphan à partir de PARAMS et RULES_JSON */
+function _buildAllowOrphanConfig_(ss){
+  // PARAMS (tous optionnels)
+  var codesCSV  = (typeof readParam_==='function') ? readParam_(ss, 'ORPHAN_ALLOW_CODES')  : '';
+  var groupsCSV = (typeof readParam_==='function') ? readParam_(ss, 'ORPHAN_ALLOW_GROUPS') : '';
+  var regexStr  = (typeof readParam_==='function') ? readParam_(ss, 'ORPHAN_ALLOW_REGEX')  : '';
+
+  var allowCodes  = _csvToSetU_(codesCSV);
+  var allowGroups = _csvToSetU_(groupsCSV);
+  var allowRE     = _safeRegex_(regexStr);
+
+  // RULES_JSON supporte des règles structurées
+  // Exemple:
+  // { "articles": [
+  //   { "action":"allow_orphan", "code":"FRAIS_TEMP" },
+  //   { "action":"allow_orphan", "group":"PHOTOS" },
+  //   { "action":"allow_orphan", "contains":"Don" }
+  // ] }
+  var rj = _readRulesJson_(ss);
+  var rjCodes = Object.create(null), rjGroups = Object.create(null), rjContains = [];
+  if (rj && Array.isArray(rj.articles)) {
+    rj.articles.forEach(function(rule){
+      if (!rule || String(rule.action||'').toLowerCase() !== 'allow_orphan') return;
+      if (rule.code)  rjCodes[String(rule.code).toUpperCase()] = true;
+      if (rule.group) rjGroups[String(rule.group).toUpperCase()] = true;
+      if (rule.contains) rjContains.push(String(rule.contains));
+    });
+  }
+
+  return {
+    allowCodes:  allowCodes,
+    allowGroups: allowGroups,
+    allowRE:     allowRE,
+    rjCodes:     rjCodes,
+    rjGroups:    rjGroups,
+    rjContains:  rjContains
+  };
+}
+
+/** Test principal: faut-il **tolérer** un article orphelin ? */
+function isAllowedOrphan_(ss, a, item, raw, allowCfg){
+  // 0) Filet de sécurité: si l’article est annulé/exclu, il n’atteint normalement pas ce code
+  //    (isActive_ le filtre déjà). On ne refait rien ici.
+
+  // 1) Par mapping (MAPPINGS): item.AllowOrphan === true
+  if (item && item.AllowOrphan === true) return true;
+
+  // 2) Par PARAMS / RULES_JSON (codes / groupes)
+  var codeU = (item && item.Code) ? String(item.Code).toUpperCase() : '';
+  if (codeU && (allowCfg.allowCodes[codeU] || allowCfg.rjCodes[codeU])) return true;
+
+  var grpU = (item && item.ExclusiveGroup) ? String(item.ExclusiveGroup).toUpperCase() : '';
+  if (grpU && (allowCfg.allowGroups[grpU] || allowCfg.rjGroups[grpU])) return true;
+
+  // 3) Par regex (PARAMS) ou "contains" (RULES_JSON) sur le libellé brut
+  var lib = String(raw||'');
+  if (allowCfg.allowRE && allowCfg.allowRE.test(lib)) return true;
+  if (allowCfg.rjContains && allowCfg.rjContains.length){
+    var L = lib.toLowerCase();
+    for (var i=0;i<allowCfg.rjContains.length;i++){
+      if (L.indexOf(String(allowCfg.rjContains[i]||'').toLowerCase()) !== -1) return true;
+    }
+  }
+
+  return false;
+}
+/** Écrit un tableau d’objets en une passe (clear + setValues) */
+function writeObjectsToSheet_(ssOrId, sheetName, rows, header) {
+  var ss = ensureSpreadsheet_(ssOrId);
+  var sh = getSheetOrCreate_(ss, sheetName);
+
+  rows = rows || [];
+  // Déterminer l'entête
+  var hdr = (header && header.length)
+    ? header.slice()
+    : (rows.length ? Object.keys(rows[0]) : []);
+
+  // Construire la matrice [ [hdr...], [row...], ... ]
+  var out = [hdr];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i], arr = new Array(hdr.length);
+    for (var c = 0; c < hdr.length; c++) {
+      var k = hdr[c];
+      arr[c] = (r && r[k] != null) ? r[k] : '';
+    }
+    out.push(arr);
+  }
+
+  overwriteSheet_(sh, out); // clear + setValues en 1 seul call
+}
+
+/** Append d’objets (respecte l’entête déjà en place, crée si absent) */
+function appendObjectsToSheet_(ssOrId, sheetName, rows) {
+  var ss = ensureSpreadsheet_(ssOrId);
+  var sh = getSheetOrCreate_(ss, sheetName);
+  rows = rows || [];
+  if (!rows.length) return 0;
+
+  var lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
+  var hdr;
+
+  if (lastRow >= 1 && lastCol >= 1) {
+    hdr = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+  } else {
+    // Initialiser l’entête d’après le 1er objet
+    hdr = Object.keys(rows[0] || {});
+    if (!hdr.length) return 0;
+    sh.getRange(1, 1, 1, hdr.length).setValues([hdr]);
+    lastRow = 1;
+    lastCol = hdr.length;
+  }
+
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i], arr = new Array(hdr.length);
+    for (var c = 0; c < hdr.length; c++) {
+      var k = hdr[c];
+      arr[c] = (r && r[k] != null) ? r[k] : '';
+    }
+    out.push(arr);
+  }
+
+  sh.getRange(lastRow + 1, 1, out.length, hdr.length).setValues(out);
+  return out.length;
+}
+
+
+function slugify_(s){ return String(s||'').toLowerCase()
+  .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+  .replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,''); }
+
+function deriveTags_(name){
+  const s=String(name||'').toLowerCase();
+  const tags=new Set();
+  if (/camp/.test(s)) tags.add('camp');
+  if (/\bcdp\b|centre de d[eé]veloppement/.test(s)) tags.add('cdp');
+  if (/entra[îi]neur|coach/.test(s)) tags.add('coach');
+  if (/futsal/.test(s)) tags.add('futsal');
+  if (/gardien/.test(s)) tags.add('gardien');
+  if (/adulte|s[eé]nior/.test(s)) tags.add('adulte');
+  // U-bands
+  const m = s.match(/\bu-?\s?(\d{1,2})/i);
+  if (m){
+    const u = +m[1];
+    if (u<=8) tags.add('u4u8');
+    else if (u<=12) tags.add('u9u12');
+    else if (u<=18) tags.add('u13u18');
+  }
+  if (/saison/i.test(s)) tags.add('inscription_normale');
+  if (/camp de s[eé]lection|s[eé]lection/.test(s)) tags.add('camp_selection');
+  return Array.from(tags);
+}
+
+function deriveCatCodeFromTags_(tags){
+  if (tags.includes('cdp')) return 'CDP';
+  if (tags.includes('camp')) return 'CAMP';
+  if (tags.includes('futsal')) return 'FUTSAL';
+  if (tags.includes('inscription_normale')) return 'SEASON';
+  if (tags.includes('coach')) return 'COACH';
+  return 'OTHER';
+}
+
+function deriveAudience_(tags){
+  if (tags.includes('coach')) return 'Entraîneur';
+  if (tags.includes('adulte')) return 'Adulte';
+  return 'Joueur';
+}
+
+function deriveIsCoachFee_(tags){ return tags.includes('coach') ? 1 : 0; }
+
+function deriveProgramBand_(tags){
+  if (tags.includes('u4u8')) return 'U4-U8';
+  if (tags.includes('u9u12')) return 'U9-U12';
+  if (tags.includes('u13u18')) return 'U13-U18';
+  if (tags.includes('adulte')) return 'Adulte';
+  return '';
+}
+
+function derivePaymentStatus_(due, paid, rest){
+  const d=Number(due)||0, p=Number(paid)||0;
+  const r = (rest===''||rest==null) ? (d-p) : Number(rest)||0;
+  if (r<=0 && (d>0 || p>0)) return 'Paid';
+  if (p>0 && r>0) return 'Partial';
+  return 'Unpaid';
+}
+
+function makePS_(p, saison){ return (p ? String(p).padStart(8,'0') : '') + '|' + String(saison||''); }
+
+function pickPrimaryEmail_(emailsStr){
+  const arr = String(emailsStr||'').split(/[;,]/).map(s=>s.trim()).filter(Boolean);
+  const bad = /noreply|no-reply|invalid|test|example/i;
+  const firstGood = arr.find(e=>!bad.test(e));
+  return firstGood || (arr[0]||'');
+}
+
+function pickAgeBracketFromLedgerRows_(rows){ // rows = lignes LEDGER pour ce passeport
+  // priorité : U4-U8 > U9-U12 > U13-U18 > Adulte (choisis l'info la plus précise)
+  const bands = new Set(rows.map(r=>r.ProgramBand).filter(Boolean));
+  if (bands.has('U4-U8'))  return 'U4-U8';
+  if (bands.has('U9-U12')) return 'U9-U12';
+  if (bands.has('U13-U18'))return 'U13-U18';
+  if (bands.has('Adulte')) return 'Adulte';
+  return '';
 }

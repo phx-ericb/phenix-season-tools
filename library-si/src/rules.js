@@ -1,9 +1,46 @@
-/** rules.js — v0.8.1 (lib)
+/** rules.js — v0.8.2 (lib, blindé Spreadsheet)
  * - Exclusion robuste des frais "Entraîneurs" des règles joueurs.
  * - Wrapper d'ignore (utilise SR_isIgnoredFeeRetro_ si dispo, sinon fallback local).
  * - Zéro dépendance à buildArticleKey_, clés recalculées localement.
  * - Fallbacks prudents pour exécuter en bibliothèque.
+ * - NEW: coercion sûre en Spreadsheet via ensureSpreadsheet_ (si absent).
  */
+
+/* ====== Shim: obtenir un vrai Spreadsheet peu importe l’input ====== */
+if (typeof extractSpreadsheetId_ !== 'function') {
+  function extractSpreadsheetId_(s) {
+    var m = String(s||'').match(/[-\w]{25,}/);
+    if (m && m[0]) return m[0];
+    throw new Error('extractSpreadsheetId_: ID/URL invalide: ' + s);
+  }
+}
+if (typeof _debugType_ !== 'function') {
+  function _debugType_(x) {
+    if (x == null) return 'null/undefined';
+    if (typeof x === 'string') return 'string';
+    if (typeof x.getSheetByName === 'function') return 'Spreadsheet';
+    if (typeof x.getId === 'function') return 'DriveFile(id=' + x.getId() + ')';
+    return Object.prototype.toString.call(x);
+  }
+}
+if (typeof ensureSpreadsheet_ !== 'function') {
+  function ensureSpreadsheet_(ssOrId) {
+    // déjà Spreadsheet ?
+    if (ssOrId && typeof ssOrId.getSheetByName === 'function') return ssOrId;
+    // DriveFile ?
+    if (ssOrId && typeof ssOrId.getId === 'function') return SpreadsheetApp.openById(ssOrId.getId());
+    // string (id|url) ?
+    if (typeof ssOrId === 'string' && ssOrId.trim()) return SpreadsheetApp.openById(extractSpreadsheetId_(ssOrId));
+    // saison courante si helpers dispos
+    if (typeof getSeasonSpreadsheet_ === 'function' && typeof getSeasonId_ === 'function') {
+      return getSeasonSpreadsheet_(getSeasonId_());
+    }
+    if (typeof getSeasonId_ === 'function') return SpreadsheetApp.openById(getSeasonId_());
+    var active = SpreadsheetApp.getActiveSpreadsheet();
+    if (active) return active;
+    throw new Error('ensureSpreadsheet_: impossible d’obtenir un Spreadsheet valide (input=' + _debugType_(ssOrId) + ')');
+  }
+}
 
 /* ====== Fallbacks légers (seulement si absents dans l'environnement) ====== */
 if (typeof CONTROL_COLS === 'undefined') {
@@ -107,6 +144,7 @@ function loadArticlesCatalog_(ss){
     var iType = idx('Type'), iAli = idx('AliasContains');
     if (iType != null && iAli != null) {
       var iUmin = idx('Umin'), iUmax = idx('Umax'), iCode = idx('Code'), iExGrp = idx('ExclusiveGroup');
+      var iAllow = idx('AllowOrphan'); // 👈 nouvelle colonne facultative
       for (var r=1; r<data.length; r++){
         var row = data[r]||[];
         if (String(row[iType]||'').trim().toLowerCase() !== 'article') continue;
@@ -115,7 +153,8 @@ function loadArticlesCatalog_(ss){
         var umax = (iUmax==null) ? null : parseInt(row[iUmax]||'',10); if (isNaN(umax)) umax=null;
         var code = (iCode==null) ? '' : String(row[iCode]||'').trim();
         var excl = (iExGrp==null) ? '' : String(row[iExGrp]||'').trim();
-        items.push({ Code: code, AliasContains: alias, Umin: umin, Umax: umax, ExclusiveGroup: excl });
+        var allow = (iAllow==null) ? false : String(row[iAllow]||'').toUpperCase()==='TRUE';
+        items.push({ Code: code, AliasContains: alias, Umin: umin, Umax: umax, ExclusiveGroup: excl, AllowOrphan: allow });
       }
       return {
         items: items,
@@ -133,6 +172,7 @@ function loadArticlesCatalog_(ss){
     // compat ancien
     var iAli2 = idx('Alias') != null ? idx('Alias') : idx('AliasContains');
     var iUmin2 = idx('Umin'), iUmax2 = idx('Umax'), iCode2 = idx('Code'), iExGrp2 = idx('ExclusiveGroup');
+    var iAllow2 = idx('AllowOrphan'); // 👈 si dispo, on lit aussi
     for (var r2=1; r2<data.length; r2++){
       var row2 = data[r2]||[];
       var alias2 = String(row2[iAli2]||'').trim(); if (!alias2) continue;
@@ -140,7 +180,8 @@ function loadArticlesCatalog_(ss){
       var umax2 = (iUmax2==null) ? null : parseInt(row2[iUmax2]||'',10); if (isNaN(umax2)) umax2=null;
       var code2 = (iCode2==null) ? '' : String(row2[iCode2]||'').trim();
       var excl2 = (iExGrp2==null) ? '' : String(row2[iExGrp2]||'').trim();
-      items.push({ Code: code2, AliasContains: alias2, Umin: umin2, Umax: umax2, ExclusiveGroup: excl2 });
+      var allow2 = (iAllow2==null) ? false : String(row2[iAllow2]||'').toUpperCase()==='TRUE';
+      items.push({ Code: code2, AliasContains: alias2, Umin: umin2, Umax: umax2, ExclusiveGroup: excl2, AllowOrphan: allow2 });
     }
   }
   return {
@@ -156,12 +197,15 @@ function loadArticlesCatalog_(ss){
   };
 }
 
+
 /* ========================================================================== */
 /*                           ÉVALUATION DES RÈGLES                             */
 /* ========================================================================== */
 function evaluateSeasonRules(seasonSheetId, filterPassports) {
-  var ss = getSeasonSpreadsheet_(seasonSheetId);
-  ensureCoreSheets_(ss);
+  // --- CHANGEMENT CRUCIAL ICI: coercion sûre ---
+  var ss = ensureSpreadsheet_(seasonSheetId);   // <— au lieu de getSeasonSpreadsheet_(...)
+
+  if (typeof ensureCoreSheets_ === 'function') ensureCoreSheets_(ss);
 
   var rulesOn = (readParam_(ss, PARAM_KEYS.RULES_ON) || 'TRUE').toUpperCase() === 'TRUE';
   if (!rulesOn) { appendImportLog_(ss, 'RULES_SKIP', 'RULES_ON=FALSE'); return {found:0, errors:0, warns:0, filtered:false}; }
@@ -214,13 +258,13 @@ function evaluateSeasonRules(seasonSheetId, filterPassports) {
 
   // Feuille ERREURS
   var shErr = getSheetOrCreate_(ss, SHEETS.ERREURS,
-    ['Passeport','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']
+    ['Passeport #','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']
   );
 
-  if (!appendMode && !dryRun) {
+  if (!appendMode) {
     if (!filterSet) {
       shErr.clearContents();
-      shErr.getRange(1,1,1,12).setValues([['Passeport','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']]);
+      shErr.getRange(1,1,1,12).setValues([['Passeport #','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']]);
       appendImportLog_(ss, 'RULES_CLEAR_FULL', 'ERREURS reset (append=FALSE, no filter)');
     } else {
       var last = shErr.getLastRow();
@@ -236,7 +280,18 @@ function evaluateSeasonRules(seasonSheetId, filterPassports) {
       }
     }
   }
-  shErr.getRange('A:A').setNumberFormat('@'); // passeport textuel
+
+  // Passeport en texte, mais sans casser si la colonne a des cellules “spéciales”
+  try {
+    var last = shErr.getLastRow();
+    if (last <= 1) {
+      shErr.getRange(1, 1).setNumberFormat('@');      // juste l’entête si vide
+    } else {
+      shErr.getRange(2, 1, last - 1, 1).setNumberFormat('@'); // lignes réelles
+    }
+  } catch (e) {
+    appendImportLog_(ss, 'RULES_WARN_NUMFORMAT', String(e));
+  }
 
   function dict_(){ return Object.create(null); }
   function shouldWrite_(sev) {
@@ -287,13 +342,78 @@ function evaluateSeasonRules(seasonSheetId, filterPassports) {
     ]);
   }
 
-  /* ===== (0) Orphelins d’articles ===== */
-  var setInscPS = dict_();
-  inscPlay.forEach(function(r){ setInscPS[_psKey_(r)] = true; });
-  artPlay.forEach(function(a){
-    var k = _psKey_(a);
-    if (!setInscPS[k]) writeErr_('warn','ARTICLES','ARTICLE_ORPHELIN', a, 'Article sans inscription correspondante', { key:k });
-  });
+/* ===== (0) Orphelins d’articles ===== */
+function _splitKeys_(csv){
+  return String(csv||'')
+    .split(',')
+    .map(function(s){
+      return String(s||'').trim()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+        .toLowerCase();
+    })
+    .filter(Boolean);
+}
+function _hay_(s){
+  return String(s||'')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase();
+}
+function _matchAny_(hay, keys){
+  for (var i=0;i<keys.length;i++) if (hay.indexOf(keys[i]) !== -1) return true;
+  return false;
+}
+
+var setInscPS = dict_();
+inscPlay.forEach(function(r){ setInscPS[_psKey_(r)] = true; });
+
+// NEW: construit la config d’allow-orphan (PARAMS + RULES_JSON)
+var allowCfg = _buildAllowOrphanConfig_(ss);
+
+// NEW: mots-clés de camp (Nom du frais)
+var campKeys = _splitKeys_((typeof readParam_==='function' ? readParam_(ss, 'RETRO_CAMP_KEYWORDS') : '') || '');
+
+artPlay.forEach(function(a){
+  // clé passeport+saison
+  var k = _psKey_(a);
+
+  // Si une inscription correspondante existe → pas orphelin
+  if (setInscPS[k]) return;
+
+  // Libellé + mapping
+  var raw  = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
+  var item = catalog.match(raw); // peut être null si non mappé
+
+  // --- (A) Cas spécial: CAMP orphelin => code U13U18_CAMP_SEUL
+  //     (simple: basé UNIQUEMENT sur RETRO_CAMP_KEYWORDS et l'âge U13–U18)
+  if (campKeys.length) {
+    var hay = _hay_(raw);
+    if (_matchAny_(hay, campKeys)) {
+      var U = deriveUFromRow_(a);
+      var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
+      if (uNum && !isNaN(uNum) && uNum >= 13 && uNum <= 18) {
+        var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, a['Passeport #']);
+        writeErr_(
+          'warn','INSCRIPTIONS','U13U18_CAMP_SEUL', a,
+          'Inscription au camp de sélection sans inscription à la saison',
+          { U: U, camp:true, saison:false, key:k, raw:raw, code:(item&&item.Code)||'', articlesActifs: arts }
+        );
+        return; // on a émis le cas camp-seul; ne pas retomber sur ARTICLE_ORPHELIN
+      }
+    }
+  }
+
+  // --- (B) Tolérance: AllowOrphan (MAPPINGS / PARAMS / RULES_JSON)
+  if ((item && item.AllowOrphan === true) || isAllowedOrphan_(ss, a, item, raw, allowCfg)) return;
+
+  // --- (C) Orphelin générique
+  writeErr_(
+    'warn','ARTICLES','ARTICLE_ORPHELIN', a,
+    'Article sans inscription correspondante',
+    { key:k, code:(item&&item.Code)||'', group:(item&&item.ExclusiveGroup)||'', raw:raw }
+  );
+});
+
+
 
   /* ===== (1) Éligibilité U vs article ===== */
   artPlay.forEach(function(a){
@@ -356,53 +476,70 @@ function evaluateSeasonRules(seasonSheetId, filterPassports) {
     if (mapInscByKey[k] > 1) writeErr_('warn','INSCRIPTIONS','INSCRIPTION_DUPLICAT', r, 'Inscription en double détectée (même clé)', { key:k, count: mapInscByKey[k] });
   });
 
-  /* ===== (5) U9–U12 sans CDP ===== */
-  var hasCdp = dict_();
-  artPlay.forEach(function(a){
-    var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
-    var item = catalog.match(raw);
-    if (item && String(item.ExclusiveGroup||'') === 'CDP_ENTRAINEMENT') hasCdp[_psKey_(a)] = true;
-  });
-  inscPlay.forEach(function(r){
-    var f = (r['Nom du frais'] || r['Frais'] || r['Produit'] || '');         // <-- bug corrigé: f défini
-    if (isIgnoredFeeRetro_(ss, f)) return;                                    // garde-fou
-    if (isAdapteMember_(r)) return;
-    var uNum = parseInt(String(deriveUFromRow_(r)||'').replace(/^U/i,''),10);
-    if (uNum>=9 && uNum<=12 && !hasCdp[_psKey_(r)]) {
-      var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, r['Passeport #']);
-      writeErr_('warn','INSCRIPTIONS','U9_12_SANS_CDP', r, 'U9–U12 sans CDP', { U: deriveUFromRow_(r), articlesActifs: arts });
-    }
-  });
+/* ===== (5) U9–U12 sans CDP ===== */
+var hasCdp = dict_();
+artPlay.forEach(function(a){
+  var raw  = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
+  var item = catalog.match(raw);
+
+  // 1) Mapping explicite (comme avant)
+  var byExGroup = (item && String(item.ExclusiveGroup||'') === 'CDP_ENTRAINEMENT');
+  var byCode    = (item && String(item.Code||'') === 'CDP_ENTRAINEMENT');
+
+  // 2) Fallback lexical robuste (si mapping pas calé)
+  //    On considère CDP présent si libellé contient "cdp" ET (entrain|séance|training)
+  var n = RL_norm_(raw); // minuscule, sans accents
+  var byLex = (n.indexOf('cdp') >= 0) && (
+               n.indexOf('entrain') >= 0 || n.indexOf('seance') >= 0 || n.indexOf('training') >= 0
+             );
+
+  if (byExGroup || byCode || byLex) hasCdp[_psKey_(a)] = true;
+});
+
+inscPlay.forEach(function(r){
+  if (isAdapteMember_(r)) return;
+  var U = deriveUFromRow_(r);
+  var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
+  if (uNum>=9 && uNum<=12 && !hasCdp[_psKey_(r)]) {
+    var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, r['Passeport #']);
+    writeErr_('warn','INSCRIPTIONS','U9_12_SANS_CDP', r, 'U9–U12 sans CDP', { U: U, articlesActifs: arts });
+  }
+});
 
   /* ===== (6) U7–U8 sans 2e séance ===== */
-  var hasU7U8Second = dict_();
-  artPlay.forEach(function(a){
-    var raw = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
-    var item = catalog.match(raw);
-    var U = deriveUFromRow_(a);
-    var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
-    if (!uNum || isNaN(uNum) || (uNum !== 7 && uNum !== 8)) return;
+var hasU7U8Second = dict_();
+artPlay.forEach(function(a){
+  var raw  = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
+  var item = catalog.match(raw);
+  var U = deriveUFromRow_(a);
+  var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
+  if (!uNum || isNaN(uNum) || (uNum !== 7 && uNum !== 8)) return;
 
-    var matchByMapping =
-      (item && (String(item.ExclusiveGroup||'') === 'U7U8_2E_SEANCE' || String(item.Code||'') === 'U7U8_2E_SEANCE'));
+  var matchByMapping =
+    (item && (String(item.ExclusiveGroup||'') === 'U7U8_2E_SEANCE' || String(item.Code||'') === 'U7U8_2E_SEANCE'));
 
-    function NORM(s){ return String(s||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
-    var N = NORM(raw);
-    var matchByName = (/(^|\s)2\s*E(\s|$)/.test(N) && /SEANCE/.test(N)) || /DEUXIEME\s+SEANCE/.test(N);
+  function NORM(s){ return String(s||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+  var N = NORM(raw);
 
-    if (matchByMapping || matchByName) hasU7U8Second[_psKey_(a)] = true;
-  });
-  inscPlay.forEach(function(r){
-    if (isAdapteMember_(r)) return;
-    var U = deriveUFromRow_(r);
-    var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
-    if (uNum === 7 || uNum === 8) {
-      if (!hasU7U8Second[_psKey_(r)]) {
-        var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, r['Passeport #']);
-        writeErr_('warn','INSCRIPTIONS','U7_8_SANS_2E_SEANCE', r, 'U7–U8 sans 2e séance', { U: U, articlesActifs: arts });
-      }
+  // 🔁 plus tolérant: (2e|2ème|deuxième) + (SEANCE|MATCH)  OU  mention "SAMEDI"
+  var matchByName =
+      (/(^|\b)(2\s*E|2[EÈ]ME|DEUXIEME|DEUXIÈME)\b/.test(N) && /(SEANCE|MATCH)/.test(N))
+      || /SAMEDI/.test(N);
+
+  if (matchByMapping || matchByName) hasU7U8Second[_psKey_(a)] = true;
+});
+
+inscPlay.forEach(function(r){
+  if (isAdapteMember_(r)) return;
+  var U = deriveUFromRow_(r);
+  var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
+  if (uNum === 7 || uNum === 8) {
+    if (!hasU7U8Second[_psKey_(r)]) {
+      var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, r['Passeport #']);
+      writeErr_('warn','INSCRIPTIONS','U7_8_SANS_2E_SEANCE', r, 'U7–U8 sans 2e séance', { U: U, articlesActifs: arts });
     }
-  });
+  }
+});
 
   // Écriture batch
   if (!dryRun && errBuf.length) {
@@ -420,4 +557,132 @@ function evaluateSeasonRules(seasonSheetId, filterPassports) {
   }));
 
   return { found: found, errors: errors, warns: warns, dryRun: dryRun, filtered: !!filterSet, written: errBuf.length };
+}
+
+/* global _rulesBuildErrorsFast_, _rulesWriteFull_, _rulesUpsertForPassports_, _toPassportSet_, getSeasonId_, getSeasonSpreadsheet_, ensureSpreadsheet_, SHEETS */
+
+/** INCR (FAST) – construit les erreurs pour une liste de passeports */
+function _rulesBuildErrorsIncrFast_(passports, ss) {
+  ss = ss || (typeof getSeasonSpreadsheet_ === 'function'
+      ? getSeasonSpreadsheet_(getSeasonId_())
+      : ensureSpreadsheet_(SpreadsheetApp.getActiveSpreadsheet()));
+  var set = (typeof _toPassportSet_ === 'function')
+      ? _toPassportSet_(passports)
+      : new Set((passports || []).map(function (x) { return String(x || '').trim(); }).filter(Boolean));
+  return _rulesBuildErrorsFast_(ss, set);
+}
+
+/** FULL (FAST) – build + write ERREURS (remplace le legacy côté lib) */
+function runEvaluateRulesFast_(ss) {
+  ss = ss || (typeof getSeasonSpreadsheet_ === 'function'
+      ? getSeasonSpreadsheet_(getSeasonId_())
+      : ensureSpreadsheet_(SpreadsheetApp.getActiveSpreadsheet()));
+  var res = _rulesBuildErrorsFast_(ss, /*touchedSet*/ null);
+  _rulesWriteFull_(ss, res.errors, res.header);
+  return { written: res.errors.length, ledger: res.ledgerCount, joueurs: res.joueursCount };
+}
+
+/** Écrit ERREURS (FULL) en une passe, header fiable */
+function _rulesWriteFull_(ss, rows, header) {
+  ss = ensureSpreadsheet_(ss);
+  var name = (typeof SHEETS !== 'undefined' && SHEETS.ERREURS) ? SHEETS.ERREURS : 'ERREURS';
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+
+  var H = Array.isArray(header) && header.length ? header.slice() : [
+    'Passeport #','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt'
+  ];
+
+  sh.clearContents();
+  sh.getRange(1, 1, 1, H.length).setValues([H]);
+
+  if (rows && rows.length) {
+    var data = rows.map(function (r) {
+      var a = (r || []).slice(0, H.length);
+      while (a.length < H.length) a.push('');
+      return a;
+    });
+    sh.getRange(2, 1, data.length, H.length).setValues(data);
+  }
+
+  // Passeport en texte
+  try {
+    var h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0] || [];
+    var c = h.indexOf('Passeport #'); if (c < 0) c = h.indexOf('Passeport');
+    if (c >= 0 && sh.getLastRow() >= 2) {
+      sh.getRange(2, c + 1, sh.getLastRow() - 1, 1).setNumberFormat('@');
+    }
+  } catch (_e) { /* no-op */ }
+}
+
+/** UPSERT ciblé par passeports (INCR) dans ERREURS */
+function _rulesUpsertForPassports_(ss, newRows, touchedSet, header) {
+  ss = ensureSpreadsheet_(ss);
+  var name = (typeof SHEETS !== 'undefined' && SHEETS.ERREURS) ? SHEETS.ERREURS : 'ERREURS';
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+
+  var H = Array.isArray(header) && header.length ? header.slice() : [
+    'Passeport #','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt'
+  ];
+
+  if (sh.getLastRow() === 0) {
+    sh.getRange(1, 1, 1, H.length).setValues([H]);
+  } else {
+    // s’assurer que l’entête correspond (on n’étire pas la structure ici)
+    var curH = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0] || [];
+    if (curH.join('¦') !== H.join('¦')) {
+      // réécrire proprement
+      var V = (sh.getLastRow() > 1) ? sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues() : [];
+      sh.clearContents();
+      sh.getRange(1, 1, 1, H.length).setValues([H]);
+      if (V.length) {
+        // best-effort pour recoller (on tronque/pad)
+        var fixed = V.map(function (r) {
+          var a = (r || []).slice(0, H.length);
+          while (a.length < H.length) a.push('');
+          return a;
+        });
+        sh.getRange(2, 1, fixed.length, H.length).setValues(fixed);
+      }
+    }
+  }
+
+  // Construire set des passeports touchés
+  var passSet = (touchedSet && typeof touchedSet.forEach === 'function')
+    ? touchedSet
+    : new Set((newRows || []).map(function (r) {
+        return String((r && r[0]) || '').replace(/\D/g, '').slice(-8).padStart(8, '0');
+      }).filter(Boolean));
+
+  // Trouver la colonne Passeport
+  var Hnow = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0] || [];
+  var cP = Hnow.indexOf('Passeport #'); if (cP < 0) cP = Hnow.indexOf('Passeport');
+
+  if (cP >= 0 && sh.getLastRow() >= 2 && passSet.size) {
+    var data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+    var toDel = [];
+    for (var i = 0; i < data.length; i++) {
+      var p = String(data[i][cP] || '').replace(/\D/g, '').slice(-8).padStart(8, '0');
+      if (p && passSet.has(p)) toDel.push(2 + i);
+    }
+    toDel.sort(function (a, b) { return b - a; }).forEach(function (r) { sh.deleteRow(r); });
+  }
+
+  if (newRows && newRows.length) {
+    var rows = newRows.map(function (r) {
+      var a = (r || []).slice(0, H.length);
+      while (a.length < H.length) a.push('');
+      return a;
+    });
+    var start = sh.getLastRow() + 1;
+    sh.insertRowsAfter(sh.getLastRow(), rows.length);
+    sh.getRange(start, 1, rows.length, H.length).setValues(rows);
+  }
+
+  // Passeport en texte
+  try {
+    var c = Hnow.indexOf('Passeport #'); if (c < 0) c = Hnow.indexOf('Passeport');
+    if (c >= 0 && sh.getLastRow() >= 2) {
+      sh.getRange(2, c + 1, sh.getLastRow() - 1, 1).setNumberFormat('@');
+    }
+  } catch (_e2) { /* no-op */ }
 }

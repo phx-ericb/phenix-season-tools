@@ -32,6 +32,7 @@ PARAM_KEYS.RETRO_ADAPTE_KEYWORDS = PARAM_KEYS.RETRO_ADAPTE_KEYWORDS || 'RETRO_AD
 PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS = PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS || 'RETRO_GROUP_SA_KEYWORDS';
 PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID = PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID || 'RETRO_EXPORTS_FOLDER_ID';
 
+
 /* ===================== Fallbacks minimes ===================== */
 if (typeof CONTROL_COLS === 'undefined') {
   var CONTROL_COLS = { ROW_HASH: 'ROW_HASH', CANCELLED: 'CANCELLED', EXCLUDE_FROM_EXPORT: 'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT: 'LAST_MODIFIED_AT' };
@@ -391,6 +392,9 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
   var adapteCsv = (readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || '') + ',' + (readParam_(ss, PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS) || '');
   adapteCsv = adapteCsv.replace(/^,|,$/g, '');
 
+  // ⬅️ Format Catégorie pour CDP0 (paramétrable)
+  var catFmtCDP = readParam_(ss, 'RETRO_GROUP_CATEGORIE_FMT_CDP') || 'CDP {{U2}} {{genreInitiale}}';
+
   var header = ["Identifiant unique", "Nom", "Prénom", "Date de naissance", "#", "Couleur", "Sous-groupe", "Position", "Équipe/Groupe", "Catégorie"];
   var rows = [];
   var errors = []; // {level, code, passeport, nom, prenom, feeName, message, details}
@@ -580,7 +584,7 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     });
   });
 
-  // CDP0 (warn) U9–U12 hors Adapté → **inclure dans l'export** avec {{U2}}{{genreInitiale}} CDP0
+  // CDP0 (warn) U9–U12 hors Adapté → **inclure dans l'export** avec Catégorie préfixée "CDP "
   Object.keys(inscActivePass).forEach(function (passK) {
     var m = memberIdx[passK] || {};
     var UU2m = _ga_computeUandU2_({ 'Date de naissance': m.dob, 'Naissance': m.dob }, seasonYear, '');
@@ -609,14 +613,26 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
       // **Ligne d'export synthétique CDP0**
       var gInitM = m.genreInit || (m.genreLabel === 'Féminin' ? 'F' : (m.genreLabel === 'Masculin' ? 'M' : (m.genreLabel === 'Mixte' ? 'X' : '')));
       var groupe = (U2m || '').concat(gInitM ? gInitM : '').concat(' CDP0'); // ex: U10M CDP0
-      var categ = (U2m || '') + (gInitM ? (' ' + gInitM) : '');            // ex: U10 M
+
+      // Catégorie avec préfixe "CDP " (format paramétrable)
+      var varsCDP = {
+        U: Um,
+        U2: U2m,
+        ageCat: U2m,
+        genreInitiale: gInitM || '',
+        genre: (gInitM === 'F' ? 'Féminin' : (gInitM === 'M' ? 'Masculin' : (gInitM === 'X' ? 'Mixte' : ''))),
+        article: 'CDP0',
+        saison: seasonLabel,
+        annee: seasonYear
+      };
+      var categ = _ga_tpl_(catFmtCDP, varsCDP); // ex: "CDP U10 M"
 
       var nbCols = header.length;
       var rowOut = new Array(nbCols).fill("");
       rowOut[0] = _ga_norm_passport_(ss, passK);
       rowOut[1] = m.nom || '';
       rowOut[2] = m.prenom || '';
-      rowOut[3] = m.dob || ''; 
+      rowOut[3] = m.dob || '';
       rowOut[8] = groupe;
       rowOut[9] = categ;
       rows.push(rowOut);
@@ -633,6 +649,7 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
   _dbg_(DEBUG, '[GART] done', { rows: rows.length, errors: errors.length });
   return { header: header, rows: rows, nbCols: header.length, errors: errors };
 }
+
 
 
 /* ===================== Feuille de travail (facultatif) ===================== */
@@ -682,48 +699,54 @@ function _writeRetroErrors_(ss, errors) {
 /* ===================== EXPORT XLSX (Groupe Articles SEUL) — avec filtre optionnel ===================== */
 
 function exportRetroGroupeArticlesXlsxToDrive(seasonSheetId, options){
-var ss = getSeasonSpreadsheet_(seasonSheetId);
-var out = buildRetroGroupeArticlesRows(seasonSheetId);
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
 
+  // 0) ON/OFF incrémental via PARAMS
+  var incrOn = String(readParam_(ss, 'INCREMENTAL_ON') || '1').toLowerCase();
+  var allowIncr = (incrOn === '1' || incrOn === 'true' || incrOn === 'yes' || incrOn === 'oui');
 
-// Filtrage incrémental
-var touched = _ga_readTouchedPassportSet_(ss, options);
-var rows = _ga_filterRowsByPassports_(out.rows, touched);
-var filtered = rows.length !== out.rows.length;
+  var out = buildRetroGroupeArticlesRows(seasonSheetId);
 
+  // Filtrage incrémental (seulement si autorisé ET set non vide)
+  var rows, filtered;
+  if (allowIncr) {
+    var touched = _ga_readTouchedPassportSet_(ss, options);
+    rows = _ga_filterRowsByPassports_(out.rows, touched);
+    filtered = rows.length !== out.rows.length;
+  } else {
+    rows = out.rows; // FULL export
+    filtered = false;
+  }
 
-// Classeur temporaire minimal
-var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupe Articles');
-var tmp = temp.getSheets()[0];
-tmp.setName('Export');
+  // Classeur temporaire minimal
+  var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupe Articles');
+  var tmp = temp.getSheets()[0];
+  tmp.setName('Export');
 
+  var all = [out.header].concat(rows);
+  if (typeof normalizePassportToText8_ === 'function') {
+    for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
+  }
+  if (all.length) {
+    tmp.getRange(1, 1, all.length, out.nbCols).setValues(all);
+    if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
+  }
+  SpreadsheetApp.flush();
 
-var all = [out.header].concat(rows);
-if (typeof normalizePassportToText8_ === 'function') {
-for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
-}
-if (all.length) {
-tmp.getRange(1, 1, all.length, out.nbCols).setValues(all);
-if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
-}
-SpreadsheetApp.flush();
+  var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
+  var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
+  var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
+  blob.setName('Export_Retro_Groupe_Articles_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
 
+  var folderId = readParam_(ss, PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID)
+              || readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
+  var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+  var file = dest.createFile(blob);
 
-var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
-var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
-blob.setName('Export_Retro_Groupe_Articles_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
-
-
-var folderId = readParam_(ss, PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID)
-|| readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
-var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
-var file = dest.createFile(blob);
-
-
-DriveApp.getFileById(temp.getId()).setTrashed(true);
-appendImportLog_(ss, 'RETRO_GART_XLSX_OK', file.getName() + ' -> ' + dest.getName() + ' (rows=' + rows.length + ', filtered=' + filtered + ')');
-return { fileId:file.getId(), name:file.getName(), rows: rows.length, filtered: filtered };
+  DriveApp.getFileById(temp.getId()).setTrashed(true);
+  appendImportLog_(ss, 'RETRO_GART_XLSX_OK', file.getName() + ' -> ' + dest.getName() +
+                        ' (rows=' + rows.length + ', filtered=' + filtered + ')');
+  return { fileId:file.getId(), name:file.getName(), rows: rows.length, filtered: filtered };
 }
 
 /* ========== Exposition facultative via Library ========== */
@@ -731,4 +754,100 @@ if (typeof Library !== 'undefined') {
 Library.buildRetroGroupeArticlesRows = buildRetroGroupeArticlesRows;
 Library.writeRetroGroupeArticlesSheet = writeRetroGroupeArticlesSheet;
 Library.exportRetroGroupeArticlesXlsxToDrive = exportRetroGroupeArticlesXlsxToDrive;
+}
+
+/** Export Groupes-Articles (lignes additionnelles) depuis LEDGER
+ * - Prend seulement les mappings Type=article SANS ExclusiveGroup (additionnels)
+ * - Respecte RETRO_GART_REQUIRE_MAPPING (sinon fallback templates si tu veux)
+ * - AllowOrphan: TRUE = autorise si JOUEURS absent (en pratique, JOUEURS couvre déjà articles-seulement)
+ */
+function buildRetroGroupesArticlesRowsFromLedger_(seasonSheetId){
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
+
+  // Data
+  var ledger = readSheetAsObjects_(ss.getId(), SHEETS.ACHATS_LEDGER).rows || [];
+  var maps   = readSheetAsObjects_(ss.getId(), SHEETS.MAPPINGS).rows || [];
+  var joueurs= readSheetAsObjects_(ss.getId(), 'JOUEURS').rows || [];
+
+  var articleMaps = maps.filter(function(r){ return String(r['Type']||'').toLowerCase()==='article' && !String(r['Exclude']||'').trim(); });
+
+  // Params
+  var ignCsv     = (readParam_(ss, 'RETRO_GART_IGNORE_FEES_CSV') || '').toString();
+  var eliteKeys  = (readParam_(ss, 'RETRO_GART_ELITE_KEYWORDS')  || readParam_(ss,'RETRO_GROUP_ELITE_KEYWORDS') || '').toString();
+  var requireMap = String(readParam_(ss, 'RETRO_GART_REQUIRE_MAPPING')||'TRUE').toUpperCase()==='TRUE';
+
+  // Helpers
+  function _hasAny(s, csv){
+    if (!csv) return false;
+    var hay = _nrmLower_(s||'');
+    return csv.split(',').some(function(w){ return hay.indexOf(_nrmLower_(w.trim()))>=0; });
+  }
+  function _ageU2_(ageBracket){
+    var m = String(ageBracket||'').match(/U(\d+)/i);
+    return m ? m[1] : '';
+  }
+  function _genreInit_(g){
+    return (String(g||'').toUpperCase().charAt(0) || '');
+  }
+  function _fmt(tpl, j){
+    return String(tpl||'')
+      .replace(/{{\s*U2\s*}}/g, _ageU2_(j.AgeBracket))
+      .replace(/{{\s*genreInitiale\s*}}/g, _genreInit_(j.Genre));
+  }
+  function _overlaps(br, umin, umax){
+    var m = String(br||'').match(/U(\d+)\s*-\s*U?(\d+)/i);
+    if (!m) return true;
+    var a = Number(m[1]||0), b = Number(m[2]||0);
+    return !(b < umin || a > umax);
+  }
+
+  // JOUEURS index (pour genre/age)
+  var jByPass = {};
+  joueurs.forEach(function(j){ var p=String(j['Passeport #']||j['Passeport']||j['PS']||'').trim(); if(p) jByPass[p]=j; });
+
+  // Header minimal (même que Groupes)
+  var HEADER = ["Identifiant unique","Catégorie","Équipe/Groupe"];
+  var out = [];
+
+  ledger.filter(_isActiveRow_).forEach(function(a){
+    var pass = String(a['Passeport #']||'').trim(); if (!pass) return;
+    var pass8 = (typeof normalizePassportToText8_==='function') ? normalizePassportToText8_(pass) : pass.replace(/\D/g,'').padStart(8,'0');
+
+    var fee = a['Nom du frais'] || a['Frais'] || a['Produit'] || '';
+    if (_hasAny(fee, ignCsv))    return; // ignorés
+    if (_hasAny(fee, eliteKeys)) return; // élite
+
+    var j = jByPass[pass] || {};
+    var ginit = _genreInit_(j.Genre);
+    var best = null, prio=-1;
+
+    // Trouver mapping Article correspondant (non-exclusif)
+    articleMaps.forEach(function(m){
+      var alias = String(m['AliasContains']||'').trim();
+      if (alias && _nrmLower_(fee).indexOf(_nrmLower_(alias))<0) return;
+
+      // SANS ExclusiveGroup ici: on ne veut que les “additionnels”
+      if (String(m['ExclusiveGroup']||'').trim()) return;
+
+      var okG = (String(m['Genre']||'*')==='*' || _genreInit_(m['Genre'])===ginit);
+      var okU = _overlaps(j.AgeBracket, Number(m['Umin']||0), Number(m['Umax']||99));
+      if (!okG || !okU) return;
+
+      var p = Number(m['Priority']||0);
+      if (p>prio){ prio=p; best=m; }
+    });
+
+    if (!best){
+      if (requireMap) return; // pas de mapping = pas d’output
+      // sinon: fallback éventuel (peu recommandé) — on peut ignorer pour rester strict
+      return;
+    }
+
+    var cat = _fmt(best['CategorieFmt'], j);
+    var grp = _fmt(best['GroupeFmt'],    j);
+    out.push([pass8, cat, grp]);
+  });
+
+  return { header: HEADER, rows: out, nbCols: HEADER.length };
+
 }

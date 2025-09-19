@@ -1,10 +1,11 @@
 /**
-* retro_groupes.gs — v0.11
-* - AUCUN changement sur la construction des lignes (buildRetroGroupesRows)
-* - ✨ Nouveauté EXPORTEURS: capacité de filtrer par passeports «touchés»
-* via DocumentProperties.LAST_TOUCHED_PASSPORTS (CSV) ou via param {onlyPassports}
-* - Conserve exportRetroGroupesAllXlsxToDrive (Groupes + GroupeArticles)
-* - Compatible avec normalizePassportToText8_ / normalizePassportPlain8_
+* retro_groupes.gs — v0.14
+* - Post-process fort et tolérant :
+*   • Si un passeport a une ligne Adapté → on NE GARDE QUE les lignes Adapté (toutes les autres sont purgées).
+*   • Si un passeport n’a aucun « CDP » et qu’on détecte U9–U12 (formats variés) → préfixe Catégorie par "CDP ".
+* - Logs de stats détaillées.
+* - Reste inchangé pour le build « inscriptions » (structure/colonnes).
+* - Compatible normalizePassportToText8_ / normalizePassportPlain8_
 */
 
 
@@ -13,24 +14,20 @@ if (typeof PARAM_KEYS === 'undefined') { var PARAM_KEYS = {}; }
 PARAM_KEYS.RETRO_GROUP_SHEET_NAME = PARAM_KEYS.RETRO_GROUP_SHEET_NAME || 'RETRO_GROUP_SHEET_NAME';
 PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID = PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID || 'RETRO_GROUP_EXPORTS_FOLDER_ID';
 
-
 PARAM_KEYS.RETRO_IGNORE_FEES_CSV = PARAM_KEYS.RETRO_IGNORE_FEES_CSV || 'RETRO_IGNORE_FEES_CSV';
 PARAM_KEYS.RETRO_GROUP_ELITE_KEYWORDS = PARAM_KEYS.RETRO_GROUP_ELITE_KEYWORDS || 'RETRO_GROUP_ELITE_KEYWORDS';
-
 
 PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS = PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS || 'RETRO_GROUP_SA_KEYWORDS';
 PARAM_KEYS.RETRO_GROUP_SA_GROUPE_LABEL = PARAM_KEYS.RETRO_GROUP_SA_GROUPE_LABEL || 'RETRO_GROUP_SA_GROUPE_LABEL';
 PARAM_KEYS.RETRO_GROUP_SA_CATEG_LABEL = PARAM_KEYS.RETRO_GROUP_SA_CATEG_LABEL || 'RETRO_GROUP_SA_CATEG_LABEL';
 
-
 PARAM_KEYS.RETRO_GROUP_GROUPE_FMT = PARAM_KEYS.RETRO_GROUP_GROUPE_FMT || 'RETRO_GROUP_GROUPE_FMT';
 PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT = PARAM_KEYS.RETRO_GROUP_CATEGORIE_FMT || 'RETRO_GROUP_CATEGORIE_FMT';
 
+PARAM_KEYS.RETRO_RULES_JSON = PARAM_KEYS.RETRO_RULES_JSON;
 
-PARAM_KEYS.RETRO_RULES_JSON = PARAM_KEYS.RETRO_RULES_JSON
 
-
-// Cache global partagé (idempotent)
+/* ===================== Cache règles ===================== */
 var __retroRulesCache = (typeof __retroRulesCache !== 'undefined')
   ? __retroRulesCache
   : { at: 0, data: null };
@@ -125,7 +122,6 @@ function _low_(s){ try{ s=String(s==null?'':s).normalize('NFD').replace(/[\u0300
 
 
 /* ====== U & U2 (DOB + fallback libellé article) ====== */
-
 function _rg_deriveBirthYearFromRow_(row){
   var dn = row['Date de naissance'] || row['Naissance'] || '';
   if (dn instanceof Date) return dn.getFullYear();
@@ -222,7 +218,7 @@ function _applyUnifiedMapping_(maps, type, feeName, vars){
   return null;
 }
 
-/* ===================== Construction des lignes ===================== */
+/* ===================== Construction des lignes (INSCRIPTIONS) ===================== */
 function buildRetroGroupesRows(seasonSheetId){
   var ss   = getSeasonSpreadsheet_(seasonSheetId);
   var insc = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS);
@@ -330,12 +326,85 @@ function buildRetroGroupesRows(seasonSheetId){
   return { header: header, rows: rows, nbCols: header.length };
 }
 
+
+/* ===================== Post-processing CDP0 & Adapté ===================== */
+/** Règles fortes appliquées juste avant d’écrire/exporter, quel que soit le builder. */
+function _postProcessRowsForCDP0AndAdapted_(rows){
+  if (!rows || !rows.length) return { rows: [], stats:{adaptPassports:0, removedOnAdapt:0, prefixedCDP0:0, passports:0} };
+
+  // Index par passeport
+  var byP = {};
+  for (var i=0;i<rows.length;i++){
+    var r = rows[i]; if (!r || !r.length) continue;
+    var p = String(r[0]||'').trim(); if (!p) continue;
+    (byP[p] = byP[p] || []).push(r);
+  }
+
+  function _nrm(s){ try{ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch(e){ return String(s||'').toLowerCase(); } }
+  function _hasAdaptMark(r){
+    var g = _nrm(r[8]), c = _nrm(r[9]);
+    return (g.indexOf('adapte')>=0 || c.indexOf('adapte')>=0);
+  }
+  function _hasCDPMark(r){
+    var g = _nrm(r[8]), c = _nrm(r[9]);
+    return (g.indexOf('cdp')>=0 || c.indexOf('cdp')>=0);
+  }
+  // Extraction U-num tolérante (depuis Catégorie ou Groupe)
+  function _extractUNumFromText(txt){
+    // supporte U9, U09, U-09, U 09, U09F, U09-F, U-9M, etc.
+    var m = String(txt||'').toUpperCase().match(/U\s*[-]?\s*(\d{1,2})/);
+    return m ? Number(m[1]) : 0;
+  }
+
+  var removedOnAdapt = 0, prefixedCDP0 = 0, adaptPassports = 0, passCount = 0;
+  var out = [];
+
+  Object.keys(byP).forEach(function(p){
+    passCount++;
+    var list = byP[p];
+
+    var hasAdapt = list.some(_hasAdaptMark);
+    if (hasAdapt){
+      adaptPassports++;
+      // On garde UNIQUEMENT les lignes Adapté
+      list.forEach(function(r){
+        if (_hasAdaptMark(r)) out.push(r);
+        else removedOnAdapt++;
+      });
+      return;
+    }
+
+    // Pas Adapté → regarder CDP0
+    var anyCDP = list.some(_hasCDPMark);
+
+    list.forEach(function(r){
+      if (!anyCDP){
+        var cat = String(r[9]||'').trim();
+        var grp = String(r[8]||'').trim();
+
+        var u = _extractUNumFromText(cat) || _extractUNumFromText(grp);
+        if (u>=9 && u<=12){
+          // Préfixer Catégorie si pas déjà CDP
+          if (cat.toUpperCase().indexOf('CDP ') !== 0){
+            r[9] = 'CDP ' + cat;
+            prefixedCDP0++;
+          }
+        }
+      }
+      out.push(r);
+    });
+  });
+
+  return { rows: out, stats:{adaptPassports:adaptPassports, removedOnAdapt:removedOnAdapt, prefixedCDP0:prefixedCDP0, passports:passCount} };
+}
+
+
 /* ===================== FILTRAGE «passeports touchés» ===================== */
 function _normalizePassportText8_(v){
-var s = String(v==null?'':v).trim();
-try{ if (typeof normalizePassportToText8_==='function') return normalizePassportToText8_(s);}catch(_){ }
-try{ if (typeof normalizePassportPlain8_==='function') return normalizePassportPlain8_(s);}catch(_){ }
-return s;
+  var s = String(v==null?'':v).trim();
+  try{ if (typeof normalizePassportToText8_==='function') return normalizePassportToText8_(s);}catch(_){ }
+  try{ if (typeof normalizePassportPlain8_==='function') return normalizePassportPlain8_(s);}catch(_){ }
+  return s;
 }
 function _readTouchedPassportSet_(ss, options){
   options = options || {};
@@ -360,162 +429,306 @@ function _readTouchedPassportSet_(ss, options){
   return set; // peut être vide -> aucun filtrage
 }
 
-
 function _filterRowsByPassports_(rows, touchedSet){
-var keys = Object.keys(touchedSet||{});
-if (!keys.length) return rows; // aucun filtrage
-var out = [];
-for (var i=0;i<rows.length;i++){
-var row = rows[i];
-var p = _normalizePassportText8_(row && row[0]); // col A = Passeport
-if (p && touchedSet[p]) out.push(row);
-}
-return out;
+  var keys = Object.keys(touchedSet||{});
+  if (!keys.length) return rows; // aucun filtrage
+  var out = [];
+  for (var i=0;i<rows.length;i++){
+    var row = rows[i];
+    var p = _normalizePassportText8_(row && row[0]); // col A = Passeport
+    if (p && touchedSet[p]) out.push(row);
+  }
+  return out;
 }
 
-/* ===================== Écriture feuille & export XLSX ===================== */
 
 /* ===================== ÉCRITURE FEUILLE ===================== */
 function writeRetroGroupesSheet(seasonSheetId) {
-var ss = getSeasonSpreadsheet_(seasonSheetId);
-var out = buildRetroGroupesRows(seasonSheetId);
-var sheetName = readParam_(ss, PARAM_KEYS.RETRO_GROUP_SHEET_NAME) || 'Rétro - Groupes';
-var sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
-sh.clearContents();
-sh.getRange(1,1,1,out.nbCols).setValues([out.header]);
-if (out.rows.length) {
-sh.getRange(2,1,out.rows.length,out.nbCols).setValues(out.rows);
-sh.autoResizeColumns(1, out.nbCols);
-if (sh.getLastRow() > 1) sh.getRange(2,1,sh.getLastRow()-1,1).setNumberFormat('@');
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
+  var out = buildRetroGroupesRows(seasonSheetId);
+
+  // Post-process fort avant écriture
+  var pp = _postProcessRowsForCDP0AndAdapted_(out.rows || []);
+  appendImportLog_(ss, 'RETRO_GROUPES_POSTPROC_SHEET', JSON.stringify(pp.stats));
+
+  var sheetName = readParam_(ss, PARAM_KEYS.RETRO_GROUP_SHEET_NAME) || 'Rétro - Groupes';
+  var sh = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+  sh.clearContents();
+  sh.getRange(1,1,1,out.nbCols).setValues([out.header]);
+  if (pp.rows.length) {
+    sh.getRange(2,1,pp.rows.length,out.nbCols).setValues(pp.rows);
+    sh.autoResizeColumns(1, out.nbCols);
+    if (sh.getLastRow() > 1) sh.getRange(2,1,sh.getLastRow()-1,1).setNumberFormat('@');
+  }
+  appendImportLog_(ss, 'RETRO_GROUPES_SHEET_OK', 'rows='+pp.rows.length);
+  return pp.rows.length;
 }
-appendImportLog_(ss, 'RETRO_GROUPES_SHEET_OK', 'rows='+out.rows.length);
-return out.rows.length;
-}
+
 
 /* ===================== EXPORT XLSX (Groupes SEUL) — avec filtre optionnel ===================== */
 function exportRetroGroupesXlsxToDrive(seasonSheetId, options){
-var ss = getSeasonSpreadsheet_(seasonSheetId);
-var out = buildRetroGroupesRows(seasonSheetId);
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
+  var out = buildRetroGroupesRows(seasonSheetId);
 
+  // Post-process fort
+  var pp = _postProcessRowsForCDP0AndAdapted_(out.rows || []);
+  appendImportLog_(ss, 'RETRO_GROUPES_POSTPROC_XLSX', JSON.stringify(pp.stats));
 
-// Filtrage
-var touched = _readTouchedPassportSet_(ss, options);
-var rows = _filterRowsByPassports_(out.rows, touched);
-var filtered = rows.length !== out.rows.length;
+  // Filtrage incrémental
+  var touched = _readTouchedPassportSet_(ss, options);
+  var rows = _filterRowsByPassports_(pp.rows, touched);
+  var filtered = rows.length !== pp.rows.length;
 
+  // Temp minimal
+  var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupes');
+  var tmp = temp.getSheets()[0];
+  tmp.setName('Export');
 
-// Temp minimal
-var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupes');
-var tmp = temp.getSheets()[0];
-tmp.setName('Export');
+  var all = [out.header].concat(rows);
+  if (typeof normalizePassportToText8_ === 'function') {
+    for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
+  }
+  if (all.length) {
+    tmp.getRange(1, 1, all.length, out.nbCols).setValues(all);
+    if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
+  }
+  SpreadsheetApp.flush();
 
+  var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
+  var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
+  var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
+  blob.setName('Export_Retro_Groupes_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
 
-var all = [out.header].concat(rows);
-if (typeof normalizePassportToText8_ === 'function') {
-for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
-}
-if (all.length) {
-tmp.getRange(1, 1, all.length, out.nbCols).setValues(all);
-if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
-}
-SpreadsheetApp.flush();
+  var folderId = readParam_(ss, PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID)
+              || readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
+  var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+  var file = dest.createFile(blob);
 
-
-var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
-var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
-blob.setName('Export_Retro_Groupes_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
-
-
-var folderId = readParam_(ss, PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID)
-|| readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
-var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
-var file = dest.createFile(blob);
-
-
-DriveApp.getFileById(temp.getId()).setTrashed(true);
-appendImportLog_(ss, 'RETRO_GROUPES_XLSX_OK_FAST', file.getName() + ' -> ' + dest.getName() + ' (rows=' + rows.length + ')');
-return { fileId:file.getId(), name:file.getName(), rows: rows.length, filtered: filtered };
+  DriveApp.getFileById(temp.getId()).setTrashed(true);
+  appendImportLog_(ss, 'RETRO_GROUPES_XLSX_OK_FAST', file.getName() + ' -> ' + dest.getName() + ' (rows=' + rows.length + ')');
+  return { fileId:file.getId(), name:file.getName(), rows: rows.length, filtered: filtered };
 }
 
 
-/** ===================== NOUVEAU — Export XLSX Groupes ALL (Groupes + GroupeArticles) ===================== */
-/**
- * Concatène:
- *  - buildRetroGroupesRows(seasonSheetId)
- *  - buildRetroGroupeArticlesRows(seasonSheetId)
- * et exporte en un seul XLSX.
- *
- * Pas de dédoublonnage: "retro-groupes" couvre le mapping de base (ex: U12M),
- * "retro-groupes-articles" ajoute des groupes complémentaires. Les headers sont identiques.
- *
- * Prévu pour optimisation future: on pourra brancher diffInscriptions_ / diffArticles_
- * pour limiter aux lignes nouvelles/modifiées (sans changer la signature).
- */
-/* ===================== EXPORT XLSX (Groupes ALL = Groupes + GroupeArticles) — avec filtre optionnel ===================== */
+/** ===================== EXPORT XLSX Groupes ALL (Groupes + GroupeArticles) — avec filtre optionnel ===================== */
 function exportRetroGroupesAllXlsxToDrive(seasonSheetId, options){
-var ss = getSeasonSpreadsheet_(seasonSheetId);
-// 1) Build des deux sources
-var base = buildRetroGroupesRows(seasonSheetId); // { header, rows, nbCols }
-var addl = (typeof buildRetroGroupeArticlesRows === 'function')
-? buildRetroGroupeArticlesRows(seasonSheetId)
-: { header: base.header, rows: [], nbCols: base.nbCols };
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
 
+  // 0) ON/OFF incrémental via PARAMS
+  var incrOn = String(readParam_(ss, 'INCREMENTAL_ON') || '1').toLowerCase();
+  var allowIncr = (incrOn === '1' || incrOn === 'true' || incrOn === 'yes' || incrOn === 'oui');
 
-// 2) Header unifié
-var header = base && base.header ? base.header : (addl.header || []);
-var nbCols = header.length;
+  // 1) Build des deux sources
+  var base = buildRetroGroupesRows(seasonSheetId); // { header, rows, nbCols }
+  var addl = (typeof buildRetroGroupeArticlesRows === 'function')
+    ? buildRetroGroupeArticlesRows(seasonSheetId)
+    : { header: base.header, rows: [], nbCols: base.nbCols };
 
+  // 2) Header unifié
+  var header = base && base.header ? base.header : (addl.header || []);
+  var nbCols = header.length;
 
-// 3) Concaténer, puis filtrer si nécessaire
-var rows = []
-.concat(base && base.rows ? base.rows : [])
-.concat(addl && addl.rows ? addl.rows : []);
+  // 3) Concaténer d’abord, PUIS post-process sur l’ensemble fusionné
+  var merged = []
+    .concat(base && base.rows ? base.rows : [])
+    .concat(addl && addl.rows ? addl.rows : []);
 
+  var pp = _postProcessRowsForCDP0AndAdapted_(merged || []);
+  appendImportLog_(ss, 'RETRO_GROUPES_POSTPROC_ALL_MERGED', JSON.stringify(pp.stats));
 
-var touched = _readTouchedPassportSet_(ss, options);
-var rowsFiltered = _filterRowsByPassports_(rows, touched);
-var filtered = rowsFiltered.length !== rows.length;
+  // 4) Filtre incrémental (si actif)
+  var rowsFiltered, filtered;
+  if (allowIncr) {
+    var touched = _readTouchedPassportSet_(ss, options);
+    rowsFiltered = _filterRowsByPassports_(pp.rows, touched);
+    filtered = rowsFiltered.length !== pp.rows.length;
+  } else {
+    rowsFiltered = pp.rows; // FULL export
+    filtered = false;
+  }
 
+  // 5) Temp sheet → XLSX
+  var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupes All');
+  var tmp = temp.getSheets()[0];
+  tmp.setName('Export');
 
-// 4) Temp sheet → XLSX
-var temp = SpreadsheetApp.create('Export temporaire - Import Retro Groupes All');
-var tmp = temp.getSheets()[0];
-tmp.setName('Export');
+  var all = [header].concat(rowsFiltered);
+  if (typeof normalizePassportToText8_ === 'function') {
+    for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
+  }
+  if (all.length) {
+    tmp.getRange(1, 1, all.length, nbCols).setValues(all);
+    if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
+  }
+  SpreadsheetApp.flush();
 
+  var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
+  var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
+  var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
+  blob.setName('Export_Retro_Groupes_All_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
 
-var all = [header].concat(rowsFiltered);
-if (typeof normalizePassportToText8_ === 'function') {
-for (var i = 1; i < all.length; i++) { if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]); }
+  var folderId = readParam_(ss, PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID)
+              || readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
+  var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+  var file = dest.createFile(blob);
+
+  DriveApp.getFileById(temp.getId()).setTrashed(true);
+  appendImportLog_(ss, 'RETRO_GROUPES_ALL_XLSX_OK', file.getName() + ' -> ' + dest.getName() +
+                        ' (rows=' + rowsFiltered.length + ', filtered=' + filtered + ')');
+  return { fileId: file.getId(), name: file.getName(), rows: rowsFiltered.length, filtered: filtered };
 }
-if (all.length) {
-tmp.getRange(1, 1, all.length, nbCols).setValues(all);
-if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
-}
-SpreadsheetApp.flush();
 
-
-var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
-var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
-blob.setName('Export_Retro_Groupes_All_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
-
-
-var folderId = readParam_(ss, PARAM_KEYS.RETRO_GROUP_EXPORTS_FOLDER_ID)
-|| readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
-var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
-var file = dest.createFile(blob);
-
-
-DriveApp.getFileById(temp.getId()).setTrashed(true);
-appendImportLog_(ss, 'RETRO_GROUPES_ALL_XLSX_OK', file.getName() + ' -> ' + dest.getName() + ' (rows=' + rowsFiltered.length + ', filtered=' + filtered + ')');
-return { fileId: file.getId(), name: file.getName(), rows: rowsFiltered.length, filtered: filtered };
-}
 
 /* ========== Exposition facultative via Library ========== */
 if (typeof Library !== 'undefined') {
-Library.buildRetroGroupesRows = buildRetroGroupesRows;
-Library.writeRetroGroupesSheet = writeRetroGroupesSheet;
-Library.exportRetroGroupesXlsxToDrive = exportRetroGroupesXlsxToDrive;
-Library.exportRetroGroupesAllXlsxToDrive = exportRetroGroupesAllXlsxToDrive;
+  Library.buildRetroGroupesRows = buildRetroGroupesRows;
+  Library.writeRetroGroupesSheet = writeRetroGroupesSheet;
+  Library.exportRetroGroupesXlsxToDrive = exportRetroGroupesXlsxToDrive;
+  Library.exportRetroGroupesAllXlsxToDrive = exportRetroGroupesAllXlsxToDrive;
+}
+
+
+/** Export Groupes (principal) depuis JOUEURS, avec override par articles exclusifs du LEDGER
+ *  (Conservé; pas utilisé par les exports ci-dessus, mais dispo si besoin.)
+ */
+function buildRetroGroupesRowsFromJoueursLedger_(seasonSheetId){
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
+
+  // === Data ===
+  var joueurs = readSheetAsObjects_(ss.getId(), 'JOUEURS').rows || [];
+  var ledger  = readSheetAsObjects_(ss.getId(), SHEETS.ACHATS_LEDGER).rows || [];
+  var maps    = readSheetAsObjects_(ss.getId(), SHEETS.MAPPINGS).rows || [];
+
+  var memberMaps  = maps.filter(function(r){ return String(r['Type']||'').toLowerCase()==='member'  && !String(r['Exclude']||'').trim(); });
+  var articleMaps = maps.filter(function(r){ return String(r['Type']||'').toLowerCase()==='article' && !String(r['Exclude']||'').trim(); });
+
+  // Params
+  var eliteKeys = (readParam_(ss, 'RETRO_GROUP_ELITE_KEYWORDS') || '').toString();
+  var saLabelG  = readParam_(ss, 'RETRO_GROUP_SA_GROUPE_LABEL') || 'Adapté (tous)';
+  var saLabelC  = readParam_(ss, 'RETRO_GROUP_SA_CATEG_LABEL')  || 'Adapté';
+  var saCsv     = (readParam_(ss, PARAM_KEYS.RETRO_GROUP_SA_KEYWORDS) || 'soccer adapté,soccer adapte').toString();
+
+  // Helpers
+  function _nrmLower_(s){ try{ s=String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,''); }catch(e){} return s.toLowerCase(); }
+  function _ageU2_(ageBracket){ var m = String(ageBracket||'').match(/U(\d+)/i); return m ? ('U'+m[1]) : ''; }
+  function _uNum_(ageBracket){ var m = String(ageBracket||'').match(/U(\d+)/i); return m ? Number(m[1]) : 0; }
+  function _genreInit_(g){ return (String(g||'').toUpperCase().charAt(0) || ''); }
+  function _fmt(tpl, j){
+    return String(tpl||'')
+      .replace(/{{\s*U2\s*}}/g, _ageU2_(j.AgeBracket))
+      .replace(/{{\s*genreInitiale\s*}}/g, _genreInit_(j.Genre));
+  }
+  function _overlaps(br, umin, umax){
+    var m = String(br||'').match(/U(\d+)\s*-\s*U?(\d+)/i);
+    if (!m) return true;
+    var a = Number(m[1]||0), b = Number(m[2]||0);
+    return !(b < umin || a > umax);
+  }
+  function _hasAny(s, csv){
+    if (!csv) return false;
+    var hay = _nrmLower_(s||'');
+    return csv.split(',').some(function(w){ return hay.indexOf(_nrmLower_(String(w).trim()))>=0; });
+  }
+  function _isTrue_(v){
+    var s = String(v==null?'':v).trim().toLowerCase();
+    return (s==='1'||s==='true'||s==='oui');
+  }
+
+  // Index LEDGER actifs par passeport
+  var legByPass = {};
+  ledger.filter(_isActiveRow_).forEach(function(a){
+    var p = String(a['Passeport #']||'').trim(); if (!p) return;
+    (legByPass[p] = legByPass[p] || []).push(a);
+  });
+
+  // Détection Adapté robuste (champs JOUEUR + mots-clés dans LEDGER)
+  function _isAdaptedJ_(j){
+    if (_isTrue_(j.isAdapte) || _isTrue_(j['Adapté']) || _isTrue_(j['Programme adapté']) || _isTrue_(j['Adapte'])) return true;
+    var p = String(j['Passeport #']||j['Passeport']||'').trim();
+    var L = legByPass[p] || [];
+    for (var i=0;i<L.length;i++){
+      var fee = L[i]['Nom du frais'] || L[i]['Frais'] || L[i]['Produit'] || '';
+      if (_hasAny(fee, saCsv)) return true;
+    }
+    return false;
+  }
+
+  // Sélection mapping member le + prioritaire
+  function _selectMemberMap_(j){
+    var g = _genreInit_(j.Genre);
+    var best = null, prio = -1;
+    memberMaps.forEach(function(m){
+      var okG = (String(m['Genre']||'*')==='*' || _genreInit_(m['Genre'])===g);
+      var okU = _overlaps(j.AgeBracket, Number(m['Umin']||0), Number(m['Umax']||99));
+      if (!okG || !okU) return;
+      var p = Number(m['Priority']||0);
+      if (p>prio) { prio=p; best=m; }
+    });
+    return best;
+  }
+
+  // Overrides exclusifs (famille ExclusiveGroup)
+  function _selectExclusiveOverrides_(j){
+    var p = String(j['Passeport #']||'').trim();
+    var L = legByPass[p] || [];
+    if (!L.length) return {};
+    var g = _genreInit_(j.Genre);
+    var mapByFamily = {};
+    L.forEach(function(a){
+      var fee = a['Nom du frais'] || a['Frais'] || a['Produit'] || '';
+      if (_hasAny(fee, eliteKeys)) return;
+      articleMaps.forEach(function(m){
+        var alias = String(m['AliasContains']||'').trim();
+        if (alias && _nrmLower_(fee).indexOf(_nrmLower_(alias))<0) return;
+        var okG = (String(m['Genre']||'*')==='*' || _genreInit_(m['Genre'])===g);
+        var okU = _overlaps(j.AgeBracket, Number(m['Umin']||0), Number(m['Umax']||99));
+        var fam = String(m['ExclusiveGroup']||'').trim();
+        if (!okG || !okU || !fam) return;
+        var pz  = Number(m['Priority']||0);
+        if (!mapByFamily[fam] || pz > mapByFamily[fam].prio){
+          mapByFamily[fam] = { map: m, prio: pz };
+        }
+      });
+    });
+    return mapByFamily;
+  }
+
+  // Header export
+  var HEADER = ["Identifiant unique","Catégorie","Équipe/Groupe"];
+  var out = [];
+
+  joueurs.forEach(function(j){
+    var pass = j['Passeport #'] || j['Passeport'] || j['PS'] || '';
+    pass = (typeof normalizePassportToText8_==='function') ? normalizePassportToText8_(pass) : String(pass||'').replace(/\D/g,'').padStart(8,'0');
+    if (!pass) return;
+
+    // Adapté : sortie immédiate
+    if (_isAdaptedJ_(j)) {
+      out.push([pass, saLabelC, saLabelG]);
+      return;
+    }
+
+    // Base via mapping member
+    var mm  = _selectMemberMap_(j);
+    var cat = mm ? _fmt(mm['CategorieFmt'], j) : _fmt(readParam_(ss,'RETRO_GROUP_CATEGORIE_FMT')||'{{U2}} {{genreInitiale}}', j);
+    var grp = mm ? _fmt(mm['GroupeFmt'],    j) : _fmt(readParam_(ss,'RETRO_GROUP_GROUPE_FMT')   ||'{{U2}}{{genreInitiale}}', j);
+
+    // Overrides exclusifs
+    var fams = _selectExclusiveOverrides_(j);
+    Object.keys(fams).forEach(function(f){
+      var m = fams[f].map;
+      if (m) { cat = _fmt(m['CategorieFmt'], j); grp = _fmt(m['GroupeFmt'], j); }
+    });
+
+    // CDP0 (Ledger) — si U9–U12 et aucun override "CDP", préfixer Catégorie
+    var u = _uNum_(j.AgeBracket);
+    var hasCDPOverride = Object.keys(fams).some(function(f){ return String(f||'').toUpperCase().indexOf('CDP') >= 0; });
+    if (u >= 9 && u <= 12 && !hasCDPOverride) {
+      if (cat.toUpperCase().indexOf('CDP ') !== 0) cat = 'CDP ' + cat;
+    }
+
+    out.push([pass, cat, grp]);
+  });
+
+  return { header: HEADER, rows: out, nbCols: HEADER.length };
 }

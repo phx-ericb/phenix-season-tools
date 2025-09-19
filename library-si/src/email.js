@@ -96,6 +96,15 @@ if (typeof collectEmailsFromRow_ !== 'function') {
   }
 }
 
+// Fallback minimal si la lib ne fournit pas _stripHtml_
+if (typeof _stripHtml_ !== 'function') {
+  function _stripHtml_(html) {
+    html = String(html == null ? '' : html);
+    // virer les tags + compacter les espaces
+    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+}
+
 
 // ===== Coach detection shim (lib-safe) =====
 // Utilise la version lib (rules.js) si dispo, sinon fallback autonome.
@@ -228,52 +237,6 @@ function _toProperCase_(s) {
 }
 
 
-/** Renvoie true si la ligne INSCRIPTIONS matche un mapping member avec Exclude=TRUE */
-function matchesMemberExcludeMapping_(ss, row){
-  var mapObj = readSheetAsObjects_(ss.getId(), 'MAPPINGS');
-  var maps = (mapObj && mapObj.rows) ? mapObj.rows : [];
-  if (!maps.length) return false;
-
-  function norm(s){ s = String(s==null?'':s); try{s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,'');}catch(e){} return s.toUpperCase().trim(); }
-  var txt = norm( (row['Catégorie']||row['Categorie']||'') + ' ' + (row['Nom du frais']||row['Frais']||row['Produit']||'') );
-
-  // U / Genre de la ligne
-  var U = deriveUFromRow_(row)||''; var m = String(U).match(/U\s*-?\s*(\d{1,2})/i);
-  var uNum = m ? parseInt(m[1],10) : null;
-  var g0 = (row['Identité de genre']||row['Identité de Genre']||row['Genre']||''); var G = (String(g0).trim().toUpperCase()[0]||'X');
-
-  for (var i=0;i<maps.length;i++){
-    var mp = maps[i];
-    if (String(mp['Type']||'').toLowerCase() !== 'member') continue;
-
-    // Exclude truthy ?
-    var ex = String(mp['Exclude']||'').trim().toUpperCase();
-    var isExcluded = (ex==='TRUE' || ex==='1' || ex==='YES' || ex==='OUI');
-    if (!isExcluded) continue;
-
-    // AliasContains
-    var alias = norm(mp['AliasContains']||mp['Alias']||'');
-    if (alias && txt.indexOf(alias) === -1) continue;
-
-    // Umin/Umax
-    var Umin = parseInt(mp['Umin']||'',10), Umax = parseInt(mp['Umax']||'',10);
-    if (uNum!=null && !isNaN(Umin) && uNum < Umin) continue;
-    if (uNum!=null && !isNaN(Umax) && uNum > Umax) continue;
-
-    // Genre
-    var mg = String(mp['Genre']||'*').trim().toUpperCase();
-    if (mg && mg !== '*'){
-      if (mg==='X'){ /* ok pour inconnu */ }
-      else if (G !== mg) continue;
-    }
-
-    // -> toutes les conditions sont OK
-    return true;
-  }
-  return false;
-}
-
-/* ======================== MAIL_SECTEURS ======================== */
 /** ======================== MAIL_SECTEURS (+ErrorCode) ======================== */
 var MAIL_SECTORS_SHEET = 'MAIL_SECTEURS';
 // On ajoute ErrorCode en DERNIER pour compat rétro
@@ -283,64 +246,54 @@ var MAIL_SECTORS_HEADER = [
   'AttachIdsCSV','Active','ErrorCode'
 ];
 
-/** Crée/upgrade le header si besoin (ajoute ErrorCode si absent) */
-function _ensureMailSectorsSheet_(ss){
+
+
+function _getMailSectorsSheet_(ss){
+  // 1) ta feuille réelle
   var sh = ss.getSheetByName(MAIL_SECTORS_SHEET);
-  if (!sh) {
+  // 2) compat (ancien nom)
+  if (!sh) sh = ss.getSheetByName(MAIL_SECTORS_SHEET);
+  // 3) sinon: on crée MINIMAL (sans valeurs par défaut)
+  if (!sh){
     sh = ss.insertSheet(MAIL_SECTORS_SHEET);
     sh.getRange(1,1,1,MAIL_SECTORS_HEADER.length).setValues([MAIL_SECTORS_HEADER]);
-    // quelques valeurs par défaut (confirmation, pas d'ErrorCode)
-    var defaults = [
-      ['U9','U9',9,9,'*','','','','Confirmation U9 – {{nomcomplet}}','Bonjour {{prenom}},<br>Bienvenue!','',true,''],
-      ['U10','U10',10,10,'*','','','','Confirmation U10 – {{nomcomplet}}','Bonjour {{prenom}},<br>Bienvenue!','',true,''],
-      ['U11','U11',11,11,'*','','','','Confirmation U11 – {{nomcomplet}}','Bonjour {{prenom}},<br>Bienvenue!','',true,''],
-      ['U12','U12',12,12,'*','','','','Confirmation U12 – {{nomcomplet}}','Bonjour {{prenom}},<br>Bienvenue!','',true,'']
-    ];
-    sh.getRange(2,1,defaults.length, MAIL_SECTORS_HEADER.length).setValues(defaults);
-    return sh;
   }
-  // upgrade header si ErrorCode manquant
-  var lastCol = sh.getLastColumn()||0;
-  var hdr = sh.getRange(1,1,1, Math.max(lastCol, MAIL_SECTORS_HEADER.length)).getValues()[0].map(String);
-  // Si le header exact n'est pas celui attendu → on réécrit la ligne d'entête complète
-  var needUpgrade = MAIL_SECTORS_HEADER.some(function(h, i){ return (hdr[i]||'') !== h; });
-  if (needUpgrade) {
-    // Étend la feuille si nécessaire
-    if (sh.getLastColumn() < MAIL_SECTORS_HEADER.length) {
-      sh.insertColumnsAfter(sh.getLastColumn() || 1, MAIL_SECTORS_HEADER.length - (sh.getLastColumn()||1));
-    }
-    sh.getRange(1,1,1,MAIL_SECTORS_HEADER.length).setValues([MAIL_SECTORS_HEADER]);
+  // upgrade doux: s'il manque "ErrorCode", on l’ajoute à la fin (sans réordonner)
+  var lastCol = Math.max(sh.getLastColumn(), 1);
+  var hdr = sh.getRange(1,1,1,lastCol).getValues()[0].map(String);
+  if (hdr.indexOf('ErrorCode') < 0){
+    sh.insertColumnAfter(lastCol);
+    sh.getRange(1, lastCol+1).setValue('ErrorCode');
   }
   return sh;
 }
 
 /** Lecture robuste par NOMS de colonnes (compat v0.8 sans ErrorCode) */
 function _loadMailSectors_(ss){
-  var sh = _ensureMailSectorsSheet_(ss);
+  var sh = _getMailSectorsSheet_(ss);
   var lastRow = sh.getLastRow(); if (lastRow < 2) return [];
   var lastCol = sh.getLastColumn();
-  var values = sh.getRange(1,1,lastRow, lastCol).getValues();
+  var values = sh.getRange(1,1,lastRow,lastCol).getValues();
   var headers = values[0].map(String);
   var idx = {}; headers.forEach(function(h,i){ idx[h]=i; });
-
-  function val(row, key){ var i=idx[key]; return (i==null? '' : values[row][i]); }
+  function val(r,k){ var i=idx[k]; return (i==null?'':values[r][i]); }
 
   var out = [];
   for (var r=1; r<values.length; r++){
     out.push({
-      id: String(val(r,'SecteurId')||'').trim(),
-      label: String(val(r,'Label')||'').trim(),
-      Umin: Number(val(r,'Umin')||''),
-      Umax: Number(val(r,'Umax')||''),
-      genre: (String(val(r,'Genre')||'*').trim().toUpperCase()||'*'),
-      to: String(val(r,'To')||'').trim(),
-      cc: String(val(r,'Cc')||'').trim(),
-      replyTo: String(val(r,'ReplyTo')||'').trim(),
-      subj: String(val(r,'SubjectTpl')||'').trim(),
-      body: String(val(r,'BodyTpl')||'').trim(),
+      id:        String(val(r,'SecteurId')||'').trim(),
+      label:     String(val(r,'Label')||'').trim(),
+      Umin:      Number(val(r,'Umin')||''),
+      Umax:      Number(val(r,'Umax')||''),
+      genre:     (String(val(r,'Genre')||'*').trim().toUpperCase()||'*'),
+      to:        String(val(r,'To')||'').trim(),
+      cc:        String(val(r,'Cc')||'').trim(),
+      replyTo:   String(val(r,'ReplyTo')||'').trim(),
+      subj:      String(val(r,'SubjectTpl')||'').trim(),
+      body:      String(val(r,'BodyTpl')||'').trim(),
       attachCsv: String(val(r,'AttachIdsCSV')||'').trim(),
-      active: String(val(r,'Active')).toString().toLowerCase() !== 'false',
-      errorCode: String(val(r,'ErrorCode')||'').trim() // '' = confirmations
+      active:    String(val(r,'Active')).toString().toLowerCase() !== 'false',
+      errorCode: String(val(r,'ErrorCode')||'').trim()
     });
   }
   return out.filter(function(s){ return s.active; }).sort(function(a,b){ return (a.Umin||0)-(b.Umin||0); });
@@ -360,575 +313,378 @@ function _matchSectorForType_(sectors, payload, type){
   return null;
 }
 
-function _attachmentsFromCsv_(idsCsv){
-  var out = [];
-  String(idsCsv||'').split(/[,\s;]+/).filter(Boolean).forEach(function(id){
-    try{ out.push(DriveApp.getFileById(id).getBlob()); }catch(e){}
-  });
-  return out;
-}
 
 /* ============================ Worker ============================ */
 
 /**
- * Envoie les emails en attente (MAIL_OUTBOX)
- * - Type = INSCRIPTION_NEW : applique secteur (si trouvé) pour Sujet/Body/Attachments/To/Cc/ReplyTo
- *   sinon fallback global (PARAMS).
- * - Résumés par secteur (legacy v0.7) conservés.
+ * Dépile MAIL_OUTBOX et envoie les courriels (consomme le snapshot écrit à l’enqueue).
+ * En fin de run, envoie 3 résumés CSV (INSCRIPTION_NEW uniquement) : U4-U8, U9-U12, U13-U18.
  */
-function sendPendingOutbox(seasonSheetId) {
-  var ss = getSeasonSpreadsheet_(seasonSheetId);
-  var shOut = ensureMailOutbox_(ss);
+function sendPendingOutbox(seasonId) {
+  var ss = getSeasonSpreadsheet_(seasonId);
+
+  // --- Params
+  var dry = String(readParam_(ss, 'DRY_RUN') || 'FALSE').toUpperCase() === 'TRUE';
+  var redirect = String(readParam_(ss, 'DRY_REDIRECT_EMAIL') || '').trim(); // utilisé SEULEMENT en DRY
+  var fromName = String(readParam_(ss, 'MAIL_FROM') || 'Robot Courriels').trim();
+  var useGmailApp = String(readParam_(ss, 'MAIL_USE_GMAILAPP') || 'TRUE').toUpperCase() === 'TRUE';
+  var batchMax = parseInt(String(readParam_(ss, 'MAIL_BATCH_MAX') || '200'), 10) || 200;
+
+  var sh = upgradeMailOutboxForDisplay_(ss);
   var headers = getMailOutboxHeaders_();
-  var idx = getHeadersIndex_(shOut, headers.length);
-
-  var last = shOut.getLastRow();
-  if (last < 2) return { processed: 0, summaries: false };
-
-  var batchMax = parseInt(readParam_(ss, PARAM_KEYS.MAIL_BATCH_MAX) || '50', 10);
-  var dry = (readParam_(ss, PARAM_KEYS.DRY_RUN) || 'FALSE').toUpperCase() === 'TRUE';
-  var fromName = readParam_(ss, PARAM_KEYS.MAIL_FROM) || undefined;
-  var useGmailApp = (readParam_(ss, PARAM_KEYS.MAIL_USE_GMAILAPP) || 'FALSE').toUpperCase() === 'TRUE';
-
-  var sectors = _loadMailSectors_(ss);
-
-  var data = shOut.getRange(2, 1, last - 1, headers.length).getValues();
-  var processed = 0;
-  var processedNew = [];           // pour les résumés CSV
-  var mailLogBuffer = [];          // <-- on accumule les lignes pour MAIL_LOG
-  var sentRows = [];               // (optionnel) indices des lignes OUTBOX traitées
-
-  function _normUpper_(s) {
-    s = String(s == null ? '' : s);
-    try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) {}
-    return s.trim().toUpperCase();
-  }
-  function _composeText_(row) {
-    return _normUpper_((row['Catégorie'] || row['Categorie'] || '') + ' ' + (row['Nom du frais'] || row['Frais'] || row['Produit'] || ''));
-  }
-  function _excludedReasonForMail_(ss, row, type) {
-    if (type !== 'INSCRIPTION_NEW') return null;
-    try {
-      if (typeof matchesMemberExcludeMapping_ === 'function' && matchesMemberExcludeMapping_(ss, row)) return 'excluded_by_mappings';
-    } catch(e){}
-    try {
-      if (typeof isAdapteMember_ === 'function' && isAdapteMember_(row)) return 'excluded_adapte_rule';
-    } catch(e){}
-
-   // ⛔ Coach : pas de confirmations
-   try {
-     if (_isCoachMemberSafe_(ss, row)) return 'excluded_coach_fee';
-   } catch(e){}
-
-    var txt = _composeText_(row);
-    if (txt.indexOf('ADAPTE') !== -1) return 'excluded_adapte_text';
-    if (txt.indexOf('ADULTE') !== -1) return 'excluded_adulte_text';
-    return null;
-  }
-
-  for (var i = 0; i < data.length && processed < batchMax; i++) {
-    var rowArr = data[i];
-    var row = {}; headers.forEach(function (h, j) { row[h] = rowArr[j]; });
-
-    if (String(row['Status']).toLowerCase() !== 'pending') continue;
-    if (row['SentAt']) continue;
-
-    var type = row['Type'];
-    var keyHash = row['KeyHash'];
-
-    var fRow = fetchFinalRowByKeyHash_(ss, keyHash) || {};
-    var payload = buildDataFromRow_(fRow);
-
-    // Backfill affichage (Passeport formaté + Nom/Frais) si vides
-    try {
-      var headersNow = shOut.getRange(1, 1, 1, shOut.getLastColumn()).getValues()[0].map(String);
-      var idxCols = {}; headersNow.forEach(function (h, ii) { idxCols[h] = ii + 1; });
-      function isEmptyCol(col) { var c = idxCols[col]; return c && !String(shOut.getRange(i+2, c).getValue() || '').trim(); }
-      if (fRow && (isEmptyCol('Passeport') || isEmptyCol('NomComplet') || isEmptyCol('Frais'))) {
-        if (idxCols['Passeport']) {
-          var passText8 = (typeof normalizePassportToText8_ === 'function') ? normalizePassportToText8_(fRow['Passeport #']) : String(fRow['Passeport #']||'');
-          shOut.getRange(i+2, idxCols['Passeport']).setValue(passText8);
-        }
-        if (idxCols['NomComplet']) {
-          var nomc = (((fRow['Prénom']||fRow['Prenom']||'')+' '+(fRow['Nom']||'')).trim());
-          shOut.getRange(i+2, idxCols['NomComplet']).setValue(nomc);
-        }
-        if (idxCols['Frais']) {
-          var frais = fRow['Nom du frais']||fRow['Frais']||fRow['Produit']||'';
-          shOut.getRange(i+2, idxCols['Frais']).setValue(frais);
-        }
-      }
-    } catch(e){}
-
-    // Exclusions confirmations
-    var excludedReason = _excludedReasonForMail_(ss, fRow, type);
-    if (excludedReason) {
-      shOut.getRange(i + 2, idx['Status']).setValue('skipped_excluded');
-      shOut.getRange(i + 2, idx['Error']).setValue(excludedReason);
-      shOut.getRange(i + 2, idx['SentAt']).setValue(new Date());
-      processed++; sentRows.push(i+2);
-      var resultTag = dry ? 'DRY_RUN_SKIP' : 'SKIP_EXCLUDED';
-      mailLogBuffer.push([type, (row['To']||''), '(skipped) '+(row['Sujet']||''), keyHash, new Date(), resultTag]);
-      continue;
-    }
-
-// -- Résolution destinataires (secteur > finale > STAGING fallback)
-var rcptDefault = { to:'', cc:'' };
-
-// overrides secteur (si un secteur s'applique plus tard)
-if (s && s.to) rcptDefault.to = s.to;
-if (s && s.cc) rcptDefault.cc = s.cc;
-
-// sinon: essaie sur la ligne finale
-if (!rcptDefault.to) {
-  var csv = readParam_(ss, PARAM_KEYS.TO_FIELDS_INSCRIPTIONS) || 'Courriel,Parent 1 - Courriel,Parent 2 - Courriel';
-  var toFinal = collectEmailsFromRow_(fRow || {}, csv);
-  if (toFinal) rcptDefault.to = toFinal;
-}
-
-// si encore vide ET type ≠ INSCRIPTION_NEW: secours via STAGING
-if (!rcptDefault.to && type !== 'INSCRIPTION_NEW') {
-  var sRow = fetchStagingRowByKeyHash_(ss, keyHash);
-  if (sRow) {
-    var csv2 = readParam_(ss, PARAM_KEYS.TO_FIELDS_INSCRIPTIONS) || 'Courriel,Parent 1 - Courriel, Parent 2 - Courriel';
-    var toStage = collectEmailsFromRow_(sRow, csv2);
-    if (toStage) rcptDefault.to = toStage;
-
-    // bonus: en profite pour enrichir le payload (prenom/nom/U...) si vide
-    try {
-      var p2 = buildDataFromRow_(sRow);
-      ['prenom','nom','nomcomplet','U','U2','U_num','categorie','secteur'].forEach(function(k){
-        if (!payload[k] && p2[k]) payload[k] = p2[k];
-      });
-    } catch(_) {}
-  }
-}
-
-// CC par défaut selon tes PARAMS « confirmation » (ou ajoute des PARAMS spécifiques si tu veux)
-if (!rcptDefault.cc) rcptDefault.cc = readParam_(ss, PARAM_KEYS.MAIL_CC_NEW_INSCRIPTIONS) || '';
-
-
-var subject = (row['Sujet'] || '').trim();
-    var bodyHtml = (row['Corps'] || '').trim();
-    var attachments = _attachmentsFromCsv_(row['Attachments']);
-
-    var isNew = (type === 'INSCRIPTION_NEW');
-    if (!isNew) {
-      try {
-        var err = JSON.parse(String(row['Error'] || '{}'));
-        payload.error_code = type;
-        payload.error_label = err.label || '';
-        payload.error_details = err.details || '';
-      } catch (e) {
-        payload.error_code = type;
-        payload.error_label = '';
-        payload.error_details = '';
-      }
-    }
-
-    var s = _matchSectorForType_(sectors, payload, type);
-    if (type === 'INSCRIPTION_NEW' && !s) {
-      shOut.getRange(i + 2, idx['Status']).setValue('skipped_no_sector');
-      shOut.getRange(i + 2, idx['SentAt']).setValue(new Date());
-      processed++; sentRows.push(i+2);
-      mailLogBuffer.push([type, (row['To']||''), '(no_sector) '+(row['Sujet']||''), keyHash, new Date(), dry ? 'DRY_RUN_SKIP' : 'SKIP_NO_SECTOR']);
-      continue;
-    }
-
-    if (!subject && s && s.subj) subject = renderTemplate_(s.subj, payload);
-    if (!bodyHtml && s && s.body) bodyHtml = renderTemplate_(s.body, payload);
-
-    if (isNew) {
-      if (!subject) subject = renderTemplate_(readParam_(ss, PARAM_KEYS.MAIL_TEMPLATE_INSCRIPTION_NEW_SUBJECT) || 'Bienvenue {{prenom}} – {{frais}}', payload);
-      if (!bodyHtml) bodyHtml = renderTemplate_(readParam_(ss, PARAM_KEYS.MAIL_TEMPLATE_INSCRIPTION_NEW_BODY) || 'Bonjour {{prenom}},<br>Nous confirmons votre inscription à {{frais}} ({{saison}}).', payload);
-    } else {
-      if (!subject) subject = 'Validation requise – '+(payload.nomcomplet||'')+' ('+(payload.U||'')+')';
-      if (!bodyHtml) bodyHtml = 'Bonjour '+(payload.prenom||'')+',<br><br>Nous avons remarqué un point à valider pour '+(payload.saison||'')+
-        ' ('+(payload.U||'')+') : <b>'+(payload.error_label||type)+'</b><br><small>'+(payload.error_details||'')+'</small>';
-    }
-
-    var to = (row['To'] || '').trim() || (s && s.to) || rcptDefault.to || '';
-    var cc = (row['Cc'] || '').trim() || (s && s.cc) || rcptDefault.cc || '';
-    var replyTo = (s && s.replyTo) || undefined;
-
-    if (s && s.attachCsv) attachments = attachments.concat(_attachmentsFromCsv_(s.attachCsv));
-// === Resolve DRY behavior ===
-var dryRun = (readParam_(ss, PARAM_KEYS.DRY_RUN) || 'FALSE').toUpperCase() === 'TRUE';
-var redirect = readParam_(ss, 'DRY_REDIRECT_EMAIL'); // new param in PARAMS
-
-// Build a safe recipient set for DRY
-var resolvedTo = to;
-var resolvedCc = cc;
-var resolvedReplyTo = replyTo;
-var resolvedSubject = subject;
-var resolvedHtml = bodyHtml;
-
-if (dryRun && redirect) {
-  // Redirige tout vers l’adresse de test; garde l’original en mémo dans le corps
-  resolvedSubject = '[DRY → ' + redirect + '] ' + subject;
-
-  // Ajoute un encart debug au bas du HTML (les headers custom ne sont pas supportés)
-  var debugBlock =
-    '<hr style="margin:16px 0;border:0;border-top:1px solid #ddd">' +
-    '<div style="font:12px/1.4 system-ui,Arial,sans-serif;color:#555">' +
-      '<div><b>DRY RUN</b> : ce message a été redirigé.</div>' +
-      '<div><b>Destinataires (original)</b> : ' + _rg_csvEsc_(to) + (cc ? (' | CC: ' + _rg_csvEsc_(cc)) : '') + '</div>' +
-      (replyTo ? ('<div><b>Reply-To</b> : ' + _rg_csvEsc_(replyTo) + '</div>') : '') +
-    '</div>';
-
-  resolvedHtml = (bodyHtml || '') + debugBlock;
-
-  // Forcer l’envoi vers l’adresse de test
-  resolvedTo = redirect;
-  resolvedCc = '';          // neutre en DRY
-  resolvedReplyTo = '';     // neutre en DRY
-}
-
-if (dryRun && !redirect) { appendImportLog_(ss, 'MAIL_DRY_NO_REDIRECT', 'DRY_RUN sans DRY_REDIRECT_EMAIL: envoi bloqué'); return; }
-
-
-// === Envoi (inchangé, mais avec les variables "resolved*") ===
-if (useGmailApp) {
-  GmailApp.sendEmail(resolvedTo, resolvedSubject, '', {
-    htmlBody: resolvedHtml,
-    cc: resolvedCc || undefined,
-    replyTo: resolvedReplyTo || undefined,
-    attachments: (attachments.length ? attachments : undefined),
-    name: fromName
-  });
-} else {
-  MailApp.sendEmail({
-    to: resolvedTo,
-    cc: resolvedCc || undefined,
-    replyTo: resolvedReplyTo || undefined,
-    subject: resolvedSubject,
-    htmlBody: resolvedHtml,
-    attachments: (attachments.length ? attachments : null),
-    name: fromName
-  });
-}
-
-
-    // marque envoyé (par ligne; on peut optimiser si les lignes sont contiguës)
-    shOut.getRange(i + 2, idx['SentAt']).setValue(new Date());
-    shOut.getRange(i + 2, idx['Status']).setValue(dry ? 'dry_run' : 'sent');
-    processed++; sentRows.push(i+2);
-
-    // log dans le buffer
-    mailLogBuffer.push([type, to, subject, keyHash, new Date(), dry ? 'DRY_RUN' : (useGmailApp ? 'SENT_GMAILAPP' : 'SENT_MAILAPP')]);
-
-    if (isNew) processedNew.push({ row: fRow, data: payload });
-  }
-
-  // Écrit MAIL_LOG en batch
-  if (mailLogBuffer.length) {
-    var shLog = getSheetOrCreate_(ss, SHEETS.MAIL_LOG, ['Type','To','Sujet','KeyHash','SentAt','Result']);
-    var start = shLog.getLastRow() + 1;
-    shLog.insertRowsAfter(shLog.getLastRow(), mailLogBuffer.length);
-    shLog.getRange(start, 1, mailLogBuffer.length, 6).setValues(mailLogBuffer);
-  }
-
-  // Résumés CSV (confirmations)
-  if (processedNew.length) {
-    var groups = { 'U4-U8': [], 'U9-U12': [], 'U13-U18': [] };
-    processedNew.forEach(function (x) {
-      var sec = x.data.secteur || deriveSectorFromRow_(x.row);
-      if (groups[sec]) groups[sec].push(x);
-    });
-    var tplSub = readParam_(ss, PARAM_KEYS.MAIL_TEMPLATE_SUMMARY_SUBJECT) || 'Nouveaux inscrits – {{secteur}} – {{date}}';
-    var tplBody = readParam_(ss, PARAM_KEYS.MAIL_TEMPLATE_SUMMARY_BODY) || 'Bonjour,<br>Veuillez trouver la liste des nouveaux inscrits {{secteur}} en pièce jointe.<br><br>Bonne journée.';
-    Object.keys(groups).forEach(function (sec) {
-      var arr = groups[sec]; if (!arr.length) return;
-      var toKey = sec === 'U4-U8' ? PARAM_KEYS.MAIL_TO_SUMMARY_U4U8 : (sec === 'U9-U12' ? PARAM_KEYS.MAIL_TO_SUMMARY_U9U12 : PARAM_KEYS.MAIL_TO_SUMMARY_U13U18);
-      var ccKey = sec === 'U4-U8' ? PARAM_KEYS.MAIL_CC_SUMMARY_U4U8 : (sec === 'U9-U12' ? PARAM_KEYS.MAIL_CC_SUMMARY_U9U12 : PARAM_KEYS.MAIL_CC_SUMMARY_U13U18);
-      var to = readParam_(ss, toKey) || '', cc = readParam_(ss, ccKey) || '';
-
-      var headersCSV = ['Passeport', 'NomComplet', 'Saison', 'Frais', 'Categorie', 'Secteur'];
-      var lines = [headersCSV.join(',')];
-      arr.forEach(function (x) {
-        var r = x.row, nomc = ((r['Prénom'] || r['Prenom'] || '') + ' ' + (r['Nom'] || '')).trim();
-        var passText8 = (typeof normalizePassportToText8_ === 'function') ? normalizePassportToText8_(r['Passeport #']) : String(r['Passeport #']||'');
-        var vals = [passText8, nomc, (r['Saison'] || ''), (r['Nom du frais'] || r['Frais'] || r['Produit'] || ''), (r['Catégorie'] || r['Categorie'] || ''), (deriveSectorFromRow_(r) || '')]
-          .map(function (v) { v = String(v).replace(/"/g, '""'); if (/[",\n;]/.test(v)) v = '"' + v + '"'; return v; });
-        lines.push(vals.join(','));
-      });
-      var csv = lines.join('\n');
-      var blob = Utilities.newBlob(csv, 'text/csv', 'Nouveaux_' + sec.replace(/[^A-Za-z0-9\-]/g, '') + '_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmm') + '.csv');
-
-      var subject = renderTemplate_(tplSub, { secteur: sec, date: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm') });
-      var body = renderTemplate_(tplBody, { secteur: sec });
-
-      if (!dry && to) {
-        if (useGmailApp) {
-          GmailApp.sendEmail(to, subject, '', { htmlBody: body, cc: cc || undefined, attachments: [blob], name: fromName });
-        } else {
-          MailApp.sendEmail({ to: to, cc: cc, subject: subject, htmlBody: body, attachments: [blob], name: fromName });
-        }
-      }
-    });
-  }
-
-  appendImportLog_(ss, 'MAIL_WORKER', JSON.stringify({ processed: processed, summaries: processedNew.length > 0 }));
-  return { processed: processed, summaries: processedNew.length > 0 };
-}
-
-
-
-/**
- * Enfile les courriels "INSCRIPTION_NEW" UNIQUEMENT pour les membres
- * qui matchent au moins un secteur de confirmation (ErrorCode vide).
- * -> pas de doublons (clé: Type||KeyHash)
- */
-function enqueueInscriptionNewBySectors(seasonSheetId){
-  var ss = getSeasonSpreadsheet_(seasonSheetId);
-  var outSh   = upgradeMailOutboxForDisplay_(ss);
-  var headers = getMailOutboxHeaders_();
-  var idx     = getHeadersIndex_(outSh, headers.length);
-
-  // (1) Secteurs de confirmation (ErrorCode vide)
-  var sectors = _loadMailSectors_(ss).filter(function(s){ return !String(s.errorCode||'').trim(); });
-  if (!sectors.length) { appendImportLog_(ss, 'QUEUE_NEW', '0 sectors (no confirmation sectors)'); return { queued: 0 }; }
-
-  // (2) Index OUTBOX existant (Type||KeyHash)
-  var existing = {};
-  var outLast = outSh.getLastRow();
-  if (outLast >= 2) {
-    var outVals = outSh.getRange(2,1,outLast-1, headers.length).getValues();
-    var iT = idx['Type']-1, iKH = idx['KeyHash']-1;
-    for (var i=0;i<outVals.length;i++){
-      var t = String(outVals[i][iT]||'').trim();
-      var kh= String(outVals[i][iKH]||'').trim();
-      if (t && kh) existing[t+'||'+kh] = true;
-    }
-  }
-
-  // (3) Balayage des INSCRIPTIONS et construction du buffer
-  var finals = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS).rows || [];
-  var now = new Date();
-  var rows = [];         // buffer pour enqueueOutboxRows_
-  var denormSrc = [];    // lignes sources pour backfill
-
-  finals.forEach(function(r){
-    // KeyHash stable
-    // ⛔ On n'envoie pas de confirmations aux "frais coach"
-    if (_isCoachMemberSafe_(ss, r)) return;
-    var keyColsCsv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
-    var keyStr = keyColsCsv.split(',').map(function(kc){ kc=kc.trim(); return r[kc] == null ? '' : String(r[kc]); }).join('||');
-    var kh = Utilities.base64EncodeWebSafe(Utilities.newBlob(keyStr).getBytes());
-    if (existing['INSCRIPTION_NEW||'+kh]) return;
-
-    // Exclusion (member Exclude=TRUE)
-    if (isExcludedMember_(ss, r)) return;
-
-    // Match secteur
-    var payload = buildDataFromRow_(r) || {};
-    if (payload.U_num == null) {
-      var m = String(deriveUFromRow_(r)||'').match(/U\s*-?\s*(\d{1,2})/i);
-      payload.U_num = m ? parseInt(m[1],10) : 0;
-      payload.genreInitiale = payload.genreInitiale || '';
-    }
-    var s = _matchSectorForType_(sectors, payload, 'INSCRIPTION_NEW');
-    if (!s) return;
-
-    // Ligne OUTBOX « squelette »
-    var arr = new Array(headers.length).fill('');
-    function set(col, val){ var i = idx[col]; if (i) arr[i-1] = val; }
-    set('Type', 'INSCRIPTION_NEW');
-    set('Status', 'pending');
-    set('KeyHash', kh);
-    set('CreatedAt', now);
-    rows.push(arr);
-    denormSrc.push(r);
-
-    existing['INSCRIPTION_NEW||'+kh] = true;
-  });
-
-  // (4) Écriture batch
-  if (!rows.length) { appendImportLog_(ss, 'QUEUE_NEW', JSON.stringify({ queued: 0, sectors: sectors.length })); return { queued: 0 }; }
-
-  var startRow = outSh.getLastRow() + 1;
-  enqueueOutboxRows_(ss.getId(), rows);
-
-  // (5) Backfill lisibles en bloc (Passeport formaté)
-  try {
-    var n = denormSrc.length;
-    var pass = new Array(n), nomc = new Array(n), frais = new Array(n);
-    for (var k=0; k<n; k++){
-      var r = denormSrc[k];
-      var passText8 = (typeof normalizePassportToText8_ === 'function')
-        ? normalizePassportToText8_(r['Passeport #'])
-        : String(r['Passeport #']||'');
-      pass[k]  = [ passText8 ];
-      nomc[k]  = [ (((r['Prénom']||r['Prenom']||'') + ' ' + (r['Nom']||'')).trim()) ];
-      frais[k] = [ r['Nom du frais'] || r['Frais'] || r['Produit'] || '' ];
-    }
-    if (idx['Passeport'])   outSh.getRange(startRow, idx['Passeport'],   n, 1).setValues(pass);
-    if (idx['NomComplet'])  outSh.getRange(startRow, idx['NomComplet'],  n, 1).setValues(nomc);
-    if (idx['Frais'])       outSh.getRange(startRow, idx['Frais'],       n, 1).setValues(frais);
-  } catch(e) {
-    // non bloquant
-  }
-
-  appendImportLog_(ss, 'QUEUE_NEW', JSON.stringify({ queued: rows.length, sectors: sectors.length }));
-  return { queued: rows.length };
-}
-
-
-/* ======================== Enqueue error emails ======================== */
-function enqueueValidationEmailsByErrorCode(seasonSheetId, errorCode){
-  var ss = getSeasonSpreadsheet_(seasonSheetId);
-  if (!errorCode) throw new Error('errorCode requis');
-
-  var errRows = (readSheetAsObjects_(ss.getId(), SHEETS.ERREURS).rows || []);
-  var outSh   = upgradeMailOutboxForDisplay_(ss);
-  var headers = getMailOutboxHeaders_();
-  var idx     = getHeadersIndex_(outSh, headers.length);
-
-  // Index OUTBOX existant (Type||KeyHash)
-  var existing = {};
-  var outLast = outSh.getLastRow();
-  if (outLast >= 2) {
-    var outVals = outSh.getRange(2,1,outLast-1, headers.length).getValues();
-    var iT = idx['Type']-1, iKH = idx['KeyHash']-1;
-    for (var i=0;i<outVals.length;i++){
-      var t = String(outVals[i][iT]||'').trim();
-      var kh= String(outVals[i][iKH]||'').trim();
-      if (t && kh) existing[t+'||'+kh] = true;
-    }
-  }
-
-  // Helper: retrouve {kh,row} à partir (passeport,saison)
-  function keyHashAndRowFor(passport, saison){
-    var finals = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS).rows || [];
-    var found = null;
-    for (var i=0;i<finals.length;i++){
-      var p = String(finals[i]['Passeport #']||'').trim();
-      if (p === passport || (p && p.replace(/^0+/, '') === String(passport||'').replace(/^0+/, ''))) {
-        if (!saison || String(finals[i]['Saison']||'').trim() === String(saison||'').trim()) { found = finals[i]; break; }
-      }
-    }
-    if (!found) return { kh:null, row:null };
-    var keyColsCsv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
-    var keyCols = keyColsCsv.split(',').map(function(x){ return x.trim(); });
-    var keyStr = keyCols.map(function(kc){ return found[kc] == null ? '' : String(found[kc]); }).join('||');
-    var kh = Utilities.base64EncodeWebSafe(Utilities.newBlob(keyStr).getBytes());
-    return { kh: kh, row: found };
-  }
-
-  // Buffers batch
-  var outRows = [];
-  var denorm = []; // garde la row source (finals) alignée sur outRows
-
-  // Construction batch
-  for (var r=0; r<errRows.length; r++){
-    var e = errRows[r];
-    if (String(e['Type']||'') !== errorCode) continue;
-    var passport = String(e['Passeport']||e['Passeport #']||'').trim();
-    if (!passport) continue;
-    var saison   = String(e['Saison']||'').trim();
-
-    var k = keyHashAndRowFor(passport, saison);
-    if (!k.kh) continue;
-
-// ⛔ Jamais d'e-mail "erreur" aux coachs
-if (_isCoachMemberSafe_(ss, k.row)) continue;
-
-    // skip si déjà en OUTBOX
-    if (existing[errorCode+'||'+k.kh]) continue;
-
-    // exclusions globales (ex.: Adapté/Adulte) — on n’ennuie pas ces membres avec des mails d’erreurs
-    if (typeof isExcludedMember_ === 'function' && isExcludedMember_(ss, k.row)) continue;
-
-    // payload d’erreur compact
-    var errPayload = {
-      label: String(e['Message']||'').trim() || errorCode,
-      details: String(e['Contexte']||'').trim()
+  var idx = getHeadersIndex_(sh, headers.length);
+
+  var last = sh.getLastRow();
+  if (last < 2) return { processed: 0, sent: 0, errors: 0, summaries: false };
+
+  var w = headers.length;
+  var values = sh.getRange(2, 1, last - 1, w).getValues();
+  function col(name){ return (idx[name]||0)-1; }
+
+  var cType=col('Type'), cStatus=col('Status'), cTo=col('To'), cCc=col('Cc'), cReplyTo=col('ReplyTo');
+  var cSubj=col('Sujet'), cBody=col('Corps'), cAtt=col('Attachments'), cSent=col('SentAt'), cErr=col('Error');
+  var cSec =col('SecteurId');
+  var cPasseport = idx['Passeport'] ? (idx['Passeport']-1) : -1;
+  var cNomComplet= idx['NomComplet'] ? (idx['NomComplet']-1) : -1;
+  var cFrais     = idx['Frais'] ? (idx['Frais']-1) : -1;
+
+  // --- MAIL_SECTEURS (pour déterminer la "band")
+  var sectors = (readSheetAsObjects_(ss.getId(), 'MAIL_SECTEURS').rows || []).map(function(s){
+    return {
+      SecteurId: String(s['SecteurId']||'').trim(),
+      Label:     String(s['Label']||'').trim(),
+      Umin:      parseInt(String(s['Umin']||'').replace(/[^\d]/g,''),10)||0,
+      Umax:      parseInt(String(s['Umax']||'').replace(/[^\d]/g,''),10)||0,
+      Genre:     String(s['Genre']||'*').trim().toUpperCase() || '*'
     };
+  });
+  var sectorById = {};
+  for (var i=0;i<sectors.length;i++) sectorById[sectors[i].SecteurId] = sectors[i];
 
-    // construit une ligne outbox squelettique (respecte l’ordre headers)
-    var arr = new Array(headers.length).fill('');
-    function set(col, val){ var i = idx[col]; if (i) arr[i-1] = val; }
-    set('Type', errorCode);
-    set('Status', 'pending');
-    set('KeyHash', k.kh);
-    set('CreatedAt', new Date());
-    set('Error', JSON.stringify(errPayload));
-
-    outRows.push(arr);
-    denorm.push(k.row);
-    existing[errorCode+'||'+k.kh] = true;
+  function bandOfSecteur_(sid){
+    var s = sectorById[String(sid||'').trim()];
+    if (!s) return '';
+    var n1 = s.Umin, n2 = s.Umax;
+    if (n1>=4 && n2<=8) return 'U4-U8';
+    if (n1>=9 && n2<=12) return 'U9-U12';
+    if (n1>=13 && n2<=18) return 'U13-U18';
+    if (n2<=8) return 'U4-U8';
+    if (n2<=12) return 'U9-U12';
+    if (n2<=18) return 'U13-U18';
+    return '';
   }
 
-  if (!outRows.length) {
-    appendImportLog_(ss, 'QUEUE_ERRMAIL', JSON.stringify({ code: errorCode, queued: 0 }));
-    return { queued: 0 };
+  function _normalizeEmailsCsv_(csv){
+    return String(csv||'')
+      .split(/[;,]/).map(function(s){ return s.trim(); })
+      .filter(Boolean)
+      .filter(function(e){ return !/noreply|no-reply|invalid|example/.test(e.toLowerCase()); })
+      .join(', ');
   }
 
-  // Écriture batch dans MAIL_OUTBOX
-  var startRow = outSh.getLastRow() + 1;
-  enqueueOutboxRows_(ss.getId(), outRows);
+  // --- Stat counters + collecte des envois INSCRIPTION_NEW de CE run
+  var now = new Date();
+  var sent = 0, errs = 0, proc = 0;
+  var sentNewIns = []; // { p8, nomc, frais, secteurId }
 
-  // Backfill lisibles en bloc
-  try {
-    var n = denorm.length;
-    var pass = new Array(n), nomc = new Array(n), frais = new Array(n);
-    for (var k=0; k<n; k++){
-      var r0 = denorm[k];
-      pass[k]  = [ r0['Passeport #'] || '' ];
-      nomc[k]  = [ (((r0['Prénom']||r0['Prenom']||'') + ' ' + (r0['Nom']||'')).trim()) ];
-      frais[k] = [ r0['Nom du frais'] || r0['Frais'] || r0['Produit'] || '' ];
+  for (var r=0; r<values.length && proc<batchMax; r++){
+    var row = values[r];
+    if (String(row[cStatus]||'').trim().toLowerCase() !== 'pending') continue;
+    proc++;
+
+    var type = String(row[cType]||'').trim();
+    var to = _normalizeEmailsCsv_(row[cTo]||'');      // <-- To provient de l'OUTBOX (déjà résolu en amont)
+    var cc = _normalizeEmailsCsv_(row[cCc]||'');
+    var replyTo = cReplyTo>=0 ? String(row[cReplyTo]||'').trim() : '';
+    var subj = String(row[cSubj]||'');
+    var body = String(row[cBody]||'');
+    var attachCsv = String(row[cAtt]||'');
+
+    // --- Pas de destinataire → erreur
+    if (!to) {
+      row[cStatus] = 'error';
+      row[cErr] = 'NO_RECIPIENT';
+      values[r] = row;
+      errs++;
+      continue;
     }
-    if (idx['Passeport'])   outSh.getRange(startRow, idx['Passeport'],   n, 1).setValues(pass);
-    if (idx['NomComplet'])  outSh.getRange(startRow, idx['NomComplet'],  n, 1).setValues(nomc);
-    if (idx['Frais'])       outSh.getRange(startRow, idx['Frais'],       n, 1).setValues(frais);
-  } catch (eBF) { /* non bloquant */ }
 
-  appendImportLog_(ss, 'QUEUE_ERRMAIL', JSON.stringify({ code: errorCode, queued: outRows.length }));
-  return { queued: outRows.length };
-}
+    // --- Redirect uniquement en DRY
+    var finalTo = to, finalCc = cc, finalSubj = subj, finalBodyHtml = body, finalReplyTo = replyTo;
+    if (dry && redirect) {
+      finalCc = '';
+      finalSubj = '[DRY→'+redirect+'] ' + subj;
+      var dbg = '<div style="font:12px monospace;color:#555">[DRY_REDIRECT] original To='+_rg_csvEsc_(to)+'; Cc='+_rg_csvEsc_(cc)+'</div>';
+      finalBodyHtml = dbg + '\n' + body;
+      finalTo = redirect;
+    }
 
+    // Attachments
+    var blobs = _attachmentsFromCsv_(attachCsv);
 
+    try {
+      if (!dry) {
+        if (useGmailApp) {
+          var pt = (typeof _stripHtml_ === 'function') ? _stripHtml_(finalBodyHtml) : String(finalBodyHtml||'').replace(/<[^>]+>/g,' ');
+          GmailApp.sendEmail(finalTo, finalSubj, pt, {
+            htmlBody: finalBodyHtml,
+            cc: finalCc || undefined,
+            name: fromName,
+            replyTo: finalReplyTo || undefined,
+            attachments: (blobs && blobs.length) ? blobs : undefined
+          });
+        } else {
+          MailApp.sendEmail({
+            to: finalTo, subject: finalSubj, htmlBody: finalBodyHtml,
+            cc: finalCc || undefined, name: fromName,
+            replyTo: finalReplyTo || undefined,
+            attachments: (blobs && blobs.length) ? blobs : undefined
+          });
+        }
+        // PROD → sent
+        row[cStatus] = 'sent';
+        row[cSent] = now;
+        row[cErr] = '';
+        sent++;
+      } else {
+        // DRY → pas d’envoi réel; on marque 'dry'
+        row[cStatus] = 'dry';
+        row[cSent] = now;     // timestamp utile pour audit
+        row[cErr] = '';
+      }
 
+      // Collecte les INSCRIPTION_NEW réellement traités dans CE run
+      if (String(type||'').toUpperCase() === 'INSCRIPTION_NEW') {
+        var p8 = cPasseport>=0 ? String(row[cPasseport]||'').trim() : '';
+        var secteurId = cSec>=0 ? String(row[cSec]||'').trim() : '';
+        var nomc = cNomComplet>=0 ? String(row[cNomComplet]||'').trim() : '';
+        var frais = cFrais>=0 ? String(row[cFrais]||'').trim() : '';
+        sentNewIns.push({ p8: p8, nomc: nomc, frais: frais, secteurId: secteurId });
+      }
 
-/* === Récupération ligne finale par KeyHash (inchangé v0.7) === */
-function fetchFinalRowByKeyHash_(ss, keyHash) {
-  var keyStr = Utilities.newBlob(Utilities.base64DecodeWebSafe(keyHash)).getDataAsString(); // "Passeport||Saison" par défaut
-  var finals = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS);
-  var keyColsCsv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
-  var keyCols = keyColsCsv.split(',').map(function(x){ return x.trim(); });
-  for (var i=0;i<finals.rows.length;i++){
-    var r = finals.rows[i];
-    var k = keyCols.map(function(kc){ return r[kc] == null ? '' : String(r[kc]); }).join('||');
-    if (k === keyStr) return r;
+    } catch (e) {
+      row[cStatus] = 'error';
+      row[cErr] = String(e);
+      errs++;
+    }
+
+    values[r] = row;
   }
-  return null;
-}
 
-/* === Résolution des destinataires par défaut (inchangé v0.7) === */
-function resolveRecipient_(ss, type, row) {
-  var to = '', cc = '';
-  if (type === 'INSCRIPTION_NEW') {
-    var csv = readParam_(ss, PARAM_KEYS.TO_FIELDS_INSCRIPTIONS) || 'Courriel,Parent 1 - Courriel,Parent 2 - Courriel';
-    to = collectEmailsFromRow_(row, csv);
+  // Flush
+  if (proc > 0) {
+    sh.getRange(2,1,values.length,w).setValues(values);
   }
-  if (!to) { to = readParam_(ss, 'MAIL_TO_NEW_INSCRIPTIONS') || ''; cc = readParam_(ss, 'MAIL_CC_NEW_INSCRIPTIONS') || ''; }
-  return { to: to, cc: cc };
+
+  // --- Résumés CSV (V2.0) basés sur les mails effectivement traités (INSCRIPTION_NEW)
+  var summaries = false;
+  (function __sendSummariesV2__(){
+    var dry2 = String(readParam_(ss, 'DRY_RUN')||'').toUpperCase() === 'TRUE';
+    var redirect2 = String(readParam_(ss, 'DRY_REDIRECT_EMAIL')||'').trim();
+    var allowSend = !dry2 || (!!redirect2);
+
+    var candidates = Array.isArray(sentNewIns) ? sentNewIns : [];
+    summaries = candidates.length > 0; // reflète la réalité du run, même si on n’envoie pas (DRY sans redirect)
+
+    if (!candidates.length) {
+      try { appendImportLog_(ss, 'MAIL_SUMMARIES_NONE', JSON.stringify({ reason:'no_sent_new', dry: dry2 })); } catch(_){}
+      return;
+    }
+    if (!allowSend) {
+      try { appendImportLog_(ss, 'MAIL_SUMMARIES_SKIPPED', JSON.stringify({ reason:'dry_no_redirect', count:candidates.length })); } catch(_){}
+      return;
+    }
+
+    try {
+      // Helpers
+      function tz(){ return Session.getScriptTimeZone() || 'America/Toronto'; }
+      function fmtDate(d){ return Utilities.formatDate(d, tz(), 'yyyy-MM-dd HH:mm'); }
+      function to8(x){ return String(x||'').replace(/\D/g,'').slice(-8).padStart(8,'0'); }
+
+      // JOUEURS pour enrichir (noms + articles)
+      var J = readSheetAsObjects_(ss.getId(), SHEETS.JOUEURS).rows || [];
+      var JByP8 = {};
+      for (var jx=0;jx<J.length;jx++){
+        var JJ = J[jx] || {};
+        var p8j = to8(JJ['Passeport #'] || JJ['Passeport'] || '');
+        if (p8j) JByP8[p8j] = JJ;
+      }
+
+      function inferBandFromSecteurId_(secteurId){
+        // On priorise MAIL_SECTEURS si possible
+        var band = bandOfSecteur_(secteurId);
+        if (band) return band;
+        // Fallback regex si SecteurId non référencé
+        var s = String(secteurId||'').toUpperCase();
+        if (/(U4|U5|U6|U7|U8)/.test(s)) return 'U4-U8';
+        if (/(U9|U10|U11|U12)/.test(s)) return 'U9-U12';
+        if (/(U13|U14|U15|U16|U17|U18)/.test(s)) return 'U13-U18';
+        return '';
+      }
+
+      function extractOtherProducts_(jr, mainFeeName){
+        var raw = jr && (jr.ArticlesJSON || jr['ArticlesJSON']) || '';
+        var arr = [];
+        if (raw && typeof raw === 'string') {
+          try { var parsed = JSON.parse(raw); if (Array.isArray(parsed)) arr = parsed; } catch(_){}
+        } else if (Array.isArray(raw)) {
+          arr = raw;
+        }
+        var mainNorm = String(mainFeeName||'').trim().toLowerCase();
+        var names = [];
+        for (var i=0;i<arr.length;i++){
+          var p = arr[i] || {};
+          var name = String(p.Produit || p['Produit'] || '').trim();
+          if (!name) continue;
+          if (mainNorm && name.toLowerCase() === mainNorm) continue; // exclure le produit principal
+          names.push(name);
+        }
+        return names.join(', ');
+      }
+
+      // Regrouper par band
+      var byBand = { 'U4-U8': [], 'U9-U12': [], 'U13-U18': [] };
+      for (var i2=0;i2<candidates.length;i2++){
+        var it = candidates[i2] || {};
+        var p8 = to8(it.p8 || '');
+        var jr = p8 ? (JByP8[p8] || {}) : {};
+        var secteurId = it.secteurId || jr.SecteurId || '';
+        var band = inferBandFromSecteurId_(secteurId);
+        if (!band || !byBand[band]) continue;
+
+        // Noms: priorise JOUEURS, sinon découpe NomComplet
+        var prenom = (jr['Prénom']||jr['Prenom']||'').toString();
+        var nom    = (jr['Nom']||'').toString();
+        if ((!prenom || !nom) && it.nomc) {
+          var nc = String(it.nomc).trim();
+          var sp = nc.split(/\s+/);
+          if (sp.length > 1){ prenom = prenom || sp[0]; nom = nom || sp.slice(1).join(' '); }
+          else { nom = nom || nc; }
+        }
+
+        var mainFee = (it.frais || '').toString();
+        var autres  = extractOtherProducts_(jr, mainFee);
+
+        byBand[band].push({
+          p8: p8,
+          nom: nom || '',
+          prenom: prenom || '',
+          frais: mainFee || '',
+          autres: autres || ''
+        });
+      }
+
+      var subjTpl = readParam_(ss, 'MAIL_TEMPLATE_SUMMARY_SUBJECT') || 'Nouveaux inscrits — {{band}} — {{date}}';
+      var bodyTpl = readParam_(ss, 'MAIL_TEMPLATE_SUMMARY_BODY')    || 'Bonjour,<br>Veuillez trouver en pièce jointe la liste des nouveaux inscrits {{band}} ({{count}} membres).';
+
+      function sendSummaryFor_(bandKey, toKey, ccKey) {
+        var list = byBand[bandKey] || [];
+        if (!list.length) return;
+
+        var toS = String(readParam_(ss, toKey) || '').trim();
+        var ccS = String(readParam_(ss, ccKey) || '').trim();
+
+        var toFinal = (!dry2 ? toS : (redirect2 || ''));
+        var ccFinal = (!dry2 ? ccS : '');
+        if (!toFinal) return;
+
+        var csvRows = [['Passeport #','Nom','Prénom','Nom du frais','Autres articles']];
+        for (var j=0;j<list.length;j++){
+          var L = list[j];
+          csvRows.push([L.p8||'', L.nom||'', L.prenom||'', L.frais||'', L.autres||'']);
+        }
+        var csv = csvRows.map(function(arr){ return arr.map(_rg_csvEsc_).join(','); }).join('\n');
+        var filename = 'nouveaux_'+bandKey+'_'+fmtDate(new Date()).replace(/[^\d\-]/g,'')+'.csv';
+        var blob = Utilities.newBlob(csv, 'text/csv', filename);
+
+        var basePayload = { band: bandKey, date: fmtDate(new Date()), count: list.length };
+        var subj = renderTemplate_(subjTpl, basePayload);
+        var body = renderTemplate_(bodyTpl, basePayload);
+        if (dry2 && redirect2) subj = '[DRY] ' + subj;
+
+        if (useGmailApp) {
+          var pt = (typeof _stripHtml_ === 'function') ? _stripHtml_(body) : String(body||'').replace(/<[^>]+>/g,' ').replace(/\s{2,}/g,' ').trim();
+          GmailApp.sendEmail(toFinal, subj, pt, { htmlBody: body, cc: (ccFinal||undefined), name: fromName, attachments: [blob] });
+        } else {
+          MailApp.sendEmail({ to: toFinal, subject: subj, htmlBody: body, name: fromName, cc: (ccFinal||undefined), attachments: [blob] });
+        }
+      }
+
+      sendSummaryFor_('U4-U8',  'MAIL_TO_SUMMARY_U4U8',  'MAIL_CC_SUMMARY_U4U8');
+      sendSummaryFor_('U9-U12', 'MAIL_TO_SUMMARY_U9U12', 'MAIL_CC_SUMMARY_U9U12');
+      sendSummaryFor_('U13-U18','MAIL_TO_SUMMARY_U13U18','MAIL_CC_SUMMARY_U13U18');
+
+      try {
+        var c1 = (byBand['U4-U8']||[]).length, c2=(byBand['U9-U12']||[]).length, c3=(byBand['U13-U18']||[]).length;
+        appendImportLog_(ss, 'MAIL_SUMMARIES_SENT', JSON.stringify({ U4U8:c1, U9U12:c2, U13U18:c3, dry: dry2, redirected: !!redirect2 }));
+      } catch(_){}
+    } catch(_e) {
+      try { appendImportLog_(ss, 'MAIL_SUMMARIES_ERROR', String(_e)); } catch(__){}
+    }
+  })();
+
+  return { processed: proc, sent: sent, errors: errs, summaries: summaries };
 }
 
-/* === OUTBOX helpers (inchangés) === */
-function getMailOutboxHeaders_(){ return ['Type','To','Cc','Sujet','Corps','Attachments','KeyHash','Status','CreatedAt','SentAt','Error']; }
+
+
+/** === OUTBOX helpers (corrigés) ===
+ * Nouvelles colonnes officielles: SecteurId, ReplyTo
+ * - Création: utilise l’ordre ci-dessous.
+ * - Migration: ajoute en fin de feuille toute colonne manquante.
+ */
+function getMailOutboxHeaders_() {
+  // Colonnes “techniques” (avant) + ajout SecteurId et ReplyTo
+  return [
+    'Type',       // p.ex. INSCRIPTION_NEW ou code d’erreur
+    'SecteurId',  // ID exact du secteur matché dans MAIL_SECTEURS
+    'To',
+    'Cc',
+    'ReplyTo',    // nouveau
+    'Sujet',
+    'Corps',
+    'Attachments',
+    'KeyHash',
+    'Status',     // pending|processing|sent|error
+    'CreatedAt',
+    'SentAt',
+    'Error'
+  ];
+}
 function ensureMailOutbox_(ss){
-  var headers=getMailOutboxHeaders_(); var sh=ss.getSheetByName(SHEETS.MAIL_OUTBOX);
-  if (!sh){ sh=ss.insertSheet(SHEETS.MAIL_OUTBOX); sh.getRange(1,1,1,headers.length).setValues([headers]); return sh; }
-  var last=sh.getLastRow(); if (last===0){ sh.getRange(1,1,1,headers.length).setValues([headers]); return sh; }
-  var first=sh.getRange(1,1,1,headers.length).getValues()[0]; var ok=headers.every(function(h,i){ return String(first[i]||'')===h; });
-  if(!ok){ sh.insertRowsBefore(1,1); sh.getRange(1,1,1,headers.length).setValues([headers]); }
+  var headers = getMailOutboxHeaders_();
+  var sh = ss.getSheetByName(SHEETS.MAIL_OUTBOX);
+  if (!sh){
+    sh = ss.insertSheet(SHEETS.MAIL_OUTBOX);
+    sh.getRange(1,1,1,headers.length).setValues([headers]);
+    return sh;
+  }
+
+  // Si la feuille existe mais est vide → pose l’entête complète
+  if (sh.getLastRow() === 0 || sh.getLastColumn() === 0){
+    sh.getRange(1,1,1,headers.length).setValues([headers]);
+    return sh;
+  }
+
+  // Migration douce: ajoute les colonnes manquantes en fin
+  var first = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0].map(String);
+  var have = {}; first.forEach(function(h){ have[h] = true; });
+  var toAdd = headers.filter(function(h){ return !have[h]; });
+
+  if (toAdd.length){
+    sh.insertColumnsAfter(sh.getLastColumn() || 1, toAdd.length);
+    var newHeader = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
+    // Écrit les noms des nouvelles colonnes en fin
+    for (var i = 0; i < toAdd.length; i++){
+      sh.getRange(1, newHeader.length - toAdd.length + i + 1).setValue(toAdd[i]);
+    }
+  }
   return sh;
 }
 
-/** Ajoute (si besoin) 3 colonnes lisibles en fin de MAIL_OUTBOX: Passeport, NomComplet, Frais */
+/** Ajoute (si besoin) des colonnes lisibles à droite: Passeport, NomComplet, Frais (inchangé) */
 function upgradeMailOutboxForDisplay_(ss){
-  var sh = ensureMailOutbox_(ss); // crée si besoin
+  var sh = ensureMailOutbox_(ss); // crée/migre si besoin
   var firstRow = sh.getLastColumn() ? sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0] : [];
   var have = {}; firstRow.forEach(function(h){ have[String(h||'')] = true; });
   var add = [];
@@ -937,33 +693,45 @@ function upgradeMailOutboxForDisplay_(ss){
   });
   if (!add.length) return sh;
 
-  // append les nouvelles colonnes et inscrit l'entête
+  // append les nouvelles colonnes et inscrit l’entête
   sh.insertColumnsAfter(sh.getLastColumn() || 1, add.length);
   var hdr = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
   for (var i=0;i<add.length;i++){
-    sh.getRange(1, hdr.length - add.length + 1 + i).setValue(add[i]);
+    sh.getRange(1, hdr.length - add.length + i + 1).setValue(add[i]);
   }
   return sh;
 }
 
-/** Remplit les colonnes lisibles pour la ligne outbox nouvellement insérée */
-function fillOutboxDenorm_(sh, finalRowObj){
-  if (!finalRowObj) return;
-  var lastRow = sh.getLastRow();
-  var lastCol = sh.getLastColumn();
-  var headers = sh.getRange(1,1,1,lastCol).getValues()[0].map(String);
-  var idx = {}; headers.forEach(function(h,i){ idx[h]=i+1; });
-  function set(colName, val){
-    var c = idx[colName]; if (!c) return;
-    sh.getRange(lastRow, c).setValue(val);
+
+/**
+ * Ajoute N lignes dans MAIL_OUTBOX (idempotence via KeyHash+Type gérée par l’appelant).
+ * rows = array of [Type,To,Cc,Sujet,Corps,Attachments,KeyHash,'pending',now,'','']
+ */
+function enqueueOutboxRows_(ssId, rows) {
+  if (!rows || !rows.length) return 0;
+  var ss = ensureSpreadsheet_(ssId);
+  // ⬇️ Assure l’upgrade pour afficher Passeport/NomComplet/Frais
+  var sh = upgradeMailOutboxForDisplay_(ss);
+  var headers = getMailOutboxHeaders_();
+  var W = headers.length;
+
+  var toWrite = rows.map(function(r){
+    var arr = (r && r.slice) ? r.slice(0, W) : [];
+    while (arr.length < W) arr.push('');
+    return arr;
+  });
+
+  var start = sh.getLastRow() + 1;
+  if (toWrite.length) {
+    sh.insertRowsAfter(sh.getLastRow(), toWrite.length);
+    sh.getRange(start, 1, toWrite.length, W).setValues(toWrite);
   }
-  var passeport = finalRowObj['Passeport #'] || '';
-  var nomc = (((finalRowObj['Prénom']||finalRowObj['Prenom']||'') + ' ' + (finalRowObj['Nom']||'')).trim());
-  var frais = finalRowObj['Nom du frais'] || finalRowObj['Frais'] || finalRowObj['Produit'] || '';
-  set('Passeport', passeport);
-  set('NomComplet', nomc);
-  set('Frais', frais);
+  return toWrite.length;
 }
+
+
+
+
 // utils.js (ou email.js, même fichier que tes enqueues)
 function _normFold_(s){ s=String(s==null?'':s); try{s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,'');}catch(e){} return s.toUpperCase().trim(); }
 
@@ -981,4 +749,617 @@ function isExcludedMember_(ss, row){
     if (hay.indexOf(ali) !== -1) return true;
   }
   return false;
+}
+
+
+
+// --- Utilitaires JOUEURS ---
+function _firstNonEmpty_(){
+  for (var i=0;i<arguments.length;i++){
+    var v = String(arguments[i]||'').trim(); if (v) return v;
+  }
+  return '';
+}
+function _uNumberFromJ_(row, ss){
+  // 1) Priorité: Age numérique (déjà dans JOUEURS)
+  var a = String(row.Age || row['Âge'] || '').trim();
+  var age = a ? parseInt(a, 10) : 0;
+  if (age) return age;
+
+  // 2) Fallback: Date de naissance + année de saison
+  var dob = row.DateNaissance || row['Date de naissance'] || '';
+  if (dob && typeof readParam_ === 'function' && typeof parseSeasonYear_ === 'function' && typeof _extractBirthYearLoose_ === 'function') {
+    var seasonY = parseSeasonYear_(readParam_(ss, 'SEASON_LABEL') || '') || (new Date()).getFullYear();
+    var by = _extractBirthYearLoose_(dob);
+    var a2 = by ? (seasonY - by) : 0;
+    if (a2) return a2;
+  }
+
+  // 3) Dernier recours: U / AgeBracket
+  //    → si c’est une plage “U4-U8”, on prend la BORNE HAUTE (8), pas la basse.
+  var u = String(row.U || row.U2 || row.AgeBracket || '').toUpperCase();
+  var m = u.match(/U\s*0?(\d+)(?:\s*-\s*U?\s*0?(\d+))?/);
+  if (m) {
+    var lo = parseInt(m[1], 10);
+    var hi = m[2] ? parseInt(m[2], 10) : lo;
+    return hi;
+  }
+
+  return 0;
+}
+
+
+function _normalizeP8_(p){
+  return (p == null || p === '') ? '' : String(p).replace(/\D/g,'').padStart(8,'0');
+}
+
+// Famille logique: “WELCOME/INSCRIPTION” vs “ERROR/VALIDATION”
+function _typeFamily_(t){
+  var T = String(t||'').toUpperCase();
+  if (T.indexOf('ERROR')>-1 || T.indexOf('VALIDATION')>-1) return 'ERR';
+  if (T.indexOf('WELCOME')>-1 || T.indexOf('INSCRIPTION')>-1) return 'WELCOME';
+  return T;
+}
+
+// Clé naturelle pour dédup:
+// - WELCOME:      W|<p8>|<saison>
+// - ERROR/VALID:  E|<p8>|<saison>|<code>
+function _naturalOutboxKey_(row, saisonFallback){
+  var fam = _typeFamily_(row['Type'] || row.Type);
+  var p8 = _normalizeP8_(row['Passeport #'] || row['Passeport'] || '');
+  var saison = row['Saison'] || saisonFallback || '';
+  if (!p8 || !saison) return '';
+  if (fam === 'WELCOME'){
+    return 'W|' + p8 + '|' + saison;
+  }
+  if (fam === 'ERR'){
+    var code = String(row['ErrorCode'] || row['Code'] || row['ErreurCode'] || row['SecteurId'] || row['SectorId'] || '').toUpperCase();
+    return code ? ('E|' + p8 + '|' + saison + '|' + code) : '';
+  }
+  return '';
+}
+
+// Lit MAIL_OUTBOX et prépare les sets de dédup (clé naturelle + keyhash legacy)
+function _loadOutboxDedupSets_(ss, saison){
+  var out = readSheetAsObjects_(ss.getId(), 'MAIL_OUTBOX');
+  var sentNat = new Set();
+  var legacyHash = new Set();
+  (out.rows || []).forEach(function(r){
+    var st = String(r['Status'] || r['Statut'] || '').toLowerCase();
+    if (st === 'sent' || st === 'envoye' || st === 'queued' || st === 'enqueued'){
+      var nk = _naturalOutboxKey_(r, r['Saison'] || saison);
+      if (nk) sentNat.add(nk);
+    }
+    if (r['KeyHash']) legacyHash.add(String(r['KeyHash']));
+  });
+  return { sentNat: sentNat, legacyHash: legacyHash };
+}
+
+
+function _genreInit_(g){ return (String(g||'').toUpperCase().charAt(0) || ''); }
+
+/**
+ * Enfile des courriels "INSCRIPTION_NEW" à partir de JOUEURS, en gelant le Secteur et ses templates.
+ * - Source unique: JOUEURS (aucun fallback INSCRIPTIONS).
+ * - N’enfile QUE si un secteur actif (MAIL_SECTEURS) match (Umin/Umax + Genre {F|M|X|*}).
+ * - Écrit un snapshot secteur dans MAIL_OUTBOX: SecteurId, To, Cc, ReplyTo, SubjectTpl, BodyTpl, AttachIdsCSV.
+ * - Zéro recalcul au worker: tout est prêt dans la ligne OUTBOX.
+ *
+ * @param {string} seasonSheetId
+ * @param {Array<string>|Set<string>=} passportsOpt  // (optionnel) filtre sur un sous-ensemble de passeports (p8)
+ * @return {{enqueued:number, skipped_no_sector:number, skipped_invalid:number, dup_skipped:number}}
+ */
+function enqueueWelcomeFromJoueursFast_(seasonSheetId, passportsOpt) {
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
+  var saisonLbl = readParam_(ss, 'SEASON_LABEL') || '';
+
+  // --- 1) OUTBOX + headers
+  var shOut = upgradeMailOutboxForDisplay_(ss);
+  var headers = getMailOutboxHeaders_();
+  var idx = {}; for (var i=0;i<headers.length;i++) idx[headers[i]] = i + 1;
+
+  // helper: retourne l’index 0-based de la 1re colonne trouvée parmi les alias
+  function col() {
+    for (var i=0;i<arguments.length;i++) {
+      var name = arguments[i];
+      if (idx[name]) return idx[name]-1;
+    }
+    return -1;
+  }
+  var cType       = col('Type');
+  var cSecteurId  = col('SecteurId','SecteurID');   // ← tolérant
+  var cProgramBand= col('ProgramBand','Program Band','Program_Band'); // ← optionnel
+  var cTo         = col('To');
+  var cCc         = col('Cc','CC');
+  var cReplyTo    = col('ReplyTo','Reply-To');
+  var cSujet      = col('Sujet','Subject');
+  var cCorps      = col('Corps','Body','BodyHtml');
+  var cAttach     = col('Attachments','AttachIdsCSV');
+  var cKeyHash    = col('KeyHash');
+  var cNatKey     = col('NaturalKey');
+  var cStatus     = col('Status');
+  var cCreatedAt  = col('CreatedAt');
+  var cSentAt     = col('SentAt');
+  var cError      = col('Error');
+  var cPasseport  = col('Passeport');               // backfill lisible
+  var cNomComplet = col('NomComplet','Nom complet');
+  var cFrais      = col('Frais');
+
+  // --- 2) JOUEURS (map) + filtre optionnel
+  var joueursRows = (readSheetAsObjects_(ss.getId(), SHEETS.JOUEURS).rows || []);
+  var filterSet = (function toSet_(x){
+    if (!x) return null;
+    if (x instanceof Set) return x;
+    if (Array.isArray(x)) return new Set(x.map(function(v){ return String(v||'').trim(); }));
+    var out = new Set(); try { Object.keys(x).forEach(function(k){ if (x[k]) out.add(String(k).trim()); }); } catch(e){}
+    return out;
+  })(passportsOpt);
+
+  function _normP8_(p){ return (p==null||p==='')?'':String(p).replace(/\D/g,'').padStart(8,'0'); }
+
+  var joueursByP = {};
+  for (var r=0; r<joueursRows.length; r++){
+    var row = joueursRows[r];
+    var p = _normP8_(row['Passeport #'] || row['Passeport'] || '');
+    if (!p) continue;
+    if (filterSet && !filterSet.has(p)) continue;
+    joueursByP[p] = row;
+  }
+  var allP = Object.keys(joueursByP);
+
+  // --- 3) MAIL_SECTEURS actifs
+  var sectorsObj = readSheetAsObjects_(ss.getId(), 'MAIL_SECTEURS');
+  var sectors = (sectorsObj.rows||[]).filter(function(s){
+    var active = String(s['Active']||'').trim().toUpperCase();
+    return (active==='TRUE' || active==='1' || active==='YES' || active==='OUI');
+  }).map(function(s){
+    return {
+      SecteurId:    String(s['SecteurId']||s['SecteurID']||'').trim(), // ← accepte SecteurID aussi
+      Label:        String(s['Label']||'').trim(),
+      Umin:         parseInt(String(s['Umin']||'').replace(/[^\d]/g,''), 10) || 0,
+      Umax:         parseInt(String(s['Umax']||'').replace(/[^\d]/g,''), 10) || 0,
+      Genre:        String(s['Genre']||'*').trim().toUpperCase() || '*',
+      To:           String(s['To']||'').trim(),
+      Cc:           String(s['Cc']||'').trim(),
+      ReplyTo:      String(s['ReplyTo']||'').trim(),
+      SubjectTpl:   String(s['SubjectTpl']||''),
+      BodyTpl:      String(s['BodyTpl']||''),
+      AttachIdsCSV: String(s['AttachIdsCSV']||'')
+    };
+  });
+
+  // index O(1) par SecteurId pour fallback ultra-rapide
+  var secById = {};
+  for (var si=0; si<sectors.length; si++){
+    var s = sectors[si];
+    if (s.SecteurId) secById[s.SecteurId] = s;
+  }
+
+  function _matchSectorFor_(U_num, G) {
+    var cand = sectors.filter(function(s){
+      return (s.Umin <= U_num && U_num <= s.Umax) &&
+             (s.Genre === G || s.Genre === 'X' || s.Genre === '*');
+    });
+    if (!cand.length) return null;
+    function scoreOf_(s){
+      var gScore = (s.Genre === G) ? 3 : (s.Genre === 'X' ? 2 : 1);
+      var width = Math.max(1, s.Umax - s.Umin + 1);
+      return (gScore * 1000) - width;
+    }
+    cand.sort(function(a,b){ return scoreOf_(b) - scoreOf_(a); });
+    return cand[0];
+  }
+
+  // --- 4) Dédup OUTBOX (Type|KeyHash) + dédup naturel W|p8|saison
+  var existing = {};
+  var sentNatWelcome = new Set(); // W|p8|saison
+  var last = shOut.getLastRow();
+  if (last >= 2) {
+    var w2 = shOut.getLastColumn();
+    var data = shOut.getRange(2,1,last-1,w2).getDisplayValues();
+    var H = shOut.getRange(1,1,1,w2).getDisplayValues()[0].map(String);
+    var colType    = H.indexOf('Type');
+    var colKH      = H.indexOf('KeyHash');
+    var colPassTxt = H.indexOf('Passeport');
+    var colStatus  = H.indexOf('Status');
+    var colCreated = H.indexOf('CreatedAt');
+
+    if (colType>=0 && colKH>=0){
+      for (var i=0;i<data.length;i++){
+        var t = String(data[i][colType]||'').trim();
+        var k = String(data[i][colKH]||'').trim();
+        if (t && k) existing[t+'|'+k] = 1;
+      }
+    }
+
+    var y = (function(lbl){ var m=String(lbl||'').match(/(\d{4})/); return m ? (+m[1]) : (new Date()).getFullYear(); })(saisonLbl);
+    for (var j=0;j<data.length;j++){
+      var tR = (colType>=0)   ? String(data[j][colType]  ||'').toUpperCase() : '';
+      var st = (colStatus>=0) ? String(data[j][colStatus]||'').toLowerCase() : '';
+      var pT = (colPassTxt>=0)? String(data[j][colPassTxt]||'') : '';
+      var cA = (colCreated>=0)? new Date(data[j][colCreated]) : null;
+      if (!/WELCOME|INSCRIPTION/.test(tR)) continue;
+      if (!pT) continue;
+      if (!(st==='sent' || st==='queued' || st==='pending')) continue;
+      if (!(cA && !isNaN(+cA) && cA.getFullYear() === y)) continue;
+      var p8x = _normP8_(pT);
+      if (p8x) sentNatWelcome.add('W|' + p8x + '|' + saisonLbl);
+    }
+  }
+
+  // --- helpers
+  function _makeKeyHash_(p8, saison, type){
+    try {
+      var s = JSON.stringify({ p:p8, s:saison||'', t:(type||'') });
+      var dig = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s);
+      return Utilities.base64Encode(dig);
+    } catch(e) { return (p8+'|'+(saison||'')+'|'+(type||'')); }
+  }
+  function _genreInit_(g){
+    var s = String(g||'').trim().toUpperCase();
+    if (s.startsWith('M')) return 'M';
+    if (s.startsWith('F')) return 'F';
+    return 'X';
+  }
+  function _resolveToFromJoueur_(jr, sec){
+    // secteur peut forcer un To
+    var sTo = String((sec && (sec.To || sec.to)) || '').trim();
+    if (sTo) return sTo;
+    // sinon: JOUEURS
+    var csv = String((jr && jr.Courriels) || '').trim();
+    if (!csv) {
+      var c1 = (jr && jr.CourrielPrimaire) || '';
+      var p1 = (jr && jr.CourrielParent1) || '';
+      var p2 = (jr && jr.CourrielParent2) || '';
+      csv = [c1,p1,p2].filter(Boolean).join('; ');
+    }
+    csv = csv.replace(/[|]/g, ';').replace(/\s*;\s*/g,'; ').replace(/^[;,\s]+|[;,\s]+$/g,'');
+    return csv;
+  }
+  function _isTruthy_(v){
+    if (v === true) return true;
+    var s = String(v || '').trim().toUpperCase();
+    return (s === 'TRUE' || s === 'OUI' || s === 'YES' || s === '1');
+  }
+  function _programBandFromU_(U_num){
+    if (U_num>=4  && U_num<=8 ) return 'U4-U8';
+    if (U_num>=9  && U_num<=12) return 'U9-U12';
+    if (U_num>=13 && U_num<=18) return 'U13-U18';
+    return '';
+  }
+
+  // --- 5) Build OUTBOX (1 pass)
+  var now = new Date();
+  var TYPE = 'INSCRIPTION_NEW';
+  var rowsOut = [];
+  var stats = { enqueued:0, skipped_no_sector:0, skipped_invalid:0, dup_skipped:0 };
+
+  for (var i=0; i<allP.length; i++){
+    var p8 = allP[i];
+    var row = joueursByP[p8];
+    if (!row) { stats.skipped_invalid++; continue; }
+
+    // must have an inscription
+    if (!_isTruthy_(row.hasInscription || row['hasInscription'] || row['HasInscription'])) {
+      stats.skipped_invalid++; // pas d'inscription → pas de welcome
+      continue;
+    }
+
+    var U_num = Number(_uNumberFromJ_(row, ss) || 0);
+    if (!U_num) { stats.skipped_invalid++; continue; }
+    var G = _genreInit_(row['Genre'] || row['Identité de genre'] || row['Identité de Genre'] || '');
+
+    // 1) match secteur via U/Genre
+    var sec = _matchSectorFor_(U_num, G);
+
+    // 2) fallback O(1) : si pas trouvé, on tente JOUEURS.SecteurId
+    if (!sec) {
+      var sidJ = String(row['SecteurId'] || row['SecteurID'] || '').trim();
+      if (sidJ && secById[sidJ]) sec = secById[sidJ];
+    }
+
+    if (!sec) { stats.skipped_no_sector++; continue; }
+
+    var data = buildDataFromRow_(row) || {};
+    data.U_num = U_num;
+    if (!data.U)  data.U  = 'U' + U_num;
+    if (!data.U2) data.U2 = 'U' + (U_num < 10 ? ('0'+U_num) : U_num);
+    if (!data.genreInitiale) data.genreInitiale = G;
+
+    var toCsv   = _resolveToFromJoueur_(row, sec);
+    if (!toCsv) { stats.skipped_invalid++; continue; }
+
+    var subject = renderTemplate_(sec.SubjectTpl||'', data);
+    var body    = renderTemplate_(sec.BodyTpl||'', data);
+    var keyHash = _makeKeyHash_(p8, data.saison || saisonLbl, TYPE);
+    var natKey  = 'W|' + p8 + '|' + saisonLbl;
+
+    // dédup naturel & legacy
+    if (sentNatWelcome.has(natKey)) { stats.dup_skipped++; continue; }
+    if (existing[TYPE+'|'+keyHash]) { stats.dup_skipped++; continue; }
+
+    // ProgramBand dérivé directement de U (O(1))
+    var programBand = _programBandFromU_(U_num);
+
+    // construire la ligne selon colonnes disponibles
+    var line = new Array(headers.length); for (var z=0; z<line.length; z++) line[z] = '';
+
+    if (cType       >=0) line[cType]       = TYPE;
+    if (cSecteurId  >=0) line[cSecteurId]  = (sec.SecteurId || String(row['SecteurId']||row['SecteurID']||'').trim());
+    if (cProgramBand>=0) line[cProgramBand]= programBand;
+    if (cTo         >=0) line[cTo]         = toCsv;
+    if (cCc         >=0) line[cCc]         = sec.Cc || '';
+    if (cReplyTo    >=0) line[cReplyTo]    = sec.ReplyTo || '';
+    if (cSujet      >=0) line[cSujet]      = subject;
+    if (cCorps      >=0) line[cCorps]      = body;
+    if (cAttach     >=0) line[cAttach]     = sec.AttachIdsCSV || '';
+    if (cKeyHash    >=0) line[cKeyHash]    = keyHash;
+    if (cNatKey     >=0) line[cNatKey]     = natKey;
+    if (cStatus     >=0) line[cStatus]     = 'pending';
+    if (cCreatedAt  >=0) line[cCreatedAt]  = now;
+    if (cSentAt     >=0) line[cSentAt]     = '';
+    if (cError      >=0) line[cError]      = '';
+
+    // backfill lisible (pour résumés)
+    if (cPasseport  >=0) line[cPasseport]  = data.passeport || p8;
+    if (cNomComplet >=0) line[cNomComplet] = data.nomcomplet || (((row['Prénom']||row['Prenom']||'') + ' ' + (row['Nom']||'')).trim());
+    if (cFrais      >=0) line[cFrais]      = sec.Label || ''; // pour "welcome", on met le label du secteur
+
+    rowsOut.push(line);
+    existing[TYPE+'|'+keyHash] = 1;
+    sentNatWelcome.add(natKey);
+  }
+
+  // --- 6) Ecriture (1 pass)
+  if (rowsOut.length) {
+    enqueueOutboxRows_(ss.getId(), rowsOut);
+  }
+
+  return {
+    enqueued: rowsOut.length,
+    skipped_no_sector: stats.skipped_no_sector,
+    skipped_invalid: stats.skipped_invalid,
+    dup_skipped: stats.dup_skipped
+  };
+}
+
+
+
+// === FAST: enfile tous les e-mails de VALIDATION en 1 passe (à partir de ERREURS) ===
+function enqueueValidationMailsFromErreursFast_(seasonId, codeFilterOpt){
+  var ss  = SpreadsheetApp.openById(seasonId);
+  var saisonLbl = readParam_(ss, 'SEASON_LABEL') || '';
+  var shO = upgradeMailOutboxForDisplay_(ss);
+  var hdr = getMailOutboxHeaders_();
+  var idx = getHeadersIndex_(shO, hdr.length);
+
+  // ---- Certaines erreurs doivent quand même partir même sans entrée INSCRIPTIONS
+  var ALLOW_ERR_WITHOUT_FINAL = {
+    'U13U18_CAMP_SEUL': true
+    // ajoute ici d'autres codes qui n'ont pas forcément de "final" (si besoin)
+  };
+
+  // ---- Dédup OUTBOX existant
+  var existing = {};               // legacy Type||KeyHash
+  var sentNatErr = new Set();      // naturel E|p8|saison|code
+  var last = shO.getLastRow();
+  if (last >= 2) {
+    var V = shO.getRange(2, 1, last - 1, hdr.length).getDisplayValues();
+    var H = shO.getRange(1, 1, 1, hdr.length).getDisplayValues()[0].map(String);
+    var iT = H.indexOf('Type');
+    var iKH= H.indexOf('KeyHash');
+    var iP = H.indexOf('Passeport');
+    var iSt= H.indexOf('Status');
+    var iCr= H.indexOf('CreatedAt');
+
+    // legacy
+    if (iT>=0 && iKH>=0){
+      for (var i = 0; i < V.length; i++) {
+        var t = String(V[i][iT] || '').trim();
+        var kh= String(V[i][iKH]|| '').trim();
+        if (t && kh) existing[t + '||' + kh] = true;
+      }
+    }
+
+    // naturel (même saison, via CreatedAt.year)
+    var y = (function(lbl){ var m=String(lbl||'').match(/(\d{4})/); return m ? (+m[1]) : (new Date()).getFullYear(); })(saisonLbl);
+    function to8(x){ return String(x||'').replace(/\D/g,'').slice(-8).padStart(8,'0'); }
+    for (var j=0;j<V.length;j++){
+      var tR = (iT>=0)? String(V[j][iT]||'').trim().toUpperCase() : '';
+      var st = (iSt>=0)? String(V[j][iSt]||'').trim().toLowerCase() : '';
+      var pT = (iP>=0)? String(V[j][iP]||'') : '';
+      var cA = (iCr>=0)? new Date(V[j][iCr]) : null;
+
+      if (!(st==='sent' || st==='queued' || st==='pending')) continue;
+      if (!(cA && !isNaN(+cA) && cA.getFullYear() === y)) continue;
+
+      var p8 = to8(pT);
+      if (!p8) continue;
+
+      // Ici, Type en outbox == code d’erreur (U7_8_SANS_2E_SEANCE, etc.)
+      if (tR && p8) sentNatErr.add('E|' + p8 + '|' + saisonLbl + '|' + tR);
+    }
+  }
+
+  // ---- Secteurs (ceux avec ErrorCode)
+  var sectors = _loadMailSectors_(ss).filter(function(s){ return !!String(s.errorCode||'').trim(); });
+  if (!sectors.length) return { scanned:0, matched:0, deduped:0, queued:0 };
+
+  var secByCode = {};
+  sectors.forEach(function(s){ secByCode[String(s.errorCode).trim()] = s; });
+
+  // ---- Helpers
+  function to8(x){ return String(x||'').replace(/\D/g,'').slice(-8).padStart(8,'0'); }
+  function _firstNonEmpty_(){ for (var i=0;i<arguments.length;i++){ var v=String(arguments[i]||'').trim(); if(v) return v; } return ''; }
+
+  // ---- Index INSCRIPTIONS (p8||Saison → {row,kh})
+  var finals = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS).rows || [];
+  var keyColsCsv = readParam_(ss, PARAM_KEYS.KEY_COLS) || 'Passeport #,Saison';
+  var keyCols = keyColsCsv.split(',').map(function(x){ return x.trim(); });
+
+  var finalByPass8Season = {};
+  for (var iF=0;iF<finals.length;iF++){
+    var R = finals[iF] || {};
+    var pass = String(R['Passeport #'] || R['Passeport'] || '').trim(); if (!pass) continue;
+    var p8 = to8(pass);
+    var saz = String(R['Saison'] || '').trim();
+
+    var keyStr = keyCols.map(function(kc){ return R[kc] == null ? '' : String(R[kc]); }).join('||');
+    var kh = Utilities.base64EncodeWebSafe(Utilities.newBlob(keyStr).getBytes());
+
+    finalByPass8Season[p8 + '||' + saz] = { row: R, kh: kh };
+  }
+
+  // ---- Index JOUEURS (p8 → row)
+  var J = readSheetAsObjects_(ss.getId(), SHEETS.JOUEURS).rows || [];
+  var JByP8 = {};
+  for (var jx=0;jx<J.length;jx++){
+    var JJ = J[jx] || {};
+    var p8j = to8(JJ['Passeport #'] || JJ['Passeport'] || '');
+    if (p8j) JByP8[p8j] = JJ;
+  }
+
+  // ---- Lecture ERREURS
+  var E = readSheetAsObjects_(ss.getId(), SHEETS.ERREURS).rows || [];
+  if (!E.length) return { scanned:0, matched:0, deduped:0, queued:0 };
+
+  var outRows = [];
+  var denorm  = [];
+  var scanned = 0, matched = 0, deduped = 0, queued = 0;
+  var only = codeFilterOpt ? String(codeFilterOpt).trim() : '';
+
+  // --- Collecteur pour log propre (un seul append)
+  var fallbackHits = [];
+  var byCode = {};
+
+  for (var r=0; r<E.length; r++){
+    var e = E[r]; scanned++;
+
+    var code = String(e['Code'] || e['ErrorCode'] || e['Type'] || '').trim();
+    if (!code) continue;
+    if (only && code !== only) continue;
+
+    var sec = secByCode[code];
+    if (!sec) continue; // IMPORTANT: il faut un secteur configuré pour ce code
+
+    var passRaw = e['Passeport #'] || e['Passeport'] || '';
+    var saison  = String(e['Saison'] || '').trim();
+    if (!passRaw || !saison) continue;
+
+    var p8 = to8(passRaw);
+    if (!p8) continue;
+
+    var fk = p8 + '||' + saison;
+    var k = finalByPass8Season[fk] || { row:null, kh:null };
+
+    // ---- Fallback si pas d'INSCRIPTIONS pour ce code (ex.: U13U18_CAMP_SEUL)
+    if ((!k.kh || !k.row) && ALLOW_ERR_WITHOUT_FINAL[code] === true) {
+      var keyStrFallback = [p8, saison, code, 'NO_INSCR'].join('||');
+      var khFallback = Utilities.base64EncodeWebSafe(Utilities.newBlob(keyStrFallback).getBytes());
+      k = { row: {}, kh: khFallback };
+      fallbackHits.push({ code: code, passport8: p8, saison: saison });
+      byCode[code] = (byCode[code] || 0) + 1;
+    }
+
+    // Si on n'a toujours pas de kh (et pas autorisé en fallback), on skip
+    if ((!k.kh || !k.row) && !ALLOW_ERR_WITHOUT_FINAL[code]) continue;
+
+    if (typeof _isCoachMemberSafe_ === 'function' && _isCoachMemberSafe_(ss, k.row)) continue;
+    if (typeof isExcludedMember_   === 'function' && isExcludedMember_(ss, k.row))   continue;
+
+    // dédup naturel (E|p8|saisonCourante|code) — borne à la saison courante
+    var natKey = 'E|' + p8 + '|' + saisonLbl + '|' + code;
+    if (sentNatErr.has(natKey)) { deduped++; continue; }
+
+    // dédup legacy (Type||KeyHash), ici Type == code
+    var existingKey = code + '||' + k.kh;
+    if (existing[existingKey]) { deduped++; continue; }
+
+    var jr = JByP8[p8] || {};
+    var email = _firstNonEmpty_(jr.Courriels, jr.CourrielPrimaire, jr.CourrielParent1, jr.CourrielParent2);
+
+    var payload = {};
+    try {
+      payload = buildDataFromRow_(k.row) || {};
+      if (jr) {
+        if (!payload.prenom)     payload.prenom     = jr['Prénom']||jr['Prenom']||'';
+        if (!payload.nomcomplet) payload.nomcomplet = (jr.NomComplet || (((jr['Prénom']||jr['Prenom']||'') + ' ' + (jr.Nom||'')).trim()));
+      }
+      payload.error_code    = code;
+      payload.error_label   = String(e['Message']||'').trim() || code;
+      payload.error_details = String(e['Contexte']||'').trim();
+    } catch(_){}
+
+    var subj = sec.subj ? renderTemplate_(sec.subj, payload) : '';
+    var body = sec.body ? renderTemplate_(sec.body, payload) : '';
+
+    var arr = new Array(hdr.length).fill('');
+    function put(col, val){ var i = idx[col]; if (i) arr[i-1] = val; }
+
+    put('Type',      code);
+    put('SecteurId', sec.id || sec.SecteurId || '');
+    put('To', (sec.to || sec.To || email || ''));
+    if (sec.cc)      put('Cc', sec.cc);
+    if (sec.replyTo) put('ReplyTo', sec.replyTo);
+    if (subj)        put('Sujet', subj);
+    if (body)        put('Corps', body);
+    if (sec.attachCsv) put('Attachments', sec.attachCsv);
+    put('KeyHash',   k.kh);
+    if (idx['NaturalKey']) put('NaturalKey', natKey);
+    put('Status',   'pending');
+    put('CreatedAt', new Date());
+    put('Error', JSON.stringify({ label: payload.error_label || code, details: payload.error_details || '' }));
+
+    outRows.push(arr);
+    denorm.push({ row: k.row, jr: jr, err: e });
+    existing[existingKey] = true;
+    sentNatErr.add(natKey);
+    matched++; queued++;
+  }
+
+  if (!outRows.length) {
+    // log propre des fallbacks même s'il n'y a rien à écrire
+    if (fallbackHits.length) {
+      try {
+        appendImportLog_(ss, 'MAIL_QUEUE_ERRORS_NO_FINAL_FALLBACK',
+          JSON.stringify({ count: fallbackHits.length, byCode: byCode }));
+      } catch(_) {}
+    }
+    return { scanned: scanned, matched: matched, deduped: deduped, queued: 0 };
+  }
+
+  // ---- Écriture batch
+  var startRow = shO.getLastRow() + 1;
+  enqueueOutboxRows_(ss.getId(), outRows);
+
+  // ---- Backfill lisible (non-bloquant)
+  try {
+    var n = denorm.length;
+    var pass = new Array(n), nomc = new Array(n), frais = new Array(n);
+    for (var z=0; z<n; z++){
+      var src = denorm[z] || {};
+      var r0  = (src.row || {});
+      var jr0 = (src.jr  || {});
+      var e0  = (src.err || {});
+      var ptxt = (typeof normalizePassportToText8_ === 'function')
+        ? normalizePassportToText8_(r0['Passeport #'] || r0['Passeport'] || e0['Passeport #'] || e0['Passeport'] || '')
+        : String(r0['Passeport #'] || r0['Passeport'] || e0['Passeport #'] || e0['Passeport'] || '');
+      pass[z]  = [ ptxt ];
+      nomc[z]  = [ (jr0.NomComplet || (((jr0['Prénom']||jr0['Prenom']||'') + ' ' + (jr0.Nom||'')).trim())) ];
+      frais[z] = [ e0['Nom du frais'] || e0['Frais'] || e0['Produit'] || r0['Nom du frais'] || r0['Frais'] || r0['Produit'] || '' ];
+    }
+    if (idx['Passeport'])  shO.getRange(startRow, idx['Passeport'],  n, 1).setValues(pass);
+    if (idx['NomComplet']) shO.getRange(startRow, idx['NomComplet'], n, 1).setValues(nomc);
+    if (idx['Frais'])      shO.getRange(startRow, idx['Frais'],      n, 1).setValues(frais);
+  } catch(_){ /* non bloquant */ }
+
+  // ---- Log unique des fallbacks, après écriture
+  if (fallbackHits.length) {
+    try {
+      appendImportLog_(ss, 'MAIL_QUEUE_ERRORS_NO_FINAL_FALLBACK',
+        JSON.stringify({ count: fallbackHits.length, byCode: byCode }));
+    } catch(_) {}
+  }
+
+  return { scanned: scanned, matched: matched, deduped: deduped, queued: queued };
 }

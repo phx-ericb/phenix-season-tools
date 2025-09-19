@@ -6,7 +6,7 @@ if (typeof log_ !== 'function') {
       Logger.log('[' + ts + '][' + code + '] ' + (details || ''));
       // Si tu veux écrire aussi dans la feuille IMPORT_LOG du classeur de saison:
       try {
-        var ss = SpreadsheetApp.openById(getSeasonId_());
+        var ss = getSeasonSpreadsheet_(getSeasonId_());
         var sh = ss.getSheetByName('IMPORT_LOG');
         if (sh) sh.appendRow([ts, String(code || ''), String(details || '')]);
       } catch (e) { /* silencieux si la feuille n’existe pas */ }

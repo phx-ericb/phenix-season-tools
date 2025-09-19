@@ -1,137 +1,181 @@
-// --- Helpers "ignore frais (RÉTRO)" ---
-// normalise (trim, minuscule, sans accents)
-function SR_norm_(s) {
-  return String(s || '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
+/* ======================= dashboard/src/server_rules.js ======================= */
+/* FAST STRICT — aucun fallback legacy, logs explicites, zéro récursion. */
+
+function _getSeasonSS_() {
+  return getSeasonSpreadsheet_(getSeasonId_());
 }
 
-// Vrai si le "Nom du frais" doit être ignoré selon RETRO_IGNORE_FEES_CSV (+ RETRO_COACH_FEES_CSV)
-function SR_isIgnoredFeeRetro_(ss, fee) {
-  var v = SR_norm_(fee);
-  if (!v) return false;
-
-  var baseCsv  = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || '';
-  var coachCsv = readParam_(ss, 'RETRO_COACH_FEES_CSV') || '';
-  var toks = (baseCsv + (baseCsv&&coachCsv?',':'') + coachCsv)
-    .split(',').map(SR_norm_).filter(Boolean);
-
-  if (toks.indexOf(v) >= 0) return true;            // exact
-  for (var i = 0; i < toks.length; i++)             // contains
-    if (v.indexOf(toks[i]) >= 0) return true;
-
-  // filet lexical si paramétrage incomplet
-  if (/(entraineur|entra[îi]neur|coach)/i.test(String(fee || ''))) return true;
-
-  return false;
-}
-
-
-function getRules(seasonId) {
-  return _wrap('getRules', function(){
-    var ss = getSeasonSpreadsheet_(seasonId);
-    var sh = ss.getSheetByName('RETRO_RULES_JSON');
-    var text = sh && sh.getLastRow()>0 ? String(sh.getRange(1,1).getValue()||'') : '';
-    if (!text) {
-      var p=ss.getSheetByName('PARAMS'); if (p) { var values=p.getDataRange().getValues();
-        for (var i=1;i<values.length;i++) if (values[i][0]==='RETRO_RULES_JSON') { text=String(values[i][1]||''); break; }
-      }
+/* -------- Bridges pour écrire ERREURS (utilise LIB si dispo, sinon fallback) -------- */
+function _rulesWriteFull_bridge(ss, errors, header) {
+  try {
+    if (typeof LIB !== 'undefined' && LIB && typeof LIB._rulesWriteFull_ === 'function') {
+      return LIB._rulesWriteFull_(ss, errors, header);
     }
-    var parsed=null, ok=true, err=''; if (text && String(text).trim()) { try { parsed=JSON.parse(text);} catch(e){ ok=false; err=String(e);} }
-    return _ok({ jsonText:text, parsed:parsed, parsedOk:ok, error:err });
-  });
-}
-function setRules(seasonId, jsonText) {
-  return _wrap('setRules', function(){
-    try { if (jsonText && jsonText.trim()) JSON.parse(jsonText); } catch(e) { throw new Error('Invalid JSON: ' + e); }
-    var sh = getSeasonSpreadsheet_(seasonId).getSheetByName('RETRO_RULES_JSON') || getSeasonSpreadsheet_(seasonId).insertSheet('RETRO_RULES_JSON');
-    sh.clear(); sh.getRange(1,1).setValue(jsonText);
-    return _ok(null,'Rules saved');
-  });
-}
-// ---------- server_rules.js ----------
-// Cache global partagé entre tous les fichiers (5 minutes)
-var __retroRulesCache = (typeof __retroRulesCache !== 'undefined')
-  ? __retroRulesCache
-  : { at: 0, data: null };
-
-/**
- * Charge les règles rétro depuis PARAM ou la feuille 'RETRO_RULES_JSON'.
- * Renvoie toujours un Array (éventuellement vide). Cache 5 min.
- */
-function SR_loadRetroRules_(ss) {
-  var now = Date.now();
-  if (__retroRulesCache.data && (now - __retroRulesCache.at) < 5 * 60 * 1000) {
-    return __retroRulesCache.data;
-  }
-
-  // 1) PARAM direct
-  var raw = readParam_(ss, PARAM_KEYS.RETRO_RULES_JSON) || '';
-
-  // 2) Feuille "RETRO_RULES_JSON" si vide
-  if (!raw) {
-    var shJson = ss.getSheetByName('RETRO_RULES_JSON');
-    if (shJson && shJson.getLastRow() >= 1 && shJson.getLastColumn() >= 1) {
-      var vals = shJson.getDataRange().getDisplayValues();
-      var pieces = [];
-      for (var i = 0; i < vals.length; i++) {
-        for (var j = 0; j < vals[i].length; j++) {
-          var cell = vals[i][j];
-          if (cell != null && String(cell).trim() !== '') pieces.push(String(cell));
-        }
-      }
-      raw = pieces.join('\n');
-      appendImportLog_(ss, 'RETRO_RULES_JSON_SHEET_READ', 'chars=' + raw.length);
+    if (typeof _rulesWriteFull_ === 'function') {
+      return _rulesWriteFull_(ss, errors, header);
     }
+  } catch (e) {
+    // si l'impl de la lib jette, on tombera sur le fallback ci-dessous
   }
 
-  // 3) Parse JSON si présent
-  if (raw) {
-    try {
-      var arr = JSON.parse(raw);
-      var rulesFromJson = Array.isArray(arr) ? arr : [];
-      __retroRulesCache = { at: now, data: rulesFromJson };
-      return rulesFromJson;
-    } catch (e) {
-      appendImportLog_(ss, 'RETRO_RULES_JSON_PARSE_FAIL', String(e));
-    }
+  // Fallback minimal : (ré)écrit entièrement ERREURS
+  var sh = ss.getSheetByName('ERREURS') || ss.insertSheet('ERREURS');
+  sh.clearContents();
+  var H = Array.isArray(header) && header.length ? header
+        : ['Passeport #','PS','Courriel','Type','Message','Saison','Frais','CreatedAt'];
+  sh.getRange(1, 1, 1, H.length).setValues([H]);
+
+  if (Array.isArray(errors) && errors.length) {
+    sh.getRange(2, 1, errors.length, H.length).setValues(errors);
   }
-
-  // 4) Fallback: règles dérivées des PARAMS (par défauts raisonnables)
-  var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-sé,adulte,ligue';
-  var adapteCsv = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte';
-  var campCsv   = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS)   || 'camp de sélection u13,camp selection u13,camp u13';
-  var photoOn   = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
-  var photoCol  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
-  var warnMmDd  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
-  var absDate   = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
-
-  var rules = [
-    { id:'ignore_fees', enabled:true, scope:'both',
-      when:{ field:'Nom du frais', contains_any: ignoreCsv.split(',') },
-      action:{ type:'ignore_row' } },
-    { id:'adapte_flag', enabled:true, scope:'both',
-      when:{ field:'Nom du frais', contains_any: adapteCsv.split(',') },
-      action:{ type:'set_member_field', field:'adapte', value:1 } },
-    // CDP via catalogue
-    { id:'cdp_2', enabled:true, scope:'articles',
-      when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT', text_contains_any:['2','2 entrainements'] },
-      action:{ type:'set_member_field_max', field:'cdp', value:2 } },
-    { id:'cdp_1', enabled:true, scope:'articles',
-      when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT' },
-      action:{ type:'set_member_field_max', field:'cdp', value:1 } },
-    { id:'camp_u13', enabled:true, scope:'articles',
-      when:{ field:'Nom du frais', contains_any: campCsv.split(',') },
-      action:{ type:'set_member_field', field:'camp', value:'Oui' } }
-  ];
-  if (photoOn && photoCol) {
-    rules.push({ id:'photo_policy', enabled:true, scope:'member',
-      action:{ type:'compute_photo', expiry_col:photoCol, warn_mmdd:warnMmDd, abs_date:absDate }});
-  }
-  appendImportLog_(ss, 'RETRO_RULES_JSON_FALLBACK', 'using PARAMS-derived defaults');
-
-  __retroRulesCache = { at: now, data: rules };
-  return rules;
 }
+
+function _rulesUpsertForPassports_bridge(ss, newErrors, touchedSet, header) {
+  try {
+    if (typeof LIB !== 'undefined' && LIB && typeof LIB._rulesUpsertForPassports_ === 'function') {
+      return LIB._rulesUpsertForPassports_(ss, newErrors, touchedSet, header);
+    }
+    if (typeof _rulesUpsertForPassports_ === 'function') {
+      return _rulesUpsertForPassports_(ss, newErrors, touchedSet, header);
+    }
+  } catch (e) { /* tombe sur fallback */ }
+
+  // Fallback : supprime les lignes des passeports touchés puis append newErrors
+  var sh = ss.getSheetByName('ERREURS') || ss.insertSheet('ERREURS');
+  if (sh.getLastRow() < 1) {
+    var H = Array.isArray(header) && header.length ? header
+          : ['Passeport #','PS','Courriel','Type','Message','Saison','Frais','CreatedAt'];
+    sh.getRange(1,1,1,H.length).setValues([H]);
+  }
+  var Hdr = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0] || [];
+  var cP = Hdr.indexOf('Passeport #'); if (cP < 0) cP = Hdr.indexOf('Passeport');
+
+  if (cP >= 0 && touchedSet && touchedSet.size && sh.getLastRow() > 1) {
+    var rng = sh.getRange(2,1, sh.getLastRow()-1, sh.getLastColumn()).getValues();
+    var rowsToDel = [];
+    for (var i=0;i<rng.length;i++) {
+      var p = String(rng[i][cP]||'').replace(/\D/g,'').padStart(8,'0');
+      if (touchedSet.has(p)) rowsToDel.push(2+i);
+    }
+    rowsToDel.sort(function(a,b){ return b-a; }).forEach(function(r){ sh.deleteRow(r); });
+  }
+
+  if (Array.isArray(newErrors) && newErrors.length) {
+    sh.insertRowsAfter(sh.getLastRow(), newErrors.length);
+    sh.getRange(sh.getLastRow()-newErrors.length+1, 1, newErrors.length, (Hdr.length||newErrors[0].length))
+      .setValues(newErrors);
+  }
+}
+
+/* --------- Sélection stricte du builder FAST (+ logging route) --------- */
+
+function _pickFastBuilder_(ss) {
+  // Priorité: LIB._rulesBuildErrorsFast_
+  if (typeof LIB !== 'undefined' && LIB && typeof LIB._rulesBuildErrorsFast_ === 'function') {
+    appendImportLog_(ss, 'RULES_FAST_ROUTE', { route: 'LIB._rulesBuildErrorsFast_' });
+    return {
+      build: function(touchedSet) { return LIB._rulesBuildErrorsFast_(ss, touchedSet || null); },
+      writeFull: function(errs, header) { return LIB._rulesWriteFull_(ss, errs, header); },
+      upsert: function(errs, touchedSet, header) { return LIB._rulesUpsertForPassports_(ss, errs, touchedSet, header); }
+    };
+  }
+
+  // Repli strict: global _rulesBuildErrorsFast_ (défini dans library-si/src/source.js)
+  if (typeof _rulesBuildErrorsFast_ === 'function') {
+    appendImportLog_(ss, 'RULES_FAST_ROUTE', { route: '_rulesBuildErrorsFast_' });
+    return {
+      build: function(touchedSet) { return _rulesBuildErrorsFast_(ss, touchedSet || null); },
+      writeFull: function(errs, header) { return _rulesWriteFull_(ss, errs, header); },
+      upsert: function(errs, touchedSet, header) { return _rulesUpsertForPassports_(ss, errs, touchedSet, header); }
+    };
+  }
+
+  appendImportLog_(ss, 'RULES_FAST_ROUTE_FAIL', { reason: 'no-fast-builder' });
+  throw new Error('FAST rules builder introuvable (LIB._rulesBuildErrorsFast_ / _rulesBuildErrorsFast_)');
+}
+
+/* ----------------------------- FULL (FAST STRICT) ---------------------------- */
+
+function runEvaluateRules() {
+  var ss = getSeasonSpreadsheet_(getSeasonId_());
+
+  if (LIB && typeof LIB.runEvaluateRulesFast_ === 'function') {
+    appendImportLog_(ss, 'RULES_FAST_ROUTE', JSON.stringify({ path: 'LIB.runEvaluateRulesFast_' }));
+    return LIB.runEvaluateRulesFast_(ss);
+  }
+
+  if (typeof _rulesBuildErrorsFast_ === 'function' && typeof _rulesWriteFull_ === 'function') {
+    appendImportLog_(ss, 'RULES_FAST_ROUTE', JSON.stringify({ path: '_rulesBuildErrorsFast_ + _rulesWriteFull_' }));
+    var res = _rulesBuildErrorsFast_(ss, null);
+    return _rulesWriteFull_(ss, res.errors, res.header);
+  }
+
+  appendImportLog_(ss, 'RULES_FAST_ROUTE_FAIL', JSON.stringify({ reason: 'no-fast-builder' }));
+  throw new Error('FAST rules builder introuvable (LIB.runEvaluateRulesFast_ / _rulesBuildErrorsFast_)');
+}
+
+function runEvaluateRulesFast_() {
+  var ss = getSeasonSpreadsheet_(getSeasonId_());
+
+  if (typeof LIB !== 'undefined' && LIB && typeof LIB._rulesBuildErrorsFast_ === 'function') {
+    appendImportLog_(ss, 'RULES_FAST_ROUTE', { path: 'LIB._rulesBuildErrorsFast_' });
+    var res = LIB._rulesBuildErrorsFast_(ss); // FULL => touchedSet=null
+    _rulesWriteFull_(ss, res.errors, res.header);
+    appendImportLog_(ss, 'RULES_DONE', { written: res.errors.length, ledRows: res.ledgerCount, joueursRows: res.joueursCount });
+    return { written: res.errors.length };
+  }
+
+  appendImportLog_(ss, 'RULES_FAST_ROUTE_FAIL', { reason: 'no-fast-builder' });
+  throw new Error('FAST rules builder introuvable (LIB._rulesBuildErrorsFast_)');
+}
+
+/* ---------------------------- INCR (FAST STRICT) ----------------------------- */
+
+function evaluateSeasonRulesIncr(passports, ss) {
+  ss = ss || getSeasonSpreadsheet_(getSeasonId_());
+  var set = (typeof _toPassportSet_ === 'function') ? _toPassportSet_(passports) : new Set((passports||[]).map(String));
+
+  if (LIB && typeof LIB._rulesBuildErrorsIncrFast_ === 'function') {
+    appendImportLog_(ss, 'RULES_FAST_ROUTE', JSON.stringify({ path: 'LIB._rulesBuildErrorsIncrFast_' }));
+    var res = LIB._rulesBuildErrorsIncrFast_(passports, ss);
+    var up = (LIB && typeof LIB._rulesUpsertForPassports_ === 'function') ? LIB._rulesUpsertForPassports_ : _rulesUpsertForPassports_;
+    if (typeof up !== 'function') throw new Error('_rulesUpsertForPassports_ manquant');
+    return up(ss, res.errors, set, res.header);
+  }
+
+  if (typeof _rulesBuildErrorsFast_ === 'function' && typeof _rulesUpsertForPassports_ === 'function') {
+    appendImportLog_(ss, 'RULES_FAST_ROUTE', JSON.stringify({ path: '_rulesBuildErrorsFast_ + _rulesUpsertForPassports_' }));
+    var res2 = _rulesBuildErrorsFast_(ss, set);
+    return _rulesUpsertForPassports_(ss, res2.errors, set, res2.header);
+  }
+
+  appendImportLog_(ss, 'RULES_FAST_ROUTE_FAIL', JSON.stringify({ reason: 'no-fast-builder' }));
+  throw new Error('FAST INCR rules introuvable (LIB._rulesBuildErrorsIncrFast_ / _rulesBuildErrorsFast_)');
+}
+
+function evaluateSeasonRulesIncr(passports, ss) {
+  ss = ss || getSeasonSpreadsheet_(getSeasonId_());
+
+  if (typeof LIB !== 'undefined' && LIB && typeof LIB._rulesBuildErrorsIncrFast === 'function') {
+    appendImportLog_(ss, 'RULES_FAST_ROUTE', { path: 'LIB._rulesBuildErrorsIncrFast' });
+    var res = LIB._rulesBuildErrorsIncrFast(passports, ss);
+    _rulesUpsertForPassports_(ss, res.errors, _toPassportSet_(passports), res.header);
+    appendImportLog_(ss, 'RULES_INCR_DONE', { touched: passports.length, written: res.errors.length });
+    return { written: res.errors.length };
+  }
+
+  appendImportLog_(ss, 'RULES_FAST_ROUTE_FAIL', { reason: 'no-fast-builder-incr' });
+  throw new Error('FAST INCR builder introuvable (LIB._rulesBuildErrorsIncrFast)');
+}
+
+
+/* ----------------------------- utilitaire public ----------------------------- */
+
+function runEvaluateRulesIncrFromLastTouched(ssOrId) {
+  var ss = ssOrId || _getSeasonSS_();
+  var raw = PropertiesService.getDocumentProperties().getProperty('LAST_TOUCHED_PASSPORTS') || '[]';
+  var list = (raw[0] === '[' ? JSON.parse(raw) : raw.split(',')).map(function(x){ return String(x||'').trim(); }).filter(Boolean);
+  return evaluateSeasonRulesIncrFast_(list, ss);
+}
+
+/* ======================= FIN server_rules.js (FAST STRICT) =================== */

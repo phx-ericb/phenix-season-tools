@@ -31,6 +31,8 @@
     <div class="tab" data-tab="mappings">Mappings</div>
     <div class="tab" data-tab="exports">Exports</div>
     <div class="tab" data-tab="journal">Journal</div>
+    <div class="tab" data-tab="membres">Membres</div>
+
   </div>
 
   <div class="container">
@@ -39,11 +41,39 @@
       <div id="busy-saison" class="section-busy"><div class="spinner"></div><span class="busy-text">…</span></div>
 
       <!-- KPI -->
-      <div class="stats">
-        <div class="stat"><div class="kpi" id="kpiInscriptions">—</div><div class="lbl">Inscriptions</div><div class="sub" id="kpiInscriptionsSub">Total cumul.</div></div>
-        <div class="stat"><div class="kpi" id="kpiArticles">—</div><div class="lbl">Articles</div><div class="sub" id="kpiArticlesSub">Actifs</div></div>
-        <div class="stat"><div class="kpi" id="kpiErreurs">—</div><div class="lbl">Erreurs</div><div class="sub" id="kpiErreursSub">Dernier import</div></div>
-        <div class="stat"><div class="kpi" id="kpiOutbox">—</div><div class="lbl">Courriels en file</div><div class="sub" id="kpiOutboxSub">Prêts à l’envoi</div></div>
+      <div class="stats"><div class="stat">
+        <div class="kpi" id="kpiInscriptions">—</div>
+        <div class="lbl">Inscriptions</div>
+        <div class="sub" id="kpiInscriptionsSub">Total cumul.</div>
+      </div>
+      <div class="stat">
+        <div class="kpi" id="kpiArticles">—</div>
+        <div class="lbl">Articles</div>
+        <div class="sub" id="kpiArticlesSub">Actifs</div>
+      </div>
+      <div class="stat">
+        <div class="kpi" id="kpiErreurs">—</div>
+        <div class="lbl">Erreurs</div>
+        <div class="sub" id="kpiErreursSub">Dernier import</div>
+      </div>
+      <div class="stat">
+        <div class="kpi" id="kpiOutbox">—</div>
+        <div class="lbl">Courriels en file</div>
+        <div class="sub" id="kpiOutboxSub">Prêts à l’envoi</div>
+      </div>
+      
+      </div>
+      <div class="stat">
+        <div class="kpi" id="kpiJoueurs">0</div>
+        <div class="sub">JOUEURS (actifs)</div>
+      </div>
+      <div class="stat">
+        <div class="kpi" id="kpiLedger">0</div>
+        <div class="sub">ACHATS_LEDGER</div>
+      </div>
+      <div class="stat">
+        <div class="kpi" id="kpiPhoto">0 / 0</div>
+        <div class="sub">Photo: expirée / bientôt</div>
       </div>
 
       <!-- Bouton Import (dry) + badge état exports -->

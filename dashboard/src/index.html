@@ -13,12 +13,33 @@
     main{background:#fafafa;padding:18px;overflow:auto;}
     .view{display:none}.view.active{display:block}
     .fade{opacity:.5;pointer-events:none;transition:opacity .2s}
+    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:8px 12px;border-radius:10px;border:0;background:#0f4599;color:#fff;cursor:pointer}
+    .btn.secondary{background:#334155}
+    .card{background:#fff;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+    .subcard{background:#f8fafc;border-radius:10px;padding:12px}
+    .kpi{font-size:28px;font-weight:700;line-height:1}
+    .sub{font-size:12px;opacity:.8}
+    .table{width:100%;border-collapse:collapse}
+    .table th,.table td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;font-size:14px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+    .table-wrap{overflow:auto}
+    .pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:8px}
+    .section-busy{display:flex;gap:8px;align-items:center}
+    .spinner{width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:#0f4599;border-radius:50%;animation:spin 0.9s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .note{opacity:.8}
   </style>
   <script>
+    // === helpers DOM ===
+    const $ = sel => document.querySelector(sel);
+
     // Promisify google.script.run
     function call_(fn, args = []) {
       return new Promise((resolve, reject) => {
-        google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn].apply(null, args);
+        try{
+          google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn].apply(null, args);
+        }catch(e){ reject(e); }
       });
     }
 
@@ -31,9 +52,13 @@
       const el = document.getElementById(id);
       if (el) el.classList.add('active');
 
-      // Hook: ouvrir Imports => rafraîchir le journal
-      if (id === 'view-imports') {
+      // Hooks de navigation
+      if (id === 'view-dashboard') {
         try { refreshImportLog(); } catch(_) {}
+      }
+      if (id === 'view-joueurs') {
+        // auto-charge la première page si rien n'a été chargé
+        if (!window.__JOU_loaded__) { try { joueursLoadPage(0); } catch(_) {} }
       }
     }
     window.addEventListener('hashchange', () => routeTo());
@@ -73,9 +98,7 @@
         const res = await call_('runImportAndExports');      // import global + exports rétro
         alert(res?.ok ? 'Import global terminé ✅' : 'Import global terminé (vérifie Journal).');
         try { await refreshImportLog(); } catch(_) {}
-        try { await loadKpisBoth(); } catch(_) {}
-        try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}        
-
+        try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}
       }catch(e){
         console.error(e); alert('Erreur: import global.');
       }finally{
@@ -89,25 +112,38 @@
         const res = await call_('runImportValidationMembres'); // met à jour MEMBRES_GLOBAL
         alert(`Import Membres: +${res?.created ?? 0} créés, ${res?.updated ?? 0} maj, ${res?.unchanged ?? 0} inchangés`);
         try { await refreshImportLog(); } catch(_) {}
-        try { await loadKpisBoth(); } catch(_) {}
         try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}
       } catch(e){ console.error(e); alert('Erreur import Membres Spordle.'); }
       finally { if (btn) btn.disabled = false; }
     }
 
-  async function refreshImportLog(){
-    const tb = document.querySelector('#tabImportLog tbody');
-    if (tb) tb.innerHTML = '<tr><td colspan="3">Chargement…</td></tr>';
-    try{
-      const mode = document.getElementById('importLogMode')?.value || 'essential';
-      const rows = await call_('getRecentActivity', [mode, 50]); // mode + limit
-      renderImportLog(rows || []);
-    }catch(e){
-      console.warn(e);
-      if (tb) tb.innerHTML = '<tr><td colspan="3">Impossible de lire le journal.</td></tr>';
+    async function refreshImportLog(){
+      const tb = document.querySelector('#tabImportLog tbody');
+      if (tb) tb.innerHTML = '<tr><td colspan="3">Chargement…</td></tr>';
+      try{
+        const mode = document.getElementById('importLogMode')?.value || 'essential';
+        const rows = await call_('getRecentActivity', [mode, 50]); // mode + limit
+        renderImportLog(rows || []);
+      }catch(e){
+        console.warn(e);
+        if (tb) tb.innerHTML = '<tr><td colspan="3">Impossible de lire le journal.</td></tr>';
+      }
     }
-  }
 
+    async function doImportGlobalIncr(btn){
+      if (btn) btn.disabled = true;
+      try{
+        const res = await call_('runImportRulesExportsIncr');   // flow incrémental
+        alert(res?.ok ? 'Import incrémental terminé ✅' : 'Import incrémental: vérifie Journal.');
+        try { await refreshImportLog(); } catch(_) {}
+        try { await loadDashboardKpis(); } catch(_) {}
+        try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}
+      }catch(e){
+        console.error(e); alert('Erreur: import incrémental.');
+      }finally{
+        if (btn) btn.disabled = false;
+      }
+    }
 
     function renderImportLog(rows){
       const tb = document.querySelector('#tabImportLog tbody');
@@ -122,147 +158,106 @@
         tb.innerHTML = '<tr><td colspan="3">Aucune activité récente.</td></tr>';
       }
     }
+async function doImportFullFlow(btn){
+  if (btn) btn.disabled = true;
+  try{
+    const res = await call_('runImportRulesExportsFull'); // ← appel direct vers server_flow.js
+    alert(res?.ok ? 'Import FULL terminé ✅' : 'Import FULL terminé (vérifie Journal).');
+    try { await refreshImportLog(); } catch(_) {}
+  }catch(e){
+    console.error(e);
+    alert('Erreur: import FULL.');
+  }finally{
+    if (btn) btn.disabled = false;
+  }
+}
 
-    // ==== KPI (existant) ====
-    async function loadKpisBoth(){
-      try{
-        const k = await call_('getKpisBoth');
-        if (!k) return;
-        // joueurs
-        document.getElementById('kji').textContent = k.joueurs?.photosEchues ?? '—';
-        document.getElementById('kjd').textContent = k.joueurs?.photosARenouv ?? '—';
-        document.getElementById('kjt').textContent = k.joueurs?.total ?? '—';
-        // entraineurs
-        document.getElementById('kei').textContent = k.entraineurs?.photosEchues ?? '—';
-        document.getElementById('ked').textContent = k.entraineurs?.photosARenouv ?? '—';
-        document.getElementById('kec').textContent = k.entraineurs?.casiersExp ?? '—';
-        document.getElementById('ket').textContent = k.entraineurs?.total ?? '—';
-      }catch(e){ console.warn(e); }
+
+   
+    // ====== J O U E U R S  (nouvel onglet parent) ======
+    let J_state = { offset:0, limit:50, total:0 };
+    function joueursQuery(){
+      return {
+        offset: J_state.offset, limit: J_state.limit,
+        search: $('#jSearch')?.value || '',
+        band:   $('#jBand')?.value || '',
+        adapte: $('#jAdapte')?.value || '',
+        photo:  $('#jPhoto')?.value || ''
+      };
     }
-    window.addEventListener('DOMContentLoaded', loadKpisBoth);
 
-    async function showJoueursPhotosProblemes(){
+    async function joueursLoadPage(offset){
+      if (typeof offset === 'number') J_state.offset = Math.max(0, offset);
+      const tb = $('#tabJoueurs tbody');
+      if (tb) tb.innerHTML = '<tr><td colspan="7">Chargement…</td></tr>';
       try{
-        const list = await call_('getJoueursPhotosProblemes');
-        if (!list || !list.length) { alert('Aucun joueur à corriger.'); return; }
-        const lines = list.map(x => `${x.Nom}, ${x.Prenom} — ${x.Passeport} — ${x.StatutPhoto}${x.PhotoExpireLe?(' ('+x.PhotoExpireLe+')'):''}`);
-        alert(lines.join('\n').slice(0, 3000));
+        // On suppose côté serveur: apiListJoueursPage(opt)
+        const res = await call_('apiListJoueursPage', [ joueursQuery() ]);
+        window.__JOU_loaded__ = true;
+        J_state.total = res?.total || 0;
+        J_state.limit = res?.limit || J_state.limit;
+        const rows = res?.rows || [];
+        tb.innerHTML = '';
+        rows.forEach(r=>{
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td><a href="#" data-p="${r.passeport}">${r.passeport||''}</a></td>
+            <td>${r.nom||''}</td>
+            <td>${r.prenom||''}</td>
+            <td>${r.band||''}</td>
+            <td>${r.adapte||''}</td>
+            <td>${(r.photo||'')}${r.photoDate?(' ('+r.photoDate+')'):''}</td>
+            <td>${r.courriels||''}</td>`;
+          tb.appendChild(tr);
+        });
+        if (!rows.length){
+          tb.innerHTML = '<tr><td colspan="7" style="text-align:center;opacity:.7">Aucun joueur.</td></tr>';
+        }
+        $('#jPageInfo').textContent = `${Math.min(J_state.offset+1, J_state.total)}–${Math.min(J_state.offset+J_state.limit, J_state.total)} / ${J_state.total}`;
       }catch(e){
-        console.error(e); alert('Erreur lors de la récupération des joueurs à corriger.');
+        console.error(e);
+        if (tb) tb.innerHTML = '<tr><td colspan="7">Erreur de chargement (apiListJoueursPage).</td></tr>';
       }
     }
 
-    // ===== ENTRAINEURS (existant) =====
-    let ENTRAINEURS_CACHE = [];
-
-// helpers UI
-function _parseDateSafe_(s){
-  if (!s) return null;
-  const t = Date.parse(String(s).replace(/(\d{2})-(\d{2})-(\d{4})/, '$3-$2-$1')); // tolère dd-mm-yyyy
-  return isNaN(t) ? null : new Date(t);
-}
-function _isPastOrToday_(d){
-  if (!d) return false;
-  const today = new Date(); today.setHours(0,0,0,0);
-  const x = new Date(d); x.setHours(0,0,0,0);
-  return x.getTime() <= today.getTime();
-}
-
-// Fabrique des statuts lisibles depuis les flags colonnes
-function deriveCoachRowComputed_(x){
-  // Photo
-  const photoInvalid = Number(x.PhotoInvalideFlag) === 1 || String(x.PhotoInvalideFlag).toLowerCase()==='true';
-  const due = _parseDateSafe_(x.PhotoInvalideDuesLe);
-  let StatutPhoto = 'OK';
-  if (photoInvalid) {
-    StatutPhoto = 'ÉCHUE';
-  } else if (due && _isPastOrToday_(due)) {
-    StatutPhoto = 'À RENOUVELER';
-  }
-
-  // Casier
-  const casierBad = Number(x.CasierExpireFlag) === 1 || String(x.CasierExpireFlag).toLowerCase()==='true';
-  const StatutCasier = casierBad ? 'EXPIRÉ' : 'OK';
-
-  // Validité coach
-  const coachValid = Number(x.CoachValid) === 1 || String(x.CoachValid).toLowerCase()==='true';
-  const ValidBadge = coachValid ? '✅ VALIDE' : '❌ NON VALIDE';
-  const Reason = (x.InvalidReason || '').trim();
-
-  return {
-    ...x,
-    StatutPhoto,
-    StatutCasier,
-    ValidBadge,
-    Reason,
-  };
-}
-
-async function loadEntraineurs(){
-  try{
-    // getEntraineursAggreges doit retourner au minimum :
-    // Passeport, Nom, Prenom, Roles[], PhotoExpireLe, PhotoInvalideFlag, PhotoInvalideDuesLe,
-    // CasierExpireFlag, CoachValid, InvalidReason
-    const list = await call_('getEntraineursAggreges');
-    ENTRAINEURS_CACHE = (list || []).map(deriveCoachRowComputed_);
-    renderEntraineurs();
-  }catch(e){ console.error(e); alert('Erreur chargement entraîneurs.'); }
-}
-
-function renderEntraineurs(){
-  const q = (document.getElementById('fSearch')?.value || '').toLowerCase();
-  const fP = document.getElementById('fPhoto')?.value;   // '', 'OK', 'ÉCHUE', 'À RENOUVELER'
-  const fC = document.getElementById('fCasier')?.value;  // '', 'OK', 'EXPIRÉ'
-
-  const rows = ENTRAINEURS_CACHE.filter(x=>{
-    if (q) {
-      const bag = [
-        x.Passeport, x.Nom, x.Prenom,
-        (x.Roles||[]).join(' | '),
-        x.PhotoExpireLe, x.StatutPhoto, x.StatutCasier,
-        x.Reason || ''
-      ].join(' ').toLowerCase();
-      if (!bag.includes(q)) return false;
+    async function joueursShowDetail(passeport){
+      const box = $('#jDetail');
+      if (box){ box.style.display='block'; box.innerHTML = '<div class="section-busy"><div class="spinner"></div><span class="busy-text">Chargement…</span></div>'; }
+      try{
+        // On suppose côté serveur: apiGetJoueurDetail(passeport)
+        const res = await call_('apiGetJoueurDetail', [passeport]);
+        if (res?.notFound){ box.innerHTML = '<div class="note">Introuvable.</div>'; return; }
+        const j = res?.joueur || {}; const acts = res?.activites || [];
+        box.innerHTML = `<h3>${j.prenom||''} ${j.nom||''} — ${j.passeport||''}</h3>
+          <div><b>Genre:</b> ${j.genre||''} · <b>Band:</b> ${j.band||''} · <b>Adapté:</b> ${j.adapte||''}</div>
+          <div><b>Photo:</b> ${j.photo||''} ${j.photoDate?('('+j.photoDate+')'):''}</div>
+          <div><b>Courriels:</b> ${j.courriels||''}</div>
+          <h4 style="margin-top:8px;">Activités (LEDGER)</h4>
+          <ul>${acts.map(a=>`<li>[${a.type||''}] ${a.nom||''} — ${a.band||''} <i>${a.tags||''}</i></li>`).join('')}</ul>`;
+      }catch(e){
+        console.error(e);
+        if (box) box.innerHTML = '<div class="note">Erreur (apiGetJoueurDetail).</div>';
+      }
     }
-    if (fP && x.StatutPhoto !== fP) return false;
-    if (fC && x.StatutCasier !== fC) return false;
-    return true;
-  });
 
-  const tb = document.querySelector('#tabEntraineurs tbody');
-  if (!tb) return;
-  tb.innerHTML = '';
-  rows.forEach(x=>{
-    const tr = document.createElement('tr');
-    const rolesText = (x.Roles||[]).join('\n');
-    const reason = x.Reason ? `<div class="sub" style="font-size:12px;opacity:.85">${x.Reason}</div>` : '';
-    tr.innerHTML = `
-      <td>${x.Passeport||''}</td>
-      <td>${x.Nom||''}</td>
-      <td>${x.Prenom||''}</td>
-      <td><pre style="margin:0; white-space:pre-wrap;">${rolesText}</pre></td>
-      <td>${x.PhotoExpireLe||''}</td>
-      <td>${x.StatutPhoto||''}</td>
-      <td>${x.StatutCasier||''}</td>
-      <td>${x.ValidBadge}${reason}</td>
-    `;
-    tb.appendChild(tr);
-  });
-
-  if (!rows.length) {
-    tb.innerHTML = `<tr><td colspan="8" style="text-align:center;opacity:.7">Aucun entraîneur ne correspond aux filtres.</td></tr>`;
-  }
-}
-
-// Brancher filtres & trigger initial
-document.addEventListener('DOMContentLoaded', ()=>{
-  loadEntraineurs();
-  ['fSearch','fPhoto','fCasier'].forEach(id=>{
-    const el = document.getElementById(id);
-    el && el.addEventListener('input', renderEntraineurs);
-    el && el.addEventListener('change', renderEntraineurs);
-  });
-});
+    document.addEventListener('DOMContentLoaded', ()=>{
+      // Brancher événements Joueurs
+      $('#jReload')?.addEventListener('click', ()=> joueursLoadPage(0));
+      $('#jPrev')?.addEventListener('click', ()=> joueursLoadPage(Math.max(0, J_state.offset - J_state.limit)));
+      $('#jNext')?.addEventListener('click', ()=> {
+        if (J_state.offset + J_state.limit < J_state.total) joueursLoadPage(J_state.offset + J_state.limit);
+      });
+      ['jSearch','jBand','jAdapte','jPhoto'].forEach(id=>{
+        const el = $('#'+id);
+        el && el.addEventListener('change', ()=> joueursLoadPage(0));
+        el && el.addEventListener('keyup', (e)=>{ if (e.key==='Enter') joueursLoadPage(0); });
+      });
+      // Détail via clic table
+      $('#tabJoueurs')?.addEventListener('click', (e)=>{
+        const a = e.target.closest('a[data-p]'); if (!a) return;
+        e.preventDefault(); joueursShowDetail(a.dataset.p);
+      });
+    });
   </script>
 </head>
 
@@ -271,76 +266,99 @@ document.addEventListener('DOMContentLoaded', ()=>{
     <nav>
       <h1>Back-Office Phénix</h1>
       <a class="link" href="#/dashboard">Tableau de bord</a>
-      <a class="link" href="#/imports">Imports</a> <!-- NOUVEL ONGLET -->
+      <a class="link" href="#/rapports">Rapports</a>
+      <a class="link" href="#/joueurs">Joueurs</a> <!-- NOUVEL ONGLET PARENT -->
       <a class="link" href="#/entraineurs">Entraîneurs</a>
       <a class="link" href="#/parametres" id="nav-params">Paramètres</a>
     </nav>
 
     <main>
-      <!-- DASHBOARD (existant) -->
+      <!-- DASHBOARD (parent) -->
       <section id="view-dashboard" class="view active">
-        <div class="card">
-          <h3>Tableau de bord</h3>
-          <div class="grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:16px;">
-            <div class="subcard">
-              <h4>Joueurs (inscriptions)</h4>
-              <div class="stats" style="display:flex; gap:16px; flex-wrap:wrap;">
-                <div class="stat"><div class="kpi" id="kji">—</div><div class="lbl">Photos</div><div class="sub">Échues</div></div>
-                <div class="stat"><div class="kpi" id="kjd">—</div><div class="lbl">Photos</div><div class="sub">À renouveler</div></div>
-                <div class="stat"><div class="kpi" id="kjt">—</div><div class="lbl">Total</div><div class="sub">Joueurs</div></div>
-              </div>
-              <div class="toolbar" style="margin-top:8px;">
-                <button class="btn secondary" onclick="showJoueursPhotosProblemes()">Voir joueurs à corriger</button>
-              </div>
-            </div>
+        <div class="card" style="margin-bottom:14px;">
+    <h3>Imports</h3>
+    <div class="toolbar" style="gap:8px; margin-top:6px;">
+      <button class="btn" onclick="doImportFullFlow(this)">🚀 Lancer Importation complète</button>
+    </div>
+    <p class="note" style="margin-top:8px;">
+      Ce bouton exécute <code>runImportRulesExportsFull</code> et génère tout en une seule passe.
+    </p>
+  </div>
 
-            <div class="subcard">
-              <h4>Entraîneurs</h4>
-              <div class="stats" style="display:flex; gap:16px; flex-wrap:wrap;">
-                <div class="stat"><div class="kpi" id="kei">—</div><div class="lbl">Photos</div><div class="sub">Échues</div></div>
-                <div class="stat"><div class="kpi" id="ked">—</div><div class="lbl">Photos</div><div class="sub">À renouveler</div></div>
-                <div class="stat"><div class="kpi" id="kec">—</div><div class="lbl">Casiers</div><div class="sub">Expirés</div></div>
-                <div class="stat"><div class="kpi" id="ket">—</div><div class="lbl">Total</div><div class="sub">Entraîneurs</div></div>
-              </div>
-            </div>
-          </div>
-        </div>
+  <div class="card">
+    <h3>Journal des imports</h3>
+    <div class="toolbar" style="margin-bottom:8px;">
+      <label>Vue:</label>
+      <select id="importLogMode" onchange="refreshImportLog()" style="min-width:140px;">
+        <option value="essential" selected>Essentiel</option>
+        <option value="all">Complet</option>
+      </select>
+      <button class="btn secondary" onclick="refreshImportLog()">Actualiser</button>
+    </div>
+    <div class="table-wrap" style="overflow:auto; max-height:420px;">
+      <table id="tabImportLog" class="table">
+        <thead><tr><th style="width:170px;">Date</th><th>Type</th><th>Détails</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>       
+
       </section>
 
-      <!-- IMPORTS (NOUVEAU) -->
-      <section id="view-imports" class="view">
-        <div class="card" style="margin-bottom:14px;">
-          <h3>Imports</h3>
-          <div class="toolbar" style="gap:8px; margin-top:6px;">
-            <button class="btn" onclick="doImportGlobal(this)">Importation globale (inscriptions + articles → exports)</button>
-            <button class="btn secondary" onclick="doImportValidationMembres(this)">Importer Membres Spordle → MEMBRES_GLOBAL</button>
-            <button class="btn" onclick="call_('runSyncInscriptionsEntraineurs', [/* seasonSheetId */])">  Rafraîchir INSCRIPTIONS_ENTRAINEURS
-</button>
-
+<!-- RAPPORTS  -->
+<section id="view-rapports" class="view">
+   <div>
+              <iframe  style="width:100%; aspect-ratio: 16 / 9; height:auto; border:0;" loading="lazy" src="https://lookerstudio.google.com/embed/reporting/12ab0549-8d96-4a3a-b0da-92a19c63494f/page/p_9u5bv38aqd" frameborder="0" allowfullscreen sandbox="allow-storage-access-by-user-activation allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
           </div>
-          <p class="note" style="margin-top:8px;">
-            Astuce&nbsp;: lance d’abord <b>Membres</b>, puis l’<b>Importation globale</b> pour que photo/casier soient à jour dans les exports.
-          </p>
+</section>
+
+
+      <!-- J O U E U R S (nouvel onglet parent) -->
+      <section id="view-joueurs" class="view">
+        <div class="card">
+          <h3>Joueurs — liste</h3>
+          <div class="toolbar" style="margin-bottom:8px;">
+            <input id="jSearch" placeholder="Nom / passeport / email" style="padding:8px; min-width:240px;">
+            <select id="jBand">
+              <option value="">Band</option>
+              <option>U4-U8</option>
+              <option>U9-U12</option>
+              <option>U13-U18</option>
+              <option>Adulte</option>
+            </select>
+            <select id="jAdapte">
+              <option value="">Adapté?</option>
+              <option value="1">Oui</option>
+              <option value="0">Non</option>
+            </select>
+            <select id="jPhoto">
+              <option value="">Photo</option>
+              <option value="missing">Aucune</option>
+              <option value="expired">Expirée</option>
+              <option value="soon">Bientôt</option>
+            </select>
+            <button class="btn" id="jReload">Rechercher</button>
+          </div>
+
+          <div class="table-wrap">
+            <table id="tabJoueurs" class="table">
+              <thead>
+                <tr>
+                  <th>Passeport</th><th>Nom</th><th>Prénom</th><th>Band</th>
+                  <th>Adapté</th><th>Photo</th><th>Courriels</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button class="btn secondary" id="jPrev">◀</button>
+            <span id="jPageInfo" style="min-width:120px;text-align:center">—</span>
+            <button class="btn secondary" id="jNext">▶</button>
+          </div>
+
+          <div id="jDetail" class="card" style="margin-top:10px; display:none;"></div>
         </div>
-
-<div class="card">
-  <h3>Journal des imports</h3>
-  <div class="toolbar" style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-    <label>Vue:</label>
-    <select id="importLogMode" onchange="refreshImportLog()" style="min-width:140px;">
-      <option value="essential" selected>Essentiel</option>
-      <option value="all">Complet</option>
-    </select>
-    <button class="btn secondary" onclick="refreshImportLog()">Actualiser</button>
-  </div>
-  <div class="table-wrap" style="overflow:auto; max-height:420px;">
-    <table id="tabImportLog" class="table">
-      <thead><tr><th style="width:170px;">Date</th><th>Type</th><th>Détails</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-</div>
-
       </section>
 
       <!-- ENTRAÎNEURS (existant) -->
@@ -373,13 +391,12 @@ document.addEventListener('DOMContentLoaded', ()=>{
           </div>
           <div class="table-wrap" style="overflow:auto;">
             <table id="tabEntraineurs" class="table">
-<thead>
-  <tr>
-    <th>Passeport</th><th>Nom</th><th>Prénom</th><th>Rôles</th>
-    <th>Photo (expire)</th><th>Statut photo</th><th>Casier</th><th>Valide ?</th>
-  </tr>
-</thead>
-
+              <thead>
+                <tr>
+                  <th>Passeport</th><th>Nom</th><th>Prénom</th><th>Rôles</th>
+                  <th>Photo (expire)</th><th>Statut photo</th><th>Casier</th><th>Valide ?</th>
+                </tr>
+              </thead>
               <tbody></tbody>
             </table>
           </div>

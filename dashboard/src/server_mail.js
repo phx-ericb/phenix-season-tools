@@ -1,3 +1,4 @@
+// server_mail.js
 /**
  * server_mail.js — endpoints Dashboard (UI “Courriels”)
  * - Gère les secteurs d’envoi (CRUD) dans la feuille MAIL_SECTEURS
@@ -130,22 +131,16 @@ function buildDataFromRow_(row){
 }
 }
 
-
 function _toProperCase_(s) {
   s = String(s||'').toLowerCase();
   return s.replace(/\b\w/g, function(c){ return c.toUpperCase(); });
 }
 
 
-/* -------------------- Constantes feuille secteurs -------------------- */
-var MAIL_SECTORS_SHEET  = 'MAIL_SECTEURS';
-var MAIL_SECTORS_HEADER = ['SecteurId','Label','Umin','Umax','Genre','To','Cc','ReplyTo','SubjectTpl','BodyTpl','AttachIdsCSV','Active'];
-
 /* Helpers locaux MAIL_SECTEURS (header-safe) */
 /* -------------------- Constantes feuille secteurs -------------------- */
 var MAIL_SECTORS_SHEET  = 'MAIL_SECTEURS';
 var MAIL_SECTORS_HEADER = ['SecteurId','Label','Umin','Umax','Genre','To','Cc','ReplyTo','SubjectTpl','BodyTpl','AttachIdsCSV','Active','ErrorCode'];
-
 
 function fetchStagingRowByKeyHash_(ss, keyHash){
   keyHash = String(keyHash||'').trim();
@@ -160,8 +155,6 @@ function fetchStagingRowByKeyHash_(ss, keyHash){
   }
   return null;
 }
-
-
 
 /** "id1, id2 ; id3" -> ['id1','id2','id3'] */
 function _parseAttachIdsCsv_(csv) {
@@ -181,13 +174,11 @@ function _getAttachBlobs_(ids) {
       var f = DriveApp.getFileById(id);
       blobs.push(f.getBlob());
     } catch (e) {
-      // Facultatif : journaliser pour debug
       try { Logger.log('ATTACH_WARN: ' + id + ' (' + e + ')'); } catch(_){}
     }
   }
   return blobs;
 }
-
 
 function _probeAttachIds_(csv) {
   var ids = _parseAttachIdsCsv_(csv);
@@ -220,8 +211,6 @@ function _blobsFromProbe_(probe) {
   return blobs;
 }
 
-
-
 /** (optionnel) strip du HTML pour textBody/plain */
 function _stripHtml_(html) {
   html = String(html || '');
@@ -233,8 +222,6 @@ function _stripHtml_(html) {
              .trim();
   return html;
 }
-
-
 
 function _ms_sheet_(ss){
   var sh = ss.getSheetByName(MAIL_SECTORS_SHEET);
@@ -279,7 +266,6 @@ function _ms_readAll_(ss){
     };
     items.push(it);
   }
-  // tri stable
   items.sort(function(a,b){ return (a.Umin||0)-(b.Umin||0) || (a.Umax||0)-(b.Umax||0) || String(a.Label||'').localeCompare(String(b.Label||'')); });
   return items;
 }
@@ -302,7 +288,6 @@ function _ms_writeRow_(sh, rowIndex, item){
   ];
   sh.getRange(rowIndex, 1, 1, MAIL_SECTORS_HEADER.length).setValues([v]);
 }
-
 
 /* -------------------- Résolution To/subject/body pour un row -------------------- */
 function _resolveToForRow_(ss, row, sectorItem){
@@ -335,7 +320,6 @@ function _findFinalRowByPassport_(ss, passport){
     var r = rows[i];
     var p = String(r['Passeport #']||'').trim();
     if (p === passport) return r;
-    // tolérance si p a été saisi sans zéros initiaux dans Sheet
     if (p && p.replace(/^0+/, '') === passport.replace(/^0+/, '')) return r;
   }
   return null;
@@ -357,7 +341,7 @@ function upsertMailSector(seasonId, item){
   try{
     var ss = getSeasonSpreadsheet_(seasonId);
     var sh = _ms_sheet_(ss);
-    var items = _ms_readAll_(ss); // pour rechercher
+    var items = _ms_readAll_(ss);
     var row = 0;
 
     if (item && item._row) {
@@ -367,9 +351,9 @@ function upsertMailSector(seasonId, item){
       for (var i=0;i<items.length;i++){ if (String(items[i].SecteurId||'')===id) { row = items[i]._row; break; } }
     }
 
-    if (!row) { // append
+    if (!row) {
       row = sh.getLastRow() + 1;
-      if (row === 1) { // feuille vide tout juste créée
+      if (row === 1) {
         sh.getRange(1,1,1,MAIL_SECTORS_HEADER.length).setValues([MAIL_SECTORS_HEADER]);
         row = 2;
       }
@@ -406,7 +390,6 @@ function duplicateMailSector(seasonId, secteurId){
     for (var i=0;i<items.length;i++){ if (String(items[i].SecteurId||'')===id) { src = items[i]; break; } }
     if (!src) return { ok:false, error:'Secteur introuvable' };
 
-    // id unique
     var base = src.SecteurId || 'SEC';
     var copyId = base + '_COPY';
     var exists = items.some(function(x){ return String(x.SecteurId||'')===copyId; });
@@ -432,14 +415,12 @@ function previewSectorForPassport(seasonId, secteurId, passport, itemOverride){
     var row = _findFinalRowByPassport_(ss, passport);
     if (!row) return { ok:false, error:'Passeport introuvable dans INSCRIPTIONS' };
 
-    // Secteur courant (si déjà enregistré) pour fallback des champs non saisis dans le modal
     var items = _ms_readAll_(ss);
     var current = null;
     var id = String(secteurId||'').trim();
     for (var i=0;i<items.length;i++){ if (String(items[i].SecteurId||'')===id) { current = items[i]; break; } }
     var it = Object.assign({}, current||{}, itemOverride||{});
 
-    // Payload (variables {{...}})
     var payload = buildDataFromRow_(row);
     var sb = _resolveSubjectBody_(ss, it, payload);
     var to = _resolveToForRow_(ss, row, it);
@@ -463,11 +444,9 @@ function sendSectorTest(seasonId, item, passport, toTest){
     var replyTo = item && item.ReplyTo ? String(item.ReplyTo).trim() : '';
     var fromName = readParam_(ss, 'MAIL_FROM') || undefined;
 
-    // ---- Attachments (probe + blobs)
     var probe = _probeAttachIds_(item && item.AttachIdsCSV);
     var blobs = _blobsFromProbe_(probe);
 
-    // ---- Envoi
     MailApp.sendEmail({
       to: to,
       subject: sb.subject,
@@ -478,32 +457,26 @@ function sendSectorTest(seasonId, item, passport, toTest){
       attachments: (blobs.length ? blobs : undefined)
     });
 
-    // ---- Feedback pour l’UI
     return { ok:true, data:{ 
       attached: blobs.length,
-      probe: probe  // [{id, ok, name?, mimeType?, size?, error?}, ...]
+      probe: probe
     }};
   } catch(e){ 
     return { ok:false, error:String(e) }; 
   }
 }
 
-
-
 // Lance le worker d’envoi d’outbox (respecte MAIL_BATCH_MAX et DRY_RUN)
-// Essaie d'abord la version locale, sinon tombe sur la version librairie (LIB.*).
 function runSendPendingOutbox(seasonSheetId) {
   try {
     var sid = seasonSheetId || (typeof getSeasonId_ === 'function' ? getSeasonId_() : null);
 
-    // Résolution de l'implémentation
     var implFn = null;
     if (typeof sendPendingOutbox === 'function') {
-      implFn = sendPendingOutbox;                   // impl locale
+      implFn = sendPendingOutbox;                   
     } else if (typeof LIB !== 'undefined' && LIB && typeof LIB.sendPendingOutbox === 'function') {
-      implFn = LIB.sendPendingOutbox;               // impl via librairie
+      implFn = LIB.sendPendingOutbox;               
     } else if (typeof Library !== 'undefined' && Library && typeof Library.sendPendingOutbox === 'function') {
-      // Si ton identifiant de librairie n'est pas "LIB" mais "Library" (ou autre), garde aussi cette branche
       implFn = Library.sendPendingOutbox;
     }
 
@@ -517,8 +490,6 @@ function runSendPendingOutbox(seasonSheetId) {
     return { ok: false, error: '' + e };
   }
 }
-
-
 
 // Aperçu ERREUR (utilise les templates du secteur courant + ajoute {{error_*}})
 function previewErrorForPassport(seasonId, secteurId, passport, errorItem){
@@ -561,38 +532,6 @@ function sendErrorTest(seasonId, secteurItem, passport, toTest, errorItem){
     var subj = renderTemplate_(secteurItem && secteurItem.SubjectTpl || '', payload);
     var body = renderTemplate_(secteurItem && secteurItem.BodyTpl || '', payload);
     if (!subj) subj = 'Validation requise – '+(payload.nomcomplet||'')+' ('+(payload.U||'')+')';
-    if (!body) body = 'Bonjour '+(payload.prenom||'')+',<br>Merci de valider : <b>'+(payload.error_label||payload.error_code||'')+'</b><br><small>'+(payload.error_details||'')+'</small>';
-
-    var to = String(toTest||'').trim(); if (!to) to = Session.getActiveUser().getEmail();
-    var fromName = readParam_(ss, 'MAIL_FROM') || undefined;
-
-    MailApp.sendEmail({
-      to: to,
-      subject: subj,
-      htmlBody: body,
-      name: fromName
-    });
-
-    return { ok:true };
-  } catch(e){ return { ok:false, error:String(e) }; }
-}
-
-
-// Envoi test ERREUR (n’écrit rien dans OUTBOX)
-function sendErrorTest(seasonId, secteurItem, passport, toTest, errorItem){
-  try{
-    var ss = getSeasonSpreadsheet_(seasonId);
-    var row = _findFinalRowByPassport_(ss, passport);
-    if (!row) return { ok:false, error:'Passeport introuvable dans INSCRIPTIONS' };
-
-    var payload = buildDataFromRow_(row);
-    payload.error_code    = String(errorItem && errorItem.code || '').trim();
-    payload.error_label   = String(errorItem && errorItem.label || '').trim();
-    payload.error_details = String(errorItem && errorItem.details || '').trim();
-
-    var subj = renderTemplate_(secteurItem && secteurItem.SubjectTpl || '', payload);
-    var body = renderTemplate_(secteurItem && secteurItem.BodyTpl || '', payload);
-    if (!subj) subj = 'Validation requise – '+(payload.nomcomplet||'')+' ('+(payload.U||'')+')';
     if (!body) body = 'Bonjour '+(payload.prenom||'')+',<br>Merci de valider : <b>'+(payload.error_label||payload.error_code||'')+'</b>';
 
     var to = String(toTest||'').trim() || Session.getActiveUser().getEmail();
@@ -601,4 +540,93 @@ function sendErrorTest(seasonId, secteurItem, passport, toTest, errorItem){
     MailApp.sendEmail({ to: to, subject: subj, htmlBody: body, name: fromName });
     return { ok:true };
   } catch(e){ return { ok:false, error:String(e) }; }
+}
+
+// Queue des nouveaux courriels en mode FAST (dashboard → lib)
+function runQueueNewFast_(ss){
+  var sid = (ss && typeof ss.getId === 'function') ? ss.getId()
+           : (typeof getSeasonId_ === 'function' ? getSeasonId_() : null);
+
+  var lib = (typeof LIB !== 'undefined' && LIB) ? LIB
+          : ((typeof Library !== 'undefined' && Library) ? Library : null);
+
+  if (!lib) throw new Error('Librairie Phénix non chargée (alias LIB/Library manquant).');
+
+  // Assure que MAIL_OUTBOX a les colonnes lisibles (L/M/N) dès maintenant
+  try {
+    var ssLocal = (typeof SpreadsheetApp !== 'undefined') ? SpreadsheetApp.openById(sid) : null;
+    if (ssLocal && typeof upgradeMailOutboxForDisplay_ === 'function') upgradeMailOutboxForDisplay_(ssLocal);
+  } catch (_e) {}
+
+  var __t0 = Date.now();
+
+  // Enqueue bienvenue (JOUEURS) + validations (ERREURS)
+  var r1 = (typeof lib.enqueueWelcomeFromJoueursFast_ === 'function')
+             ? lib.enqueueWelcomeFromJoueursFast_(sid) : { queued: 0 };
+  var __tWelcome = Date.now();
+  appendImportLog_(ss, 'QUEUE_TIMING', JSON.stringify({ step:'fast_welcome_done', ms:(__tWelcome-__t0), queued:r1.queued||0 }));
+
+  var r2 = (typeof lib.enqueueValidationMailsFromErreursFast_ === 'function')
+             ? lib.enqueueValidationMailsFromErreursFast_(sid) : { queued: 0 };
+  var __tErrors = Date.now();
+  appendImportLog_(ss, 'QUEUE_TIMING', JSON.stringify({ step:'fast_errors_done', ms:(__tErrors-__tWelcome), queued:r2.queued||0 }));
+  appendImportLog_(ss, 'QUEUE_TIMING', JSON.stringify({ step:'fast_total', ms:(__tErrors-__t0), queued_total:(r1.queued||0)+(r2.queued||0) }));
+  Logger.log(JSON.stringify({ welcome:r1, errors:r2 }));
+
+  return { queued: (r1.queued || 0) + (r2.queued || 0) };
+}
+
+// Worker (optionnel) – brancher sur la fonction existante runSendPendingOutbox
+function runMailWorker(ss){
+  var sid = (ss && typeof ss.getId === 'function') ? ss.getId()
+           : (typeof getSeasonId_ === 'function' ? getSeasonId_() : null);
+  var res = runSendPendingOutbox(sid);
+  return (res && res.data) ? res.data : { processed: 0 };
+}
+
+/**
+ * Queue all new emails (LEGACY mode) — redirigé vers FAST.
+ */
+function runQueueNew_(ss) {
+  // rétrocompat : on redirige vers la voie FAST
+  return runQueueNewFast_(ss);
+}
+/**
+ * 🔗 Pipeline sélectionné par le flow (server_flow.runImportRulesExportsFull)
+ * Appelé avec (ss, 'AFTER') — enchaîne enqueue FAST + worker; loggue dans IMPORT_LOG.
+ */
+function runMailPipelineSelected_(ssOrId, stage){
+  // Resolve season + spreadsheet
+  var sid = (ssOrId && typeof ssOrId.getId === 'function') ? ssOrId.getId()
+           : (typeof ssOrId === 'string' ? ssOrId
+           : (typeof getSeasonId_ === 'function' ? getSeasonId_() : null));
+  var ss  = (ssOrId && typeof ssOrId.getId === 'function') ? ssOrId : SpreadsheetApp.openById(sid);
+  var stg = String(stage||'AFTER').toUpperCase();
+
+  try { if (typeof appendImportLog_==='function') appendImportLog_(ss,'MAIL_PIPELINE_START', JSON.stringify({ stage: stg })); } catch(_){}
+
+  // 1) Enqueue FAST – INSCRIPTION_NEW (JOUEURS)
+  var qWelcome = (typeof enqueueWelcomeFromJoueursFast_==='function')
+    ? enqueueWelcomeFromJoueursFast_(sid)
+    : (typeof LIB!=='undefined' && LIB.enqueueWelcomeFromJoueursFast_ ? LIB.enqueueWelcomeFromJoueursFast_(sid) : { queued: 0 });
+  try { if (typeof appendImportLog_==='function') appendImportLog_(ss,'MAIL_QUEUE_WELCOME_OK', JSON.stringify(qWelcome)); } catch(_){}
+
+  // 2) Enqueue FAST – Erreurs (ERREURS → MAIL_SECTEURS.ErrorCode)
+  var qErrors = (typeof enqueueValidationMailsFromErreursFast_==='function')
+    ? enqueueValidationMailsFromErreursFast_(sid)
+    : (typeof LIB!=='undefined' && LIB.enqueueValidationMailsFromErreursFast_ ? LIB.enqueueValidationMailsFromErreursFast_(sid) : { queued: 0 });
+  try { if (typeof appendImportLog_==='function') appendImportLog_(ss,'MAIL_QUEUE_ERRORS_OK', JSON.stringify(qErrors)); } catch(_){}
+
+  // 3) Worker – envoie pending (honore DRY_RUN / DRY_REDIRECT_EMAIL)
+  var workerRes = (typeof sendPendingOutbox==='function')
+    ? sendPendingOutbox(sid)
+    : (typeof LIB!=='undefined' && LIB.sendPendingOutbox ? LIB.sendPendingOutbox(sid) : { processed: 0, sent: 0, errors: 0 });
+  try {
+    if (typeof appendImportLog_==='function') {
+      appendImportLog_(ss,'MAIL_WORKER_OK', JSON.stringify(workerRes));
+      appendImportLog_(ss,'MAIL_PIPELINE_END', JSON.stringify({ stage: stg, queued_total: (qWelcome.queued||0)+(qErrors.queued||0) }));
+    }
+  } catch(_){}
+
+  return { ok:true, queued: (qWelcome.queued||0)+(qErrors.queued||0), welcome: qWelcome, errors: qErrors, worker: workerRes };
 }
