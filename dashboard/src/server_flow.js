@@ -168,10 +168,18 @@ function runImportRulesExportsIncr() {
     return { ok: false, error: String(e) };
 
   } finally {
-    try { PropertiesService.getScriptProperties().setProperty('PHENIX_IMPORT_RUNNING', '0'); } catch(_) {}
-    releaseImportLock_(lockGlobal);
-    try { endImportRun_(ctx); } catch(_) {}
+  try { PropertiesService.getScriptProperties().setProperty('PHENIX_IMPORT_RUNNING', '0'); } catch(_) {}
+  releaseImportLock_(lockGlobal);
+  try { endImportRun_(ctx); } catch(_) {}
+
+  // ✅ Trie le log après import pour lisibilité
+  try {
+    var logSheet = ss.getSheetByName('IMPORT_LOG');
+    if (logSheet) logSheet.sort(1, true);
+  } catch (eSort) {
+    Logger.log('Erreur tri IMPORT_LOG: ' + String(eSort));
   }
+}
 }
 
 /**
@@ -228,14 +236,12 @@ function _computeTouchedPassportsFallback_(ss) {
 
 
 /* ----------------------------- FULL PIPELINE -------------------------------- */
-
 function runImportRulesExportsFull() {
   var seasonId = getSeasonId_();
   var lockGlobal = acquireImportLock_(15000);
   var ss = getSeasonSpreadsheet_(seasonId);
 
-  bindActiveSpreadsheet_(ss); // fixe l’“active” pour tout le code legacy
-  // Hints globaux pour code legacy
+  bindActiveSpreadsheet_(ss);
   try {
     PropertiesService.getScriptProperties().setProperty('PHENIX_IMPORT_ACTIVE_SID', seasonId);
     PropertiesService.getScriptProperties().setProperty('PHENIX_IMPORT_RUNNING', '1');
@@ -243,39 +249,20 @@ function runImportRulesExportsFull() {
 
   var ctx = startImportRun_({ seasonId: seasonId, source: 'dashboard-full' });
 
+  var imp = null, rFull = null, mRes = null, gRes = null;
   try {
-    // 0) Import fichiers
-    var imp = (typeof runImporterDonneesSaison === 'function')
-      ? runImporterDonneesSaison(seasonId)
-      : null;
-
-
-    // (0.5) VM REFRESH (GLOBAL→SAISON.MEMBRES_GLOBAL→JOUEURS + PhotoStr)
-    try {
-      var vm = (typeof API_VM_fullRefresh === 'function')
-        ? API_VM_fullRefresh(false)              // pas besoin de force: la détection de nouveauté existe déjà
-        : (typeof API_VM_refreshSeasonSubset === 'function'
-            ? API_VM_refreshSeasonSubset()
-            : { ok:false, error:'API_VM_* not found' });
-      appendImportLog_(ss, 'VM_REFRESH_FULL_OK', vm);
-    } catch (eVM) {
-      appendImportLog_(ss, 'VM_REFRESH_FULL_FAIL', String(eVM));
-    }
-
-
-    
+    // 0) Import principal (met à jour JOUEURS)
+    imp = (typeof runImporterDonneesSaison === 'function') ? runImporterDonneesSaison(seasonId) : null;
 
     // 1) AUGMENTATIONS
     try {
-      var augOpts = { isFull: true, isDryRun: false };
-      runPostImportAugmentations_(seasonId, [], augOpts);
-      appendImportLog_(ss, 'AUG_FULL_PRE_OK', JSON.stringify({ via: 'SHIM' }));
+      runPostImportAugmentations_(seasonId, [], { isFull: true, isDryRun: false });
+      appendImportLog_(ss, 'AUG_FULL_PRE_OK', { via: 'SHIM' });
     } catch (eAugPre) {
       appendImportLog_(ss, 'AUG_FULL_PRE_FAIL', String(eAugPre));
     }
 
     // 2) RÈGLES FULL
-    var rFull;
     try {
       if (typeof runEvaluateRules === 'function') {
         rFull = runEvaluateRules();
@@ -296,14 +283,34 @@ function runImportRulesExportsFull() {
       }
     }
 
-    // 3) EXPORTS
-    var mRes = null, gRes = null;
+    // ✅ 3) MISE À JOUR PHOTOS (avant export)
+    try {
+      const centralId = (typeof getCentralValidationSpreadsheetId_ === 'function')
+        ? getCentralValidationSpreadsheetId_()
+        : null;
+      if (typeof syncMembresGlobalSubsetFromCentral_ === 'function' && centralId) {
+        syncMembresGlobalSubsetFromCentral_(seasonId, centralId);
+      }
+      if (typeof applySeasonMembresToJoueurs_ === 'function') {
+        applySeasonMembresToJoueurs_(seasonId);
+      }
+      if (typeof refreshPhotoStrInJoueurs_ === 'function') {
+        refreshPhotoStrInJoueurs_(seasonId);
+      } else if (typeof refreshPhotoStrInJoueurs__ === 'function') {
+        refreshPhotoStrInJoueurs__(seasonId); // fallback
+      }
+      appendImportLog_(ss, 'VM_REFRESH_FULL_OK', { ok: true });
+    } catch (eRefresh) {
+      appendImportLog_(ss, 'VM_REFRESH_FULL_FAIL', String(eRefresh));
+    }
+
+    // 4) EXPORTS
     try { mRes = runExportRetroMembres(); appendImportLog_(ss, 'EXPORT_MEMBRES_OK', mRes); }
     catch (eM) { appendImportLog_(ss, 'EXPORT_MEMBRES_FAIL', String(eM)); }
     try { gRes = runExportRetroGroupes(); appendImportLog_(ss, 'EXPORT_GROUPES_OK', gRes); }
     catch (eG) { appendImportLog_(ss, 'EXPORT_GROUPES_FAIL', String(eG)); }
 
-    // 4) MAILS
+    // 5) MAILS
     try {
       var stage = String(readParam_(ss, 'MAIL_STAGE') || 'AFTER').trim().toUpperCase();
       if (stage === 'AFTER' && typeof runMailPipelineSelected_ === 'function') {
@@ -313,19 +320,19 @@ function runImportRulesExportsFull() {
       appendImportLog_(ss, 'MAIL_PIPELINE_FAIL', String(e));
     }
 
-    return { ok: true, import: imp, rules: rFull, membres: mRes, groupes: gRes };
-
   } catch (e) {
     appendImportLog_(ss, 'FLOW_FULL_FAIL', String(e));
     return { ok: false, error: String(e) };
 
   } finally {
     try { PropertiesService.getScriptProperties().setProperty('PHENIX_IMPORT_RUNNING', '0'); } catch(_) {}
-    // IMPORTANT: libérer le lock global AVANT de flusher via endImportRun_ (qui flush le backlog)
     releaseImportLock_(lockGlobal);
     try { endImportRun_(ctx); } catch(_) {}
   }
+
+  return { ok: true, import: imp, rules: rFull, membres: mRes, groupes: gRes };
 }
+
 
 /* ------------------------------- HELPERS ------------------------------------ */
 
