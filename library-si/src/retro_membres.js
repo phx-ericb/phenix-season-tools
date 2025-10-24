@@ -723,89 +723,105 @@ function writeRetroMembresSheet(seasonSheetId) {
 function exportRetroMembresXlsxToDrive(seasonSheetId, options) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
 
-  // 0) ON/OFF incrémental via PARAMS
+  // Param dédié (FULL par défaut pour capter les photos modifiées)
+  var windowDays = parseInt(readParam_(ss, 'RETRO_EXPORT_LAST_DAYS_MEMBRES') || '0', 10);
+  var cutoffDate = (windowDays > 0) ? new Date(Date.now() - windowDays * 86400000) : null;
+
   var incrOn = String(readParam_(ss, 'INCREMENTAL_ON') || '1').toLowerCase();
   var allowIncr = (incrOn === '1' || incrOn === 'true' || incrOn === 'yes' || incrOn === 'oui');
 
-  // 0b) Sélection de la source LEGACY vs JOUEURS (flag PARAMS)
   var srcKey = (typeof PARAM_KEYS !== 'undefined' && PARAM_KEYS.RETRO_MEMBRES_READ_SRC)
-    ? PARAM_KEYS.RETRO_MEMBRES_READ_SRC
-    : 'RETRO_MEMBRES_READ_SOURCE';
+    ? PARAM_KEYS.RETRO_MEMBRES_READ_SRC : 'RETRO_MEMBRES_READ_SOURCE';
   var srcParam = String(readParam_(ss, srcKey) || 'LEGACY').toUpperCase();
   var useJoueurs = (srcParam === 'JOUEURS' && typeof buildRetroMembresRowsFromJoueurs_ === 'function');
 
-  // 1) Construire les lignes
   var res = useJoueurs ? buildRetroMembresRowsFromJoueurs_(seasonSheetId)
-    : buildRetroMembresRows(seasonSheetId); // legacy
-  // res: { header, rows, nbCols }
-  var header = res && res.header ? res.header : [];
-  var nbCols = (res && res.nbCols) ? res.nbCols : (header.length || 1);
-  var rowsAll = (res && res.rows) ? res.rows : [];
+                       : buildRetroMembresRows(seasonSheetId);
+  var header = (res && res.header) || [];
+  var nbCols = (res && res.nbCols) || header.length || 1;
+  var rowsAll = (res && res.rows) || [];
 
-  // Log de la source utilisée (compat des deux signatures possibles d'appendImportLog_)
-  try {
-    if (typeof appendImportLog_ === 'function') {
-      // signature observée dans ce module: (ss, code, msg)
-      appendImportLog_(ss, 'RETRO_MEMBRES_SOURCE', JSON.stringify({ source: useJoueurs ? 'JOUEURS' : 'LEGACY' }));
+  try { if (typeof appendImportLog_ === 'function') appendImportLog_(ss, 'RETRO_MEMBRES_SOURCE', JSON.stringify({ source: useJoueurs ? 'JOUEURS' : 'LEGACY' })); } catch(e){}
+
+  var rows = rowsAll, filtered = false;
+
+  if (windowDays > 0) {
+    // Lit directement ACHATS_LEDGER et garde tous les passeports qui ont AU MOINS UN achat dans la fenêtre
+    var led = readSheetAsObjects_(ss.getId(), 'ACHATS_LEDGER') || { header: [], rows: [] };
+    function pick(obj, keys) { for (var i=0;i<keys.length;i++){ var k=keys[i]; if (Object.prototype.hasOwnProperty.call(obj,k)) return k; } return null; }
+    var sample = (led.rows && led.rows[0]) ? led.rows[0] : {};
+    var COL_PASS = pick(sample, ['Passeport #','Passeport','Passport','PS_Passport']);
+    var COL_DATE = pick(sample, ['Date de la facture','Date Facture','Date facture','DateFacture','Date']);
+    if (COL_PASS && COL_DATE) {
+      var recent = new Set();
+      for (var i=0;i<(led.rows||[]).length;i++){
+        var L = led.rows[i];
+        var d = parseFlexibleDate_(L[COL_DATE]);
+        if (d && d >= cutoffDate) {
+          var p8 = String(L[COL_PASS]||'').replace(/\D/g,'').padStart(8,'0');
+          if (p8) recent.add(p8);
+        }
+      }
+      rows = rowsAll.filter(function(r){
+        var p = String(r[0]||'').replace(/\D/g,'').padStart(8,'0');
+        return recent.has(p);
+      });
+      filtered = (rows.length !== rowsAll.length);
     }
-  } catch (e) { }
-
-  // 2) Filtrage incrémental (seulement si autorisé ET set non vide)
-  var rows, filtered;
-  if (allowIncr) {
+  } else if (allowIncr) {
+    // Si tu préfères vraiment toujours FULL pour membres, mets allowIncr=false ici
     var touched = _rm_readTouchedPassportSet_(options);
     rows = _rm_filterRowsByPassports_(rowsAll, touched);
     filtered = rows.length !== rowsAll.length;
-  } else {
-    rows = rowsAll; // FULL export
-    filtered = false;
   }
 
-  // 3) Classeur temporaire minimal
   var temp = SpreadsheetApp.create('Export temporaire - Retro Membres');
   var tmp = temp.getSheets()[0];
   tmp.setName('Export');
 
   var all = [header].concat(rows);
-
-  // Normaliser l'ID/passeport en texte si helper présent
   if (typeof normalizePassportToText8_ === 'function') {
-    for (var i = 1; i < all.length; i++) {
-      if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]);
-    }
+    for (var r=1;r<all.length;r++){ if(all[r]&&all[r].length) all[r][0]=normalizePassportToText8_(all[r][0]); }
   }
-
-  if (all.length) {
-    tmp.getRange(1, 1, all.length, nbCols).setValues(all);
-    if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
-    // NEW: Photo en texte (si présente)
+  if (all.length){
+    tmp.getRange(1,1,all.length,nbCols).setValues(all);
+    if (all.length>1) tmp.getRange(2,1,all.length-1,1).setNumberFormat('@');
     var photoIdx = header.indexOf('Photo');
-    if (photoIdx >= 0) {
-      tmp.getRange(2, photoIdx + 1, all.length - 1, 1).setNumberFormat('@');
-    }
+    if (photoIdx>=0) tmp.getRange(2,photoIdx+1,all.length-1,1).setNumberFormat('@');
   }
   SpreadsheetApp.flush();
 
-  // 4) Export XLSX → Drive
-  var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-  var blob = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
-  var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
-  blob.setName('Export_Retro_Membres_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
+  var url='https://docs.google.com/spreadsheets/d/'+temp.getId()+'/export?format=xlsx';
+  var blob=UrlFetchApp.fetch(url,{headers:{Authorization:'Bearer '+ScriptApp.getOAuthToken()}}).getBlob();
+  var ts=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'yyyy-MM-dd-HHmm');
+  blob.setName('Export_Retro_Membres_'+ts+(filtered?'_INCR':'')+'.xlsx');
 
-  var folderId = readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
-  var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
-  var xlsx = dest.createFile(blob);
+  var folderId=readParam_(ss,PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID)||'';
+  var dest=folderId?DriveApp.getFolderById(folderId):DriveApp.getRootFolder();
+  var xlsx=dest.createFile(blob);
 
   DriveApp.getFileById(temp.getId()).setTrashed(true);
+  try{ appendImportLog_(ss,(useJoueurs?'RETRO_MEMBRES_XLSX_OK_FAST_J':'RETRO_MEMBRES_XLSX_OK_FAST'),
+    xlsx.getName()+' -> '+dest.getName()+' (rows='+rows.length+', filtered='+filtered+')'); }catch(e){}
+  return { fileId:xlsx.getId(), name:xlsx.getName(), rows:rows.length, filtered:filtered };
 
-  // Log final (signature locale avec ss)
-  try {
-    appendImportLog_(ss, useJoueurs ? 'RETRO_MEMBRES_XLSX_OK_FAST_J' : 'RETRO_MEMBRES_XLSX_OK_FAST',
-      xlsx.getName() + ' -> ' + dest.getName() + ' (rows=' + rows.length + ', filtered=' + filtered + ')');
-  } catch (e) { }
-
-  return { fileId: xlsx.getId(), name: xlsx.getName(), rows: rows.length, filtered: filtered };
+  function parseFlexibleDate_(v){
+    if(!v) return null;
+    if(v instanceof Date && !isNaN(+v)) return v;
+    if (typeof v === 'number') {
+      var d = new Date(1899, 11, 30); return new Date(d.getTime() + v*86400000);
+    }
+    var s=String(v).trim();
+    var d2=new Date(s); if(!isNaN(+d2)) return d2;
+    var m=s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+    if(m){ var dd=+m[1],MM=+m[2]-1,yyyy=+m[3]; var hh=+(m[4]||'0'),mi=+(m[5]||'0'),ss=+(m[6]||'0');
+      var d3=new Date(yyyy,MM,dd,hh,mi,ss); if(!isNaN(+d3)) return d3; }
+    return null;
+  }
 }
+
+
+
 
 // --- Règles FAST (réutilise ton computeRulesFromAggregates_ si déjà collé)
 function runEvaluateRulesFast_() {

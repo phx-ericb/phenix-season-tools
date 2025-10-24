@@ -309,6 +309,7 @@ function buildAchatsLedger_(ss) {
       'AmountRestant': parseMoney_(amtRest),
       'PaymentStatus': paymentStatus_(amtDue, amtPaid, amtRest),
       'Qty': r['Quantité'] || r['Qty'] || 1,
+      'Date de la facture': r['Date de la facture'] || r['DateFacture'] || r['Date'] || '',
       'CreatedAt': new Date(),
       'UpdatedAt': new Date()
     };
@@ -320,12 +321,13 @@ function buildAchatsLedger_(ss) {
   (insc.rows || []).forEach(function (r) { consider_('INSCRIPTION', r); });
   (art.rows  || []).forEach(function (r) { consider_('ARTICLE', r); });
 
-  writeObjectsToSheet_(ss, 'ACHATS_LEDGER', rows, [
-    'Passeport #', 'Type', 'NomFrais', 'Status', 'isIgnored', 'RowHash', 'Saison',
-    'PS', 'MapKey', 'Tags', 'CatCode', 'Audience', 'isCoachFee', 'ProgramBand',
-    'AmountDue', 'AmountPaid', 'AmountRestant', 'PaymentStatus', 'Qty',
-    'CreatedAt', 'UpdatedAt'
-  ]);
+writeObjectsToSheet_(ss, 'ACHATS_LEDGER', rows, [
+  'Passeport #', 'Type', 'NomFrais', 'Status', 'isIgnored', 'RowHash', 'Saison',
+  'PS', 'MapKey', 'Tags', 'CatCode', 'Audience', 'isCoachFee', 'ProgramBand',
+  'AmountDue', 'AmountPaid', 'AmountRestant', 'PaymentStatus', 'Qty',
+  'Date de la facture',
+  'CreatedAt', 'UpdatedAt'
+]);
 }
 
 
