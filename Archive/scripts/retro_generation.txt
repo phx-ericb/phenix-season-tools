@@ -1,9 +1,0 @@
-/**************************************
- * Main - Générer le rapport complet
- **************************************/
-function genererRetroComplet() {
-  genererImportRetroGroupes();
-  genererRetroGroupeArticles();  
-  genererRetroMembres();  
-  SpreadsheetApp.getUi().alert("Rapport complet généré avec succès.");
-}  

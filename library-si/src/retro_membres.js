@@ -92,32 +92,44 @@ function loadRetroRules_(ss) {
   if (!rules.length) {
     var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-sé,adulte,ligue';
     var adapteCsv = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte';
-    var campCsv   = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS)   || 'camp de sélection u13,camp selection u13,camp u13';
-    var photoOn   = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
-    var photoCol  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
-    var warnMmDd  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
-    var absDate   = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
+    var campCsv = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS) || 'camp de sélection u13,camp selection u13,camp u13';
+    var photoOn = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
+    var photoCol = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
+    var warnMmDd = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
+    var absDate = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
 
     rules = [
-      { id:'ignore_fees', enabled:true, scope:'both',
-        when:{ field:'Nom du frais', contains_any: ignoreCsv.split(',') },
-        action:{ type:'ignore_row' } },
-      { id:'adapte_flag', enabled:true, scope:'both',
-        when:{ field:'Nom du frais', contains_any: adapteCsv.split(',') },
-        action:{ type:'set_member_field', field:'adapte', value:1 } },
-      { id:'cdp_2', enabled:true, scope:'articles',
-        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT', text_contains_any:['2','2 entrainements'] },
-        action:{ type:'set_member_field_max', field:'cdp', value:2 } },
-      { id:'cdp_1', enabled:true, scope:'articles',
-        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT' },
-        action:{ type:'set_member_field_max', field:'cdp', value:1 } },
-      { id:'camp_u13', enabled:true, scope:'articles',
-        when:{ field:'Nom du frais', contains_any: campCsv.split(',') },
-        action:{ type:'set_member_field', field:'camp', value:'Oui' } }
+      {
+        id: 'ignore_fees', enabled: true, scope: 'both',
+        when: { field: 'Nom du frais', contains_any: ignoreCsv.split(',') },
+        action: { type: 'ignore_row' }
+      },
+      {
+        id: 'adapte_flag', enabled: true, scope: 'both',
+        when: { field: 'Nom du frais', contains_any: adapteCsv.split(',') },
+        action: { type: 'set_member_field', field: 'adapte', value: 1 }
+      },
+      {
+        id: 'cdp_2', enabled: true, scope: 'articles',
+        when: { catalog_exclusive_group: 'CDP_ENTRAINEMENT', text_contains_any: ['2', '2 entrainements'] },
+        action: { type: 'set_member_field_max', field: 'cdp', value: 2 }
+      },
+      {
+        id: 'cdp_1', enabled: true, scope: 'articles',
+        when: { catalog_exclusive_group: 'CDP_ENTRAINEMENT' },
+        action: { type: 'set_member_field_max', field: 'cdp', value: 1 }
+      },
+      {
+        id: 'camp_u13', enabled: true, scope: 'articles',
+        when: { field: 'Nom du frais', contains_any: campCsv.split(',') },
+        action: { type: 'set_member_field', field: 'camp', value: 'Oui' }
+      }
     ];
     if (photoOn && photoCol) {
-      rules.push({ id:'photo_policy', enabled:true, scope:'member',
-        action:{ type:'compute_photo', expiry_col:photoCol, warn_mmdd:warnMmDd, abs_date:absDate }});
+      rules.push({
+        id: 'photo_policy', enabled: true, scope: 'member',
+        action: { type: 'compute_photo', expiry_col: photoCol, warn_mmdd: warnMmDd, abs_date: absDate }
+      });
     }
     appendImportLog_(ss, 'RETRO_RULES_JSON_FALLBACK', 'using PARAMS-derived defaults');
   }
@@ -130,11 +142,11 @@ function loadRetroRules_(ss) {
 /* ===================== Helpers bas niveau ===================== */
 
 if (typeof CONTROL_COLS === 'undefined') {
-var CONTROL_COLS = { ROW_HASH:'ROW_HASH', CANCELLED:'CANCELLED', EXCLUDE_FROM_EXPORT:'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT:'LAST_MODIFIED_AT' };
+  var CONTROL_COLS = { ROW_HASH: 'ROW_HASH', CANCELLED: 'CANCELLED', EXCLUDE_FROM_EXPORT: 'EXCLUDE_FROM_EXPORT', LAST_MODIFIED_AT: 'LAST_MODIFIED_AT' };
 }
 
 // ——— Birth year robuste: gère Date, ISO, FR, tout ce qui contient un yyyy ———
-function _extractBirthYearLoose_(v){
+function _extractBirthYearLoose_(v) {
   if (!v) return 0;
   if (v instanceof Date) return v.getFullYear();
   var s = String(v).trim();
@@ -147,57 +159,127 @@ function _extractBirthYearLoose_(v){
   return 0;
 }
 
-function _nrm_(s){
+// --- Photo: constantes + helpers communs
+const PHOTO_NOT_REQUIRED = 'Non requise';
+
+function _rm_truthy_(v) {
+  var s = String(v || '').trim().toUpperCase();
+  return (s === '1' || s === 'TRUE' || s === 'OUI' || s === 'YES');
+}
+function _rm_absWarnDate_(ss) {
+  var raw = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
+  if (!raw) return null;
+  var d = new Date(raw);
+  return isNaN(+d) ? null : d;
+}
+function _rm_needPhotoByFields_(age, isAdapte, hasInscription) {
+  var a = parseInt(String(age || ''), 10);
+  if (!isNaN(a) && a < 8) return false;
+  if (_rm_truthy_(isAdapte)) return false;
+  if (!_rm_truthy_(hasInscription)) return false;
+  return true;
+}
+function _rm_statusFromFields_(ss, expDate, age, isAdapte, hasInscription) {
+  if (!_rm_needPhotoByFields_(age, isAdapte, hasInscription)) return PHOTO_NOT_REQUIRED;
+  if (!expDate) return 'Aucune photo';
+  var d = (expDate instanceof Date) ? expDate : new Date(expDate);
+  if (isNaN(+d)) return 'Aucune photo';
+  var abs = _rm_absWarnDate_(ss);
+  if (abs && d < abs) return 'Expirée';
+  return 'Valide';
+}
+
+
+// --- AJOUT: helper strict, indépendant du vieux _computePhotoCell_ ---
+function _rm_getAbsWarnDate_(ss) {
+  var raw = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
+  if (!raw) return null;
+  try {
+    var d = new Date(raw);
+    return isNaN(+d) ? null : d;
+  } catch (e) { return null; }
+}
+
+function _rm_needsPhoto_(age, isAdapte, hasInscription) {
+  var a = parseInt(String(age || ''), 10);
+  var u8 = (!isNaN(a) ? a : 0) >= 8;
+  var ada = (String(isAdapte || '').trim() === '1' || String(isAdapte || '').toLowerCase() === 'true');
+  return hasInscription && u8 && !ada;
+}
+
+function _rm_photoStrStrict_(ss, photoExpireLe, age, isAdapte, hasInscription) {
+  // 1) Besoin?
+  if (!_rm_needsPhoto_(age, isAdapte, hasInscription)) {
+    // Exigence: champ VIDE pour non-inscrits; et plus largement on préfère "vide" quand non requis.
+    return '';
+  }
+  // 2) A-t-il une photo?
+  if (!photoExpireLe) return 'Aucune photo';
+
+  // 3) Expirée vs ABS cutoff
+  var abs = _rm_getAbsWarnDate_(ss);
+  try {
+    var exp = (photoExpireLe instanceof Date) ? photoExpireLe : new Date(photoExpireLe);
+    if (isNaN(+exp)) return 'Aucune photo';
+    if (abs && exp < abs) return 'Expirée';
+    return 'Valide';
+  } catch (e) {
+    return 'Aucune photo';
+  }
+}
+
+
+function _nrm_(s) {
   s = String(s == null ? '' : s);
-  try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g,''); } catch(e){}
+  try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) { }
   return s;
 }
-function _nrmLower_(s){ return _nrm_(s).toLowerCase().trim(); }
-function _csvEsc_(v){ v = v==null?'':String(v).replace(/"/g,'""'); return /[",\n;]/.test(v)?('"'+v+'"'):v; }
+function _nrmLower_(s) { return _nrm_(s).toLowerCase().trim(); }
+function _csvEsc_(v) { v = v == null ? '' : String(v).replace(/"/g, '""'); return /[",\n;]/.test(v) ? ('"' + v + '"') : v; }
 
-function _isActiveRow_(r){
-  var can = String(r[CONTROL_COLS.CANCELLED]||'').toLowerCase()==='true';
-  var exc = String(r[CONTROL_COLS.EXCLUDE_FROM_EXPORT]||'').toLowerCase()==='true';
-  var st  = (r["Statut de l'inscription"] || r['Statut'] || '').toString().toLowerCase();
+function _isActiveRow_(r) {
+  var can = String(r[CONTROL_COLS.CANCELLED] || '').toLowerCase() === 'true';
+  var exc = String(r[CONTROL_COLS.EXCLUDE_FROM_EXPORT] || '').toLowerCase() === 'true';
+  var st = (r["Statut de l'inscription"] || r['Statut'] || '').toString().toLowerCase();
   return !can && !exc && st !== 'annulé' && st !== 'annule' && st !== 'cancelled';
 }
-function _feeIgnored_(name, patternsCsv){
-  var raw = _nrmLower_(name||'');
+function _feeIgnored_(name, patternsCsv) {
+  var raw = _nrmLower_(name || '');
   if (!raw) return false;
-  var pats = String(patternsCsv||'').split(',').map(function(x){return _nrmLower_(x);}).filter(Boolean);
-  for (var i=0;i<pats.length;i++){ if (raw.indexOf(pats[i]) !== -1) return true; }
+  var pats = String(patternsCsv || '').split(',').map(function (x) { return _nrmLower_(x); }).filter(Boolean);
+  for (var i = 0; i < pats.length; i++) { if (raw.indexOf(pats[i]) !== -1) return true; }
   return false;
 }
-function _containsAny_(raw, csv){
-  var s = _nrmLower_(raw||'');
-  return String(csv||'').split(',').map(function(x){return _nrmLower_(x);}).filter(Boolean).some(function(p){ return s.indexOf(p)!==-1; });
+function _containsAny_(raw, csv) {
+  var s = _nrmLower_(raw || '');
+  return String(csv || '').split(',').map(function (x) { return _nrmLower_(x); }).filter(Boolean).some(function (p) { return s.indexOf(p) !== -1; });
 }
-function _safeDate_(v){
+function _safeDate_(v) {
   if (!v) return null;
-  try { return (v instanceof Date) ? v : new Date(v); } catch(e){ return null; }
+  try { return (v instanceof Date) ? v : new Date(v); } catch (e) { return null; }
 }
-function _yyyy_mm_dd_(d){
+function _yyyy_mm_dd_(d) {
   return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
 
 
 /* ===================== Lecture "mutation" ===================== */
-function _loadMutationsSet_(ss){
+function _loadMutationsSet_(ss) {
   var sheetName = readParam_(ss, PARAM_KEYS.RETRO_MUTATION_SHEET) || 'Mutation';
   var sh = ss.getSheetByName(sheetName);
   var set = {};
-  if (!sh || sh.getLastRow()<2) return set;
-  var vals = sh.getRange(2,1, sh.getLastRow()-1, 1).getDisplayValues();
-  for (var i=0;i<vals.length;i++){
-    var p = (vals[i][0]||'').toString().trim();
-    if (p) set[p]=true;
+  if (!sh || sh.getLastRow() < 2) return set;
+  var vals = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getDisplayValues();
+  for (var i = 0; i < vals.length; i++) {
+    var p = (vals[i][0] || '').toString().trim();
+    if (p) set[p] = true;
   }
   return set;
 }
 
 /* ===================== PHOTO logic (optionnel) ===================== */
-function _computePhotoCell_(ss, row){
-  var include = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase()==='TRUE';
+function _computePhotoCell_(ss, row) {
+  var include = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
   if (!include) return ''; // reste 100% compatible par défaut
 
   var col = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
@@ -206,22 +288,22 @@ function _computePhotoCell_(ss, row){
   var exp = _safeDate_(row[col]);
   if (!exp) return 'Aucune photo';
   var today = new Date();
-  if (exp < today) return 'Expirée ('+_yyyy_mm_dd_(exp)+')';
+  if (exp < today) return 'Expirée (' + _yyyy_mm_dd_(exp) + ')';
 
   // alerte "Expire bientôt"
-  var absWarn  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
+  var absWarn = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
   var warnMmDd = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
 
-  var saisonLabel = readParam_(ss, 'SEASON_LABEL') || (row['Saison']||'');
+  var saisonLabel = readParam_(ss, 'SEASON_LABEL') || (row['Saison'] || '');
   var seasonYear = parseSeasonYear_(saisonLabel);
 
   if (absWarn) {
     var abs = _safeDate_(absWarn);
-    if (abs && exp <= abs) return 'Expire bientôt ('+_yyyy_mm_dd_(exp)+')';
+    if (abs && exp <= abs) return 'Expire bientôt (' + _yyyy_mm_dd_(exp) + ')';
   }
   if (exp.getFullYear() === seasonYear) {
     // règle: expiration durant l’année => changement avant la saison estivale
-    return 'Expire bientôt ('+_yyyy_mm_dd_(exp)+')';
+    return 'Expire bientôt (' + _yyyy_mm_dd_(exp) + ')';
   }
   return _yyyy_mm_dd_(exp); // simple date
 }
@@ -235,29 +317,29 @@ function _computePhotoCell_(ss, row){
  */
 
 
-function _r_normLower_(s){ return _nrmLower_(s); }
-function _r_getFieldText_(row, field){
+function _r_normLower_(s) { return _nrmLower_(s); }
+function _r_getFieldText_(row, field) {
   if (!field) return '';
   var v = row[field];
   if (v == null) return '';
   return String(v);
 }
-function _r_matchWhen_(when, row, feeName, catalogItem){
+function _r_matchWhen_(when, row, feeName, catalogItem) {
   if (!when) return true;
   if (when.field && when.contains_any) {
     var txt = _r_getFieldText_(row, when.field);
     var low = _r_normLower_(txt);
-    var arr = [].concat(when.contains_any||[]).map(_r_normLower_).filter(Boolean);
-    if (!arr.some(function(s){ return low.indexOf(s)!==-1; })) return false;
+    var arr = [].concat(when.contains_any || []).map(_r_normLower_).filter(Boolean);
+    if (!arr.some(function (s) { return low.indexOf(s) !== -1; })) return false;
   }
   if (when.text_contains_any) {
-    var low = _r_normLower_(feeName||'');
-    var arr = [].concat(when.text_contains_any||[]).map(_r_normLower_).filter(Boolean);
-    if (!arr.some(function(s){ return low.indexOf(s)!==-1; })) return false;
+    var low = _r_normLower_(feeName || '');
+    var arr = [].concat(when.text_contains_any || []).map(_r_normLower_).filter(Boolean);
+    if (!arr.some(function (s) { return low.indexOf(s) !== -1; })) return false;
   }
   if (when.catalog_exclusive_group) {
     if (!catalogItem) return false;
-    if (String(catalogItem.ExclusiveGroup||'') !== String(when.catalog_exclusive_group)) return false;
+    if (String(catalogItem.ExclusiveGroup || '') !== String(when.catalog_exclusive_group)) return false;
   }
   return true;
 }
@@ -266,14 +348,14 @@ function _r_matchWhen_(when, row, feeName, catalogItem){
  *  Retourne { skip:true } si l’action "ignore_row" a été tirée.
  *  Peut modifier l’objet member (adapte/cdp/camp…).
  */
-function applyRetroRowRules_(rules, scope, row, member, ctx){
+function applyRetroRowRules_(rules, scope, row, member, ctx) {
   var feeName = (row['Nom du frais'] || row['Frais'] || row['Produit'] || '');
   var item = ctx.catalog.match ? ctx.catalog.match(feeName) : null;
   var skip = false;
 
-  rules.forEach(function(rule){
+  rules.forEach(function (rule) {
     if (!rule || !rule.enabled) return;
-    if (!(rule.scope==='both' || rule.scope===scope)) return;
+    if (!(rule.scope === 'both' || rule.scope === scope)) return;
     if (!_r_matchWhen_(rule.when, row, feeName, item)) return;
 
     var a = rule.action || {};
@@ -298,8 +380,8 @@ function applyRetroRowRules_(rules, scope, row, member, ctx){
 /** Applique les règles "member" (post-agrégation).
  *  Peut écrire member.__photoStr pour que la feuille affiche la valeur.
  */
-function applyRetroMemberRules_(rules, member, ctx){
-  rules.forEach(function(rule){
+function applyRetroMemberRules_(rules, member, ctx) {
+  rules.forEach(function (rule) {
     if (!rule || !rule.enabled) return;
     if (rule.scope !== 'member') return;
     var a = rule.action || {};
@@ -312,38 +394,38 @@ function applyRetroMemberRules_(rules, member, ctx){
 }
 
 /* ===================== Construire les lignes "Rétro - Membres" ===================== */
-function buildRetroMembresRows(seasonSheetId){
-  var ss   = getSeasonSpreadsheet_(seasonSheetId);
+function buildRetroMembresRows(seasonSheetId) {
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
   var insc = readSheetAsObjects_(ss.getId(), SHEETS.INSCRIPTIONS);
   var art  = readSheetAsObjects_(ss.getId(), SHEETS.ARTICLES);
 
   // === MEMBRES_GLOBAL (prioritaire pour la Photo)
   var shMemName = (typeof SHEETS !== 'undefined' && SHEETS.MEMBRES_GLOBAL) ? SHEETS.MEMBRES_GLOBAL : 'MEMBRES_GLOBAL';
-  var mem  = readSheetAsObjects_(ss.getId(), shMemName);
+  var mem = readSheetAsObjects_(ss.getId(), shMemName);
   var indexMemByPassport = {};
   if (mem && mem.rows && mem.rows.length) {
     var pCol = 'Passeport #';
     var Hmem = mem.header || [];
     if (Hmem.indexOf('Passeport #') < 0 && Hmem.indexOf('Passeport') >= 0) pCol = 'Passeport';
-    mem.rows.forEach(function(r){
+    mem.rows.forEach(function (r) {
       var p = (r[pCol] != null) ? String(r[pCol]).trim() : '';
       if (p) indexMemByPassport[p] = r;
     });
   }
 
   // Params
-  var ignoreFees = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-se,adulte,ligue';
-  var adapteKeys = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte,adapte';
-  var campKeys   = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS)   || 'camp de selection u13,camp selection u13,camp u13';
-  var includePhoto = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase()==='TRUE';
+  var ignoreFees  = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-se,adulte,ligue';
+  var adapteKeys  = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte,adapte';
+  var campKeys    = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS) || 'camp de selection u13,camp selection u13,camp u13';
+  var includePhoto = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
 
   // Map membres
   var members = {}; // { passeport, nom, prenom, dateNaissance, genre, emails[], adapte, cdp, camp, inscription:boolean }
-  function ensureMember_(p, seed){
-    var k = String(p||'').trim(); if (!k) return null;
+  function ensureMember_(p, seed) {
+    var k = String(p || '').trim(); if (!k) return null;
     if (!members[k]) {
       members[k] = {
-        passeport: k, nom:'', prenom:'', dateNaissance:'', genre:'',
+        passeport: k, nom: '', prenom: '', dateNaissance: '', genre: '',
         emails: [], adapte: undefined, cdp: undefined, camp: undefined, inscription: false
       };
     }
@@ -357,19 +439,60 @@ function buildRetroMembresRows(seasonSheetId){
     return members[k];
   }
 
+  // --- Clés et drapeaux partagés (portée: toute la fonction)
+  function RM_key_(pass) {
+    var p = String(pass || '').trim();
+    if (typeof normalizePassportToText8_ === 'function') {
+      try { var p8 = normalizePassportToText8_(p); if (p8) return p8; } catch(_) {}
+    }
+    return p;
+  }
+
+  var hasU9U12Inscription = Object.create(null); // clé normalisée -> true si inscription U9-U12 (réelle)
+  var isEliteInscription  = Object.create(null); // clé normalisée -> true si inscription élite
+
+  var ELITE_KEYWORDS = ['D1+','D1','PLSJQ','LDP','ÉLITE','ELITE','SÉLECTION','SELECTION'];
+
+  function _rm_extractU_(s) {
+    var m = String(s||'').match(/\bU\s*-?\s*(\d{1,2})\b/i);
+    return m ? parseInt(m[1],10) : 0;
+  }
+  function _rm_isEliteByName_(feeName){
+    var n = String(feeName||'').toUpperCase();
+    return ELITE_KEYWORDS.some(function(k){ return n.indexOf(k) >= 0; });
+  }
+  function _rm_hasEliteTag_(row){
+    var t = row && (row['Tags'] || row['Tag'] || '');
+    if (Array.isArray(t)) t = t.join(',');
+    try {
+      if (typeof t === 'string' && t.trim().startsWith('[')) t = JSON.parse(t).join(',');
+    } catch(_) {}
+    return String(t||'').toLowerCase().indexOf('inscription_elite') >= 0;
+  }
+
   // --- INSCRIPTIONS (actives selon _isActiveRow_)
   var inscAct = insc.rows.filter(_isActiveRow_);
-  inscAct.forEach(function(r){
+  inscAct.forEach(function (r) {
     var pass = r['Passeport #']; if (!pass) return;
-
     var feeName = r['Nom du frais'] || r['Frais'] || r['Produit'] || '';
-    if (_feeIgnored_(feeName, ignoreFees)) return; // ignore cette ligne
+    if (_feeIgnored_(feeName, ignoreFees)) return;
+
+    var k = RM_key_(pass);
+
+    // Drapeaux élite + U9-U12 basés sur l'INSCRIPTION (pas les articles)
+    if (_rm_hasEliteTag_(r) || _rm_isEliteByName_(feeName)) {
+      isEliteInscription[k] = true;
+    }
+    var uNum = _rm_extractU_(feeName);
+    if (uNum >= 9 && uNum <= 12) {
+      hasU9U12Inscription[k] = true;
+    }
 
     var m = ensureMember_(pass, {
       nom: r['Nom'] || '',
       prenom: r['Prénom'] || r['Prenom'] || '',
       dateNaissance: r['Date de naissance'] || r['Naissance'] || '',
-      genre: (r['Identité de genre']||'').toString().trim().toUpperCase().charAt(0)
+      genre: (r['Identité de genre'] || '').toString().trim().toUpperCase().charAt(0)
     });
     if (!m) return;
     m.inscription = true;
@@ -378,7 +501,7 @@ function buildRetroMembresRows(seasonSheetId){
     var emails = (typeof collectEmailsFromRow_ === 'function')
       ? collectEmailsFromRow_(r, readParam_(ss, 'TO_FIELDS_INSCRIPTIONS') || 'Courriel,Parent 1 - Courriel,Parent 2 - Courriel')
       : [r['Courriel'], r['Parent 1 - Courriel'], r['Parent 2 - Courriel']].filter(Boolean).join(',');
-    if (emails) emails.split(',').forEach(function(e){ e=e.trim(); if (e && members[pass].emails.indexOf(e)===-1) members[pass].emails.push(e); });
+    if (emails) emails.split(',').forEach(function (e) { e = e.trim(); if (e && members[pass].emails.indexOf(e) === -1) members[pass].emails.push(e); });
 
     // Adapté si mot-clef DANS L’INSCRIPTION (pas dans articles)
     if (_containsAny_(feeName, adapteKeys)) m.adapte = 1;
@@ -386,7 +509,7 @@ function buildRetroMembresRows(seasonSheetId){
 
   // --- ARTICLES (actifs selon _isActiveRow_)
   var artAct = art.rows.filter(_isActiveRow_);
-  artAct.forEach(function(a){
+  artAct.forEach(function (a) {
     var pass = a['Passeport #']; if (!pass) return;
 
     var feeName = a['Nom du frais'] || a['Frais'] || a['Produit'] || '';
@@ -396,7 +519,7 @@ function buildRetroMembresRows(seasonSheetId){
       nom: a['Nom'] || '',
       prenom: a['Prénom'] || a['Prenom'] || '',
       dateNaissance: a['Date de naissance'] || a['Naissance'] || '',
-      genre: (a['Identité de genre']||'').toString().trim().toUpperCase().charAt(0)
+      genre: (a['Identité de genre'] || '').toString().trim().toUpperCase().charAt(0)
     });
     if (!m) return;
 
@@ -425,29 +548,40 @@ function buildRetroMembresRows(seasonSheetId){
     // NOTE: pas de détection "adapté" via ARTICLES (inexistant par design)
   });
 
-  // U9–U12 → défaut CDP=0 si non défini et non "Adapté"
-  var seasonYear  = parseSeasonYear_(readParam_(ss, 'SEASON_LABEL') || '');
-  var currentYear = seasonYear || (new Date()).getFullYear();
+  // U9–U12 => CDP=0 **uniquement** si: inscription U9-U12 active, non-élite, non-adapté, et aucun CDP acheté
   Object.keys(members).forEach(function(k){
     var m = members[k];
-    var by = _extractBirthYearLoose_(m.dateNaissance);
-    var age = by ? (currentYear - by) : 0;
+    var key = RM_key_(m.passeport || k);
+
     var isAdapt = (m.adapte === 1) || (m.adapte === '1') || (String(m.adapte||'').toLowerCase() === 'true');
-    if (age >= 9 && age <= 12 && !isAdapt) {
-      if (typeof m.cdp === 'undefined' || m.cdp === null || m.cdp === '') m.cdp = 0;
+    var hasU9U12 = !!hasU9U12Inscription[key];
+    var isElite  = !!isEliteInscription[key];
+
+    if (m.inscription && hasU9U12 && !isElite && !isAdapt) {
+      if (m.cdp === undefined || m.cdp === null || m.cdp === '') m.cdp = 0;
     }
   });
 
   // Index INSCRIPTIONS pour fallback Photo
   var indexByPassport = {};
-  inscAct.forEach(function(r){ indexByPassport[String(r['Passeport #']||'').trim()] = r; });
+  inscAct.forEach(function (r) { indexByPassport[String(r['Passeport #'] || '').trim()] = r; });
 
   // Photo: priorité MEMBRES_GLOBAL, fallback INSCRIPTIONS
-  Object.keys(members).forEach(function(k){
+  Object.keys(members).forEach(function (k) {
     var m = members[k];
     m.__rowForPhoto = indexMemByPassport[m.passeport] || indexByPassport[m.passeport] || {};
     // plus de applyRetroMemberRules_ ici; on calculera Photo à l’écriture
   });
+
+  // --- JOUEURS: index par passeport pour PhotoStr (prioritaire)
+  var jTab = readSheetAsObjects_(ss.getId(), SHEETS.JOUEURS);
+  var J = jTab.rows || [], HJ = jTab.header || [];
+  var J_BY_P8 = {};
+  for (var i = 0; i < J.length; i++) {
+    var r = J[i] || {};
+    var p8 = _normP8_(r['Passeport #'] || r['Passeport'] || '');
+    if (p8) J_BY_P8[p8] = r;
+  }
 
   // ——— Construction des lignes (header complet, peu de colonnes remplies) ———
   var HEADER = [
@@ -464,31 +598,62 @@ function buildRetroMembresRows(seasonSheetId){
   if (includePhoto) header.push('Photo');
 
   var rows = [];
-  Object.keys(members).forEach(function(k){
+  Object.keys(members).forEach(function (k) {
     var m = members[k];
-    var row = new Array(header.length); for (var i=0;i<row.length;i++) row[i]='';
+    var row = new Array(header.length); for (var i = 0; i < row.length; i++) row[i] = '';
 
     row[0] = (typeof normalizePassportToText8_ === 'function')
       ? normalizePassportToText8_(m.passeport)
       : String(m.passeport || '');
     // row[1] Code -> vide
-    row[2]  = m.nom;
-    row[3]  = m.prenom;
-    row[4]  = m.dateNaissance;
-    row[5]  = m.genre;
-    row[7]  = (m.emails && m.emails.length) ? m.emails.join('; ') : '';
+    row[2] = m.nom;
+    row[3] = m.prenom;
+    row[4] = m.dateNaissance;
+    row[5] = m.genre;
+    row[7] = (m.emails && m.emails.length) ? m.emails.join('; ') : '';
 
     // Adapté, CDP, Camp
     row[39] = (typeof m.adapte !== 'undefined' ? m.adapte : '');
-    row[40] = (typeof m.cdp    !== 'undefined' ? m.cdp    : '');
-    row[42] = (typeof m.camp   !== 'undefined' ? m.camp   : '');
+    row[40] = (typeof m.cdp !== 'undefined' ? m.cdp : '');
+    row[42] = (typeof m.camp !== 'undefined' ? m.camp : '');
 
-    // Muté (retiré) -> laisser vide
-    // row[43] = '';
-
-    // Photo
+    // Photo (optionnelle)
     if (includePhoto) {
-      row[header.length-1] = _computePhotoCell_(ss, m.__rowForPhoto || {});
+      var wrote = false;
+      var p8 = _normP8_(m.passeport);
+      var jRow = J_BY_P8[p8] || null;
+
+      // 1) PhotoStr direct depuis JOUEURS (si présent)
+      if (jRow && String(jRow['PhotoStr'] || '').trim() !== '') {
+        row[header.length - 1] = String(jRow['PhotoStr']).trim();
+        wrote = true;
+      }
+
+      // 2) Sinon, calcule proprement via JOUEURS (sans date brute)
+      if (!wrote && jRow) {
+        var ageJ = jRow['Age'] || '';
+        var adaJ = jRow['isAdapte'] || '';
+        var hasInJ = jRow['hasInscription'] || ''; // TRUE/FALSE ou Oui/Non — _rm_truthy_ gère
+        var expJ = jRow['PhotoExpireLe'] || '';
+        row[header.length - 1] = _rm_statusFromFields_(ss, expJ, ageJ, adaJ, hasInJ);
+        wrote = true;
+      }
+
+      // 3) Sinon, fallback MEMBRES_GLOBAL/INSCRIPTIONS (strict, pas de dates)
+      if (!wrote) {
+        var saisonYear = parseSeasonYear_(readParam_(ss, 'SEASON_LABEL') || '');
+        var by = _extractBirthYearLoose_(m.dateNaissance);
+        var age = (by && saisonYear) ? (saisonYear - by) : '';
+        var isAdapte = (m.adapte === 1 || m.adapte === '1' || String(m.adapte || '').toLowerCase() === 'true');
+        var hasInscription = !!m.inscription;
+
+        var expDate = '';
+        if (m.__rowForPhoto) {
+          expDate = m.__rowForPhoto['PhotoExpireLe'] || m.__rowForPhoto['Photo Expire Le'] || '';
+        }
+        row[header.length - 1] = _rm_statusFromFields_(ss, expDate, age, isAdapte, hasInscription);
+        wrote = true;
+      }
     }
 
     rows.push(row);
@@ -496,6 +661,7 @@ function buildRetroMembresRows(seasonSheetId){
 
   return { header: header, rows: rows, nbCols: header.length };
 }
+
 
 
 /* ===================== Filtrage incrémental (touchés) ===================== */
@@ -524,37 +690,37 @@ function _rm_readTouchedPassportSet_(options) {
 }
 
 
-function _rm_filterRowsByPassports_(rows, touchedSet){ var keys=Object.keys(touchedSet||{}); if(!keys.length) return rows; var out=[]; for(var i=0;i<rows.length;i++){ var row=rows[i]; var p=_rm_norm_passport_(row && row[0]); if(p && touchedSet[p]) out.push(row); } return out; }
+function _rm_filterRowsByPassports_(rows, touchedSet) { var keys = Object.keys(touchedSet || {}); if (!keys.length) return rows; var out = []; for (var i = 0; i < rows.length; i++) { var row = rows[i]; var p = _rm_norm_passport_(row && row[0]); if (p && touchedSet[p]) out.push(row); } return out; }
 
 /* ===================== Écriture feuille & export XLSX ===================== */
 
-function writeRetroMembresSheet(seasonSheetId){
+function writeRetroMembresSheet(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
   var res = buildRetroMembresRows(seasonSheetId);
   var sh = ss.getSheetByName('Rétro - Membres') || ss.insertSheet('Rétro - Membres');
   sh.clearContents();
 
-  sh.getRange(1,1,1,res.header.length).setValues([res.header]);
+  sh.getRange(1, 1, 1, res.header.length).setValues([res.header]);
 
-  if(res.rows.length){
-    sh.getRange(2,1,res.rows.length,res.nbCols).setValues(res.rows);
+  if (res.rows.length) {
+    sh.getRange(2, 1, res.rows.length, res.nbCols).setValues(res.rows);
     sh.autoResizeColumns(1, res.nbCols);
     // Passeport en texte
-    if(sh.getLastRow()>1) sh.getRange(2,1,sh.getLastRow()-1,1).setNumberFormat('@');
+    if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, 1).setNumberFormat('@');
     // NEW: Photo en texte (si présente)
     var photoIdx = res.header.indexOf('Photo');
-    if (photoIdx >= 0 && sh.getLastRow()>1) {
-      sh.getRange(2, photoIdx+1, sh.getLastRow()-1, 1).setNumberFormat('@');
+    if (photoIdx >= 0 && sh.getLastRow() > 1) {
+      sh.getRange(2, photoIdx + 1, sh.getLastRow() - 1, 1).setNumberFormat('@');
     }
   }
 
-  appendImportLog_(ss,'RETRO_MEMBRES_SHEET_OK','rows='+res.rows.length);
+  appendImportLog_(ss, 'RETRO_MEMBRES_SHEET_OK', 'rows=' + res.rows.length);
   return res.rows.length;
 }
 
 
 /** Export XLSX rapide (avec filtrage incrémental optionnel) */
-function exportRetroMembresXlsxToDrive(seasonSheetId, options){
+function exportRetroMembresXlsxToDrive(seasonSheetId, options) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
 
   // 0) ON/OFF incrémental via PARAMS
@@ -570,7 +736,7 @@ function exportRetroMembresXlsxToDrive(seasonSheetId, options){
 
   // 1) Construire les lignes
   var res = useJoueurs ? buildRetroMembresRowsFromJoueurs_(seasonSheetId)
-                       : buildRetroMembresRows(seasonSheetId); // legacy
+    : buildRetroMembresRows(seasonSheetId); // legacy
   // res: { header, rows, nbCols }
   var header = res && res.header ? res.header : [];
   var nbCols = (res && res.nbCols) ? res.nbCols : (header.length || 1);
@@ -582,7 +748,7 @@ function exportRetroMembresXlsxToDrive(seasonSheetId, options){
       // signature observée dans ce module: (ss, code, msg)
       appendImportLog_(ss, 'RETRO_MEMBRES_SOURCE', JSON.stringify({ source: useJoueurs ? 'JOUEURS' : 'LEGACY' }));
     }
-  } catch(e){}
+  } catch (e) { }
 
   // 2) Filtrage incrémental (seulement si autorisé ET set non vide)
   var rows, filtered;
@@ -604,25 +770,25 @@ function exportRetroMembresXlsxToDrive(seasonSheetId, options){
 
   // Normaliser l'ID/passeport en texte si helper présent
   if (typeof normalizePassportToText8_ === 'function') {
-    for (var i=1; i<all.length; i++){
+    for (var i = 1; i < all.length; i++) {
       if (all[i] && all[i].length) all[i][0] = normalizePassportToText8_(all[i][0]);
     }
   }
 
-  if (all.length){
-    tmp.getRange(1,1,all.length,nbCols).setValues(all);
-    if(all.length>1) tmp.getRange(2,1,all.length-1,1).setNumberFormat('@');
-        // NEW: Photo en texte (si présente)
+  if (all.length) {
+    tmp.getRange(1, 1, all.length, nbCols).setValues(all);
+    if (all.length > 1) tmp.getRange(2, 1, all.length - 1, 1).setNumberFormat('@');
+    // NEW: Photo en texte (si présente)
     var photoIdx = header.indexOf('Photo');
     if (photoIdx >= 0) {
-      tmp.getRange(2, photoIdx+1, all.length-1, 1).setNumberFormat('@');
+      tmp.getRange(2, photoIdx + 1, all.length - 1, 1).setNumberFormat('@');
     }
   }
   SpreadsheetApp.flush();
 
   // 4) Export XLSX → Drive
   var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-  var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer '+ScriptApp.getOAuthToken() } }).getBlob();
+  var blob = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
   var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
   blob.setName('Export_Retro_Membres_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
 
@@ -636,7 +802,7 @@ function exportRetroMembresXlsxToDrive(seasonSheetId, options){
   try {
     appendImportLog_(ss, useJoueurs ? 'RETRO_MEMBRES_XLSX_OK_FAST_J' : 'RETRO_MEMBRES_XLSX_OK_FAST',
       xlsx.getName() + ' -> ' + dest.getName() + ' (rows=' + rows.length + ', filtered=' + filtered + ')');
-  } catch(e){}
+  } catch (e) { }
 
   return { fileId: xlsx.getId(), name: xlsx.getName(), rows: rows.length, filtered: filtered };
 }
@@ -649,13 +815,13 @@ function runEvaluateRulesFast_() {
 
   var shE = ss.getSheetByName('SUIVI_ERREURS') || ss.insertSheet('SUIVI_ERREURS');
   shE.clearContents();
-  var header = res.header || ['Passeport #','PS','Courriel','CodeErreur','Message','Saison','CreatedAt'];
-  shE.getRange(1,1,1,header.length).setValues([header]);
+  var header = res.header || ['Passeport #', 'PS', 'Courriel', 'CodeErreur', 'Message', 'Saison', 'CreatedAt'];
+  shE.getRange(1, 1, 1, header.length).setValues([header]);
   if (res.rows && res.rows.length) {
-    shE.getRange(2,1,res.rows.length,header.length).setValues(res.rows);
+    shE.getRange(2, 1, res.rows.length, header.length).setValues(res.rows);
   }
-  appendImportLog_(ss, 'RULES_FULL_OK', {count:(res.rows||[]).length});
-  return {count:(res.rows||[]).length};
+  appendImportLog_(ss, 'RULES_FULL_OK', { count: (res.rows || []).length });
+  return { count: (res.rows || []).length };
 }
 
 // --- Alias: quelle que soit la version legacy appelée, on route sur FAST
@@ -672,9 +838,9 @@ function _rulesClearErreursSheet_() {
 
 /* ========== Exposition facultative via Library ========== */
 if (typeof Library !== 'undefined') {
-Library.buildRetroMembresRows = buildRetroMembresRows;
-Library.writeRetroMembresSheet = writeRetroMembresSheet;
-Library.exportRetroMembresXlsxToDrive = exportRetroMembresXlsxToDrive;
+  Library.buildRetroMembresRows = buildRetroMembresRows;
+  Library.writeRetroMembresSheet = writeRetroMembresSheet;
+  Library.exportRetroMembresXlsxToDrive = exportRetroMembresXlsxToDrive;
 }
 
 
@@ -720,8 +886,8 @@ function _computeCDPFromLedgerByMapKey_(ledgerRows, saison, passport8) {
 
 /* ===================== Construire les lignes "Rétro - Membres" (source = JOUEURS) ===================== */
 function buildRetroMembresRowsFromJoueurs_(seasonSheetId) {
-  var ss      = getSeasonSpreadsheet_(seasonSheetId);
-  var saison  = readParam_(ss, 'SEASON_LABEL') || '';
+  var ss = getSeasonSpreadsheet_(seasonSheetId);
+  var saison = readParam_(ss, 'SEASON_LABEL') || '';
   var includePhoto = (String(readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE');
 
   var joueurs = readSheetAsObjects_(ss.getId(), SHEETS.JOUEURS);
@@ -729,38 +895,105 @@ function buildRetroMembresRowsFromJoueurs_(seasonSheetId) {
   var J = joueurs.rows || [];
   var L = ledger.rows || [];
 
-  // NEW: index MEMBRES_GLOBAL pour la photo (prioritaire)
+  // --- Helper clés passeport (normalisation TXT-8 si dispo)
+  function RM_key_(pass) {
+    var p = String(pass || '').trim();
+    if (typeof normalizePassportToText8_ === 'function') {
+      try { var p8 = normalizePassportToText8_(p); if (p8) return p8; } catch(_) {}
+    }
+    return p;
+  }
+
+  // --- Détecteurs "élite" et U-num depuis libellés / tags
+  var ELITE_KEYWORDS = ['D1+','D1','PLSJQ','LDP','ÉLITE','ELITE','SÉLECTION','SELECTION'];
+
+  function RM_extractU_(s) {
+    var m = String(s||'').match(/\bU\s*-?\s*(\d{1,2})\b/i);
+    return m ? parseInt(m[1],10) : 0;
+  }
+  function RM_isEliteByName_(feeName){
+    var n = String(feeName||'').toUpperCase();
+    return ELITE_KEYWORDS.some(function(k){ return n.indexOf(k) >= 0; });
+  }
+  function RM_tagsToString_(t) {
+    if (!t) return '';
+    if (Array.isArray(t)) return t.join(',');
+    try {
+      if (typeof t === 'string' && t.trim().startsWith('[')) return JSON.parse(t).join(',');
+    } catch(_) {}
+    return String(t);
+  }
+  function RM_hasEliteTag_(row){
+    var t = RM_tagsToString_(row['Tags'] || row['Tag'] || row['tags'] || '');
+    return t.toLowerCase().indexOf('inscription_elite') >= 0;
+  }
+  // Heuristique: repérer une "INSCRIPTION" (vs article) dans le ledger
+  function RM_isInscriptionLedgerRow_(row, feeName) {
+    var t = RM_tagsToString_(row['Tags'] || row['Tag'] || row['tags'] || '').toLowerCase();
+    var n = String(feeName || '').toLowerCase();
+    // Priorité aux tags explicites
+    if (t.indexOf('inscription') >= 0) return true;
+    // Heuristiques usuelles côté club
+    if (/\binscription\b/.test(n)) return true;
+    if (/\bsaison\b/.test(n)) return true;            // ex: "Saison Automne-Hiver"
+    if (/\bligue\b/.test(n)) return true;
+    // Plusieurs articles d'entraînement contiennent "U11/U12", alors on exige un mot-clé "saison/inscription/ligue"
+    return false;
+  }
+
+  // --- Index MEMBRES_GLOBAL pour la Photo (prioritaire)
   var shMemName = (typeof SHEETS !== 'undefined' && SHEETS.MEMBRES_GLOBAL) ? SHEETS.MEMBRES_GLOBAL : 'MEMBRES_GLOBAL';
   var mem = readSheetAsObjects_(ss.getId(), shMemName);
   var indexMemByP8 = {};
   if (mem && mem.rows && mem.rows.length) {
-    var pCol = (mem.header||[]).indexOf('Passeport #') >= 0 ? 'Passeport #' :
-               (mem.header||[]).indexOf('Passeport') >= 0 ? 'Passeport' : 'Passeport #';
-    mem.rows.forEach(function(r){
+    var pCol = (mem.header || []).indexOf('Passeport #') >= 0 ? 'Passeport #' :
+               (mem.header || []).indexOf('Passeport') >= 0 ? 'Passeport' : 'Passeport #';
+    mem.rows.forEach(function (r) {
       var p8 = _normP8_(r[pCol] || '');
       if (p8) indexMemByP8[p8] = r;
     });
   }
 
-  // En-tête rétro (identique à ta version qui fonctionnait)
+  // --- Construire les maps: inscription U9-U12 réelle + élite (par passeport) depuis le LEDGER
+  var hasU9U12Inscription = Object.create(null); // clé passeport normalisée -> true
+  var isEliteInscription  = Object.create(null); // clé passeport normalisée -> true
+
+  // Filtrer le ledger sur la saison ciblée si colonne Saison dispo; sinon on garde tout et on laisse _computeCDPFromLedgerByMapKey_ filtrer pour CDP.
+  L.forEach(function (row) {
+    var pass = row['Passeport #'] || row['Passeport'] || '';
+    if (!pass) return;
+    var k = RM_key_(pass);
+
+    var feeName = row['Nom du frais'] || row['Frais'] || row['Produit'] || row['Produit/Service'] || '';
+
+    // Élites
+    if (RM_hasEliteTag_(row) || RM_isEliteByName_(feeName)) {
+      isEliteInscription[k] = true;
+    }
+
+    // U9-U12 "vraie INSCRIPTION" (pas article d'entraînement)
+    if (RM_isInscriptionLedgerRow_(row, feeName)) {
+      var u = RM_extractU_(feeName);
+      if (u >= 9 && u <= 12) {
+        hasU9U12Inscription[k] = true;
+      }
+    }
+  });
+
+  // — En-tête rétro (identique à ta version JOUEURS) —
   var HEADER = [
-    "Identifiant unique","Code","Nom","Prénom","Date de naissance",
-    "Genre(M pour Masculin ou F pour Féminin)","Langue","Courriels","Adresse","Ville",
-    "Code Postal","Domicile Téléphone","Mobile Téléphone","Travail Téléphone",
-    "Parent 1 Nom","Parent 1 Courriels","Parent 1 Domicile Téléphone","Parent 1 Mobile Téléphone","Parent 1 Travail Téléphone",
-    "Parent 2 Nom","Parent 2 Courriels","Parent 2 Domicile Téléphone","Parent 2 Mobile Téléphone","Parent 2 Travail Téléphonique",
-    "Autre Nom","Autre Courriels","Autre Domicile Téléphone","Autre Mobile Téléphone","Autre Travail Téléphonique",
-    "Position","Établissement scolaire","Fiche d'employé","Specimen Chèque","Filtration Policière","Respect et Sport",
-    "S3","S7","Théorie A+B","Diplôme C","Adapté","CDP","Euroclass","Camp","Muté","École","InscritE25"
+    "Identifiant unique", "Code", "Nom", "Prénom", "Date de naissance",
+    "Genre(M pour Masculin ou F pour Féminin)", "Langue", "Courriels", "Adresse", "Ville",
+    "Code Postal", "Domicile Téléphone", "Mobile Téléphone", "Travail Téléphone",
+    "Parent 1 Nom", "Parent 1 Courriels", "Parent 1 Domicile Téléphone", "Parent 1 Mobile Téléphone", "Parent 1 Travail Téléphone",
+    "Parent 2 Nom", "Parent 2 Courriels", "Parent 2 Domicile Téléphone", "Parent 2 Mobile Téléphone", "Parent 2 Travail Téléphone",
+    "Autre Nom", "Autre Courriels", "Autre Domicile Téléphone", "Autre Mobile Téléphone", "Autre Travail Téléphone",
+    "Position", "Établissement scolaire", "Adapté", "CDP", "Camp"
   ];
   var header = HEADER.slice();
   if (includePhoto) header.push('Photo');
 
-  // Index utilitaires (pour écrire aux bons endroits)
-  var idx = {
-    ident: 0, nom: 2, prenom: 3, dob: 4, genre: 5, courriels: 7,
-    adapte: 39, cdp: 40, camp: 42
-  };
+  var IDX = {}; header.forEach(function (h, i) { IDX[h] = i; });
 
   var rows = [];
   for (var i = 0; i < J.length; i++) {
@@ -768,101 +1001,90 @@ function buildRetroMembresRowsFromJoueurs_(seasonSheetId) {
     var pass = rJ['Passeport #'] || rJ['Passeport'] || '';
     if (!pass) continue;
 
-    var row = new Array(header.length); for (var k=0;k<row.length;k++) row[k] = '';
+    var row = new Array(header.length); for (var k = 0; k < row.length; k++) row[k] = '';
 
     // Identité de base
-    row[idx.ident]   = (typeof normalizePassportToText8_ === 'function') ? normalizePassportToText8_(pass) : _normP8_(pass);
-    row[idx.nom]     = rJ['Nom'] || '';
-    row[idx.prenom]  = rJ['Prénom'] || rJ['Prenom'] || '';
-    row[idx.dob]     = rJ['DateNaissance'] || rJ['Naissance'] || '';
-    row[idx.genre]   = _genreToMF_(rJ['Genre'] || rJ['Identité de genre'] || rJ['Sexe']);
-    row[idx.courriels] = rJ['Courriels'] || '';
+    if (IDX["Identifiant unique"] >= 0) row[IDX["Identifiant unique"]] =
+      (typeof normalizePassportToText8_ === 'function') ? normalizePassportToText8_(pass) : _normP8_(pass);
+    if (IDX["Nom"] >= 0) row[IDX["Nom"]] = rJ['Nom'] || '';
+    if (IDX["Prénom"] >= 0) row[IDX["Prénom"]] = rJ['Prénom'] || rJ['Prenom'] || '';
+    if (IDX["Date de naissance"] >= 0) row[IDX["Date de naissance"]] = rJ['DateNaissance'] || rJ['Naissance'] || '';
+    if (IDX["Genre(M pour Masculin ou F pour Féminin)"] >= 0) row[IDX["Genre(M pour Masculin ou F pour Féminin)"]] =
+      _genreToMF_(rJ['Genre'] || rJ['Identité de genre'] || rJ['Sexe']);
+    if (IDX["Courriels"] >= 0) row[IDX["Courriels"]] = rJ['Courriels'] || '';
 
     // Adapté
     var isAdapteRaw = String(rJ['isAdapte'] || '').trim();
     var isAdapte = (isAdapteRaw === '1' || /^true$/i.test(isAdapteRaw));
-    row[idx.adapte] = isAdapte ? 1 : '';
+    if (IDX["Adapté"] >= 0) row[IDX["Adapté"]] = isAdapte ? 1 : '';
 
-    // CDP: via MapKey dans le LEDGER (valeur max 1/2), sinon fallback
-    var cdp = _computeCDPFromLedgerByMapKey_(L, saison, pass);
-// CDP déjà calculé via MapKey ? (1/2) sinon U9-U12 non adapté => 0 en s'appuyant UNIQUEMENT sur JOUEURS
-if (cdp === '' || cdp == null) {
-  // 1) via AgeBracket/ProgramBand de JOUEURS
-  var band = String(rJ['AgeBracket'] || rJ['ProgramBand'] || '').toUpperCase();
-  var isU9U12 = /U9-?U12/.test(band);
+    // CDP
+    var cdp = _computeCDPFromLedgerByMapKey_(L, saison, pass); // CDP 1/2 centralisé si dispo
 
-  // 2) sinon via Age (colonne JOUEURS)
-  if (!isU9U12) {
-    var ageNum = Number(String(rJ['Age'] || '').toString().replace(',', '.'));
-    if (!isNaN(ageNum) && ageNum >= 9 && ageNum <= 12) isU9U12 = true;
-  }
-
-  // 3) sinon via DateNaissance (colonne JOUEURS) + année de saison
-  if (!isU9U12) {
-    (function () {
-      var dob = rJ['DateNaissance'] || rJ['Naissance'] || '';
-      if (!dob) return;
-      // extrait année de naissance depuis la valeur JOUEURS (sans consulter d'autres feuilles)
-      function _extractBirthYearLoose_(v) {
-        if (v instanceof Date && !isNaN(+v)) return v.getFullYear();
-        var s = String(v);
-        var m = s.match(/\b(19|20)\d{2}\b/);
-        if (m) return +m[0];
-        m = s.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-]((19|20)\d{2})\b/);
-        return m ? +m[3] : 0;
+    // Fallback « U9-U12 non-adapté => 0 » durci pour exiger une vraie INSCRIPTION U9-U12 et non-élite
+    if (cdp === '' || cdp == null) {
+      var band = String(rJ['AgeBracket'] || rJ['ProgramBand'] || '').toUpperCase();
+      var isU9U12 = /U9-?U12/.test(band);
+      if (!isU9U12) {
+        var ageNum = Number(String(rJ['Age'] || '').toString().replace(',', '.'));
+        if (!isNaN(ageNum) && ageNum >= 9 && ageNum <= 12) isU9U12 = true;
       }
-      function _parseSeasonYear_(label) {
-        var m = String(label || '').match(/\b(19|20)\d{2}\b/);
-        return m ? +m[0] : (new Date()).getFullYear();
+      if (!isU9U12) {
+        (function () {
+          function _extractBirthYearLoose_(v) {
+            if (v instanceof Date && !isNaN(+v)) return v.getFullYear();
+            var s = String(v); var m = s.match(/\b(19|20)\d{2}\b/);
+            if (m) return +m[0];
+            m = s.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-]((19|20)\d{2})\b/);
+            return m ? +m[3] : 0;
+          }
+          function _parseSeasonYear_(label) {
+            var m = String(label || '').match(/\b(19|20)\d{2}\b/);
+            return m ? +m[0] : (new Date()).getFullYear();
+          }
+          var by = _extractBirthYearLoose_(rJ['DateNaissance'] || rJ['Naissance'] || '');
+          if (by) {
+            var sy = _parseSeasonYear_(saison);
+            var ageCalc = sy - by;
+            if (ageCalc >= 9 && ageCalc <= 12) isU9U12 = true;
+          }
+        })();
       }
-      var by = _extractBirthYearLoose_(dob);
-      if (!by) return;
-      var sy = _parseSeasonYear_(saison);
-      var ageCalc = sy - by;
-      if (ageCalc >= 9 && ageCalc <= 12) isU9U12 = true;
-    })();
-  }
 
-  if (!isAdapte && isU9U12) cdp = 0;
-}
-row[idx.cdp] = (cdp === '' ? '' : cdp);
+      // 🔒 Le 0 n'est posé que si: non adapté + (9–12 par âge/band) + **inscription U9-U12 réelle** + **non-élite**
+      var kPass = RM_key_(pass);
+      if (!isAdapte && isU9U12 && hasU9U12Inscription[kPass] && !isEliteInscription[kPass]) {
+        cdp = 0;
+      }
+    }
+    if (IDX["CDP"] >= 0) row[IDX["CDP"]] = (cdp === '' ? '' : cdp);
 
-
-    // Camp: on se fie à JOUEURS (tu m’as dit que c’était OK)
+    // Camp (depuis JOUEURS)
     var hasCamp = String(rJ['hasCamp'] || '').toUpperCase();
-    row[idx.camp] = (hasCamp === 'TRUE' || hasCamp === 'OUI') ? 'Oui' : '';
+    if (IDX["Camp"] >= 0) row[IDX["Camp"]] = (hasCamp === 'TRUE' || hasCamp === 'OUI') ? 'Oui' : '';
 
-    // Photo (optionnel): on peut réutiliser PhotoStr direct de JOUEURS
-    // Photo (optionnel): priorité JOUEURS, sinon MEMBRES_GLOBAL via computePhoto
-    if (includePhoto) {
+    // Photo
+    if (includePhoto && IDX["Photo"] >= 0) {
       var wrotePhoto = false;
-      var expJ = rJ['PhotoExpireLe'] || '';
-      if (expJ) {
-        try {
-          var dJ = (expJ instanceof Date) ? expJ : new Date(expJ);
-          row[header.length - 1] = Utilities.formatDate(dJ, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-          wrotePhoto = true;
-        } catch(e) {
-          // on essaiera MEMBRES_GLOBAL plus bas
-        }
-      }
+      var strJ = rJ['PhotoStr'] || '';
+      if (String(strJ).trim() !== '') { row[IDX["Photo"]] = String(strJ).trim(); wrotePhoto = true; }
       if (!wrotePhoto) {
-        var strJ = rJ['PhotoStr'] || '';
-        if (strJ) {
-          row[header.length - 1] = String(strJ);
-          wrotePhoto = true;
-        }
+        var ageJ = rJ['Age'] || '';
+        var adaJ = rJ['isAdapte'] || '';
+        var hasInJ = rJ['hasInscription'] || '';
+        var expJ = rJ['PhotoExpireLe'] || '';
+        row[IDX["Photo"]] = _rm_statusFromFields_(ss, expJ, ageJ, adaJ, hasInJ); wrotePhoto = true;
       }
       if (!wrotePhoto) {
         var p8 = _normP8_(pass);
         var memRow = indexMemByP8[p8] || null;
-        if (memRow) {
-          // _computePhotoCell_ attend un "row" portant la colonne définie par RETRO_PHOTO_EXPIRY_COL
-          row[header.length - 1] = _computePhotoCell_(ss, memRow);
-          wrotePhoto = true;
-        }
+        var exp = memRow ? (memRow['PhotoExpireLe'] || memRow['Photo Expire Le'] || '') : '';
+        var by2 = _extractBirthYearLoose_(row[IDX["Date de naissance"]]);
+        var sy2 = parseSeasonYear_(saison);
+        var ageFromDob = (by2 && sy2) ? (sy2 - by2) : '';
+        var isAda2 = (row[IDX["Adapté"]] === 1);
+        row[IDX["Photo"]] = _rm_statusFromFields_(ss, exp, ageFromDob, isAda2, /*hasInscription*/ '');
       }
-      if (!wrotePhoto) row[header.length - 1] = ''; // aucun signal
     }
 
     rows.push(row);

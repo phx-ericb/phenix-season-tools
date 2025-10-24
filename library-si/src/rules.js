@@ -383,29 +383,37 @@ artPlay.forEach(function(a){
   var raw  = (a['Nom du frais'] || a['Frais'] || a['Produit'] || '').toString();
   var item = catalog.match(raw); // peut être null si non mappé
 
-  // --- (A) Cas spécial: CAMP orphelin => code U13U18_CAMP_SEUL
+  // --- (A) Cas spécial: CAMP orphelin => code U13U18_CAMP_SEUL --- LEGACY --- MAINTENANT DANS RULES_FAST
   //     (simple: basé UNIQUEMENT sur RETRO_CAMP_KEYWORDS et l'âge U13–U18)
-  if (campKeys.length) {
-    var hay = _hay_(raw);
-    if (_matchAny_(hay, campKeys)) {
-      var U = deriveUFromRow_(a);
-      var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
-      if (uNum && !isNaN(uNum) && uNum >= 13 && uNum <= 18) {
-        var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, a['Passeport #']);
-        writeErr_(
-          'warn','INSCRIPTIONS','U13U18_CAMP_SEUL', a,
-          'Inscription au camp de sélection sans inscription à la saison',
-          { U: U, camp:true, saison:false, key:k, raw:raw, code:(item&&item.Code)||'', articlesActifs: arts }
-        );
-        return; // on a émis le cas camp-seul; ne pas retomber sur ARTICLE_ORPHELIN
-      }
-    }
-  }
+  // if (campKeys.length) {
+  //   var hay = _hay_(raw);
+  //   if (_matchAny_(hay, campKeys)) {
+  //     var U = deriveUFromRow_(a);
+  //     var uNum = parseInt(String(U||'').replace(/^U/i,''),10);
+  //     if (uNum && !isNaN(uNum) && uNum >= 13 && uNum <= 18) {
+  //       var arts = listActiveOccurrencesForPassport_(ss, SHEETS.ARTICLES, a['Passeport #']);
+  //       writeErr_(
+  //         'warn','INSCRIPTIONS','U13U18_CAMP_SEUL', a,
+  //         'Inscription au camp de sélection sans inscription à la saison',
+  //         { U: U, camp:true, saison:false, key:k, raw:raw, code:(item&&item.Code)||'', articlesActifs: arts }
+  //       );
+  //       return; // on a émis le cas camp-seul; ne pas retomber sur ARTICLE_ORPHELIN
+  //     }
+  //   }
+  // }
 
   // --- (B) Tolérance: AllowOrphan (MAPPINGS / PARAMS / RULES_JSON)
   if ((item && item.AllowOrphan === true) || isAllowedOrphan_(ss, a, item, raw, allowCfg)) return;
 
   // --- (C) Orphelin générique
+
+  // Si c’est un CAMP (détecté par campKeys), on NE le marque pas orphelin ici:
+// la détection est gérée par la version fast avec U13U18_CAMP_SEUL.
+if (campKeys.length) {
+  var hay2 = _hay_(raw);
+  if (_matchAny_(hay2, campKeys)) return;
+}
+
   writeErr_(
     'warn','ARTICLES','ARTICLE_ORPHELIN', a,
     'Article sans inscription correspondante',
@@ -581,6 +589,9 @@ function runEvaluateRulesFast_(ss) {
   _rulesWriteFull_(ss, res.errors, res.header);
   return { written: res.errors.length, ledger: res.ledgerCount, joueurs: res.joueursCount };
 }
+
+
+
 
 /** Écrit ERREURS (FULL) en une passe, header fiable */
 function _rulesWriteFull_(ss, rows, header) {

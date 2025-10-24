@@ -82,19 +82,17 @@ function refreshSeasons() {
     .withSuccessHandler((res) => {
             Busy.hide('saison');     
       if (!res.ok) { toast(res.error); Busy.hide('saison'); return; }
-      const sel = $('#seasonSelect'); sel.innerHTML = '';
-      (res.data || []).forEach(s => {
-        const opt = document.createElement('option');
-        opt.value = s.id; opt.textContent = (s.isActive ? '⭐ ' : '') + s.title;
-        sel.appendChild(opt);
-        if (s.isActive) sel.value = s.id;
-      });
-      // Précharges
-      // pré-charges dépendants de la saison
 
-window.loadParamsForActiveSeason?.(false);
-window.loadRulesForActiveSeason?.(false);
-window.loadMappingList?.();
+      const sel = $('#seasonSelect'); sel.innerHTML = '';
+(res.data || []).forEach(s => {
+  const opt = document.createElement('option');
+  opt.value = s.id; opt.textContent = (s.isActive ? '⭐ ' : '') + s.title;
+  sel.appendChild(opt);
+  if (s.isActive) sel.value = s.id;
+});
+
+// 🔄 Notifie les modules que la saison est prête/peut avoir changé
+document.dispatchEvent(new CustomEvent('season-changed', { detail: { seasonId: sel.value }}));
 
       Busy.hide('saison');
     })
@@ -211,13 +209,6 @@ window.delegateOn = function delegateOn(rootSel, event, sel, handler){
 
 // Tous tes bindings UI ici (appelé après DOM prêt)
 window.__bindUI = function __bindUI(){
-  // exemples — adapte selon tes IDs
-  safeOn('#seasonSelect','change', () => {
-    window.loadParamsForActiveSeason?.(false);
-    window.loadRulesForActiveSeason?.(false);
-    window.loadMappingList?.();
-  });
-
   // Mappings
   safeOn('#btnSaveAllMappings','click', window.saveAllMappings);
   safeOn('#btnReloadMapping','click', window.reloadMappings);

@@ -617,16 +617,22 @@ function runMailPipelineSelected_(ssOrId, stage){
     : (typeof LIB!=='undefined' && LIB.enqueueValidationMailsFromErreursFast_ ? LIB.enqueueValidationMailsFromErreursFast_(sid) : { queued: 0 });
   try { if (typeof appendImportLog_==='function') appendImportLog_(ss,'MAIL_QUEUE_ERRORS_OK', JSON.stringify(qErrors)); } catch(_){}
 
-  // 3) Worker – envoie pending (honore DRY_RUN / DRY_REDIRECT_EMAIL)
-  var workerRes = (typeof sendPendingOutbox==='function')
-    ? sendPendingOutbox(sid)
-    : (typeof LIB!=='undefined' && LIB.sendPendingOutbox ? LIB.sendPendingOutbox(sid) : { processed: 0, sent: 0, errors: 0 });
-  try {
-    if (typeof appendImportLog_==='function') {
-      appendImportLog_(ss,'MAIL_WORKER_OK', JSON.stringify(workerRes));
-      appendImportLog_(ss,'MAIL_PIPELINE_END', JSON.stringify({ stage: stg, queued_total: (qWelcome.queued||0)+(qErrors.queued||0) }));
-    }
-  } catch(_){}
+ // 3) Worker – envoie pending
+var workerRes = (typeof sendPendingOutbox==='function')
+  ? sendPendingOutbox(sid)
+  : (typeof LIB!=='undefined' && LIB.sendPendingOutbox ? LIB.sendPendingOutbox(sid) : { processed: 0, sent: 0, errors: 0 });
 
-  return { ok:true, queued: (qWelcome.queued||0)+(qErrors.queued||0), welcome: qWelcome, errors: qErrors, worker: workerRes };
+// total réellement mis en file dans CE run (welcome + erreurs), quels que soient les noms de clés
+var totQueued =
+  ((qWelcome && (qWelcome.enqueued || qWelcome.queued)) || 0) +
+  ((qErrors  && (qErrors.enqueued  || qErrors.queued )) || 0);
+
+try {
+  if (typeof appendImportLog_==='function') {
+    appendImportLog_(ss,'MAIL_WORKER_OK', JSON.stringify(workerRes));
+    appendImportLog_(ss,'MAIL_PIPELINE_END', JSON.stringify({ stage: stg, queued_total: totQueued }));
+  }
+} catch(_){}
+
+return { ok:true, queued: totQueued, welcome: qWelcome, errors: qErrors, worker: workerRes };
 }

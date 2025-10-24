@@ -295,49 +295,42 @@
 document.addEventListener('DOMContentLoaded', () => {
   const b = document.getElementById('btnSendOutbox');
   if (!b) return;
-  const clone = b.cloneNode(true);     // retire anciens onclick/listeners
+  const clone = b.cloneNode(true);
   b.replaceWith(clone);
   const btn = document.getElementById('btnSendOutbox');
 
-  let sending = false;                 // garde-fou
-  btn.addEventListener('click', ()=>{
-    if (sending) return;               // ignore double-clic
-    sending = true;
-    btn.disabled = true;
-    MAILBUSY.show('Envoi en cours…');
+  let sending = false;
+  btn.addEventListener('click', async ()=> {
+    if (sending) return;
+    const sid = _sid && _sid();
+    if (!sid) { toast('Aucune saison sélectionnée.', 'error'); return; }
 
-    const sid = _sid();
+    // Avertir si DRY_RUN
+    try {
+      const pr = window.PARAMS?.DRY_RUN ?? null; // selon où tu exposes tes params
+      if (pr === true) toast('Mode DRY_RUN actif: envois redirigés / simulés.');
+    } catch (_) {}
+
+    sending = true; btn.disabled = true; MAILBUSY.show('Envoi en cours…');
+
     google.script.run
-      .withSuccessHandler(res=>{
-        MAILBUSY.hide();
-        sending = false;
-        btn.disabled = false;
+      .withSuccessHandler(res => {
+        MAILBUSY.hide(); sending = false; btn.disabled = false;
         if (res && res.ok) {
           const d = res.data || {};
           toast(`Envoyés: ${d.processed||0} • Résumés CSV: ${d.summaries?'oui':'non'}`);
         } else {
-          toast('Erreur: '+(res && res.error ? res.error : 'inconnue'));
+          toast('Erreur: '+(res && res.error ? res.error : 'inconnue'), 'error');
         }
       })
-      .withFailureHandler(err=>{
-        MAILBUSY.hide();
-        sending = false;
-        btn.disabled = false;
+      .withFailureHandler(err => {
+        MAILBUSY.hide(); sending = false; btn.disabled = false;
         console.error(err);
-        toast('Erreur serveur (voir console)');
+        toast('Erreur serveur (voir console)', 'error');
       })
       .runSendPendingOutbox(sid);
   });
 });
 
 
-
-  document.addEventListener('DOMContentLoaded', () => {
-
-    $m('#btnMailReload')?.addEventListener('click', mail_load);
-    $m('#btnMailAdd')?.addEventListener('click', () => mail_openModal({ Active: true, Genre: '*' }));
-    mail_bindModal();
-    // (on ne lie plus les boutons d’erreur, ils n’existent plus)
-    mail_load();
-  });
 </script>

@@ -1,18 +1,51 @@
 function getSeasonList() {
   return _wrap('getSeasonList', function(){
+    var cache = CacheService.getScriptCache();
+    var CK = 'SEASON_LIST_v2';
+    var hit = cache.get(CK);
+    if (hit) { try { return _ok(JSON.parse(hit)); } catch(_){ cache.remove(CK); } }
+
     var props = _registry_();
-    var list = JSON.parse(props.getProperty('SEASONS_JSON') || '[]');
+    var list = [];
+    try { list = JSON.parse(props.getProperty('SEASONS_JSON') || '[]'); } catch(_){ list = []; }
+
+    // Validation Drive non-bloquante (petit lock); si indisponible, on sert la liste telle quelle
     var cleaned = [];
-    list.forEach(function(s){ try { DriveApp.getFileById(s.id).getId(); cleaned.push(s); } catch(e){} });
-    if (cleaned.length !== list.length) props.setProperty('SEASONS_JSON', JSON.stringify(cleaned));
+    var validated = false;
+    var lock = null;
+    try {
+      lock = LockService.getScriptLock();
+      if (lock.tryLock(500)) {
+        list.forEach(function(s){
+          try { DriveApp.getFileById(s.id).getId(); cleaned.push(s); } catch(e){}
+        });
+        validated = true;
+      } else {
+        cleaned = list.slice(); // pas de validation sous contention
+      }
+    } finally {
+      if (lock) { try { lock.releaseLock(); } catch(_){ } }
+    }
+
+    if (validated && cleaned.length !== list.length) {
+      props.setProperty('SEASONS_JSON', JSON.stringify(cleaned));
+    }
+
+    // Active
     var active = props.getProperty('ACTIVE_SEASON_ID');
     if (!active || !cleaned.some(function(s){ return s.id === active; })) {
-      active = cleaned.length ? cleaned[0].id : null; if (active) props.setProperty('ACTIVE_SEASON_ID', active);
+      active = cleaned.length ? cleaned[0].id : null;
+      if (active) props.setProperty('ACTIVE_SEASON_ID', active);
     }
     cleaned.forEach(function(s){ s.isActive = (s.id === active); });
+
+    // cache 5 min — l’UI lit ça ultra-rapidement
+    try { cache.put(CK, JSON.stringify(cleaned), 300); } catch(_){}
+
     return _ok(cleaned);
   });
 }
+
 function setActiveSeason(seasonId, opts) {
   return _wrap('setActiveSeason', function(){
     opts = opts || {};
@@ -55,4 +88,15 @@ function cloneSeason(srcSeasonId, newTitle) {
     list.push(info); _registry_().setProperty('SEASONS_JSON', JSON.stringify(list));
     return _ok(info, 'Season cloned');
   });
+}
+
+function API_setActiveSeason(seasonId) {
+  seasonId = String(seasonId || '').trim();
+  if (!seasonId) return { ok:false, error:'seasonId vide' };
+
+  // persiste + prime le cache hardened
+  PropertiesService.getScriptProperties().setProperty('ACTIVE_SEASON_ID', seasonId);
+  try { setSeasonId_(seasonId); } catch(_) {}
+
+  return { ok:true, seasonId: seasonId, at: Date.now() };
 }

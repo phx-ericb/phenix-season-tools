@@ -31,28 +31,52 @@ function _withIncrementalDisabled_(fn){
 /** Import-only (scan → staging → finals → archive) via LIB.
  * Pas de startImportRun_ ici : le flow entoure déjà l'appel.
  */
+
+
+
 function runImporterDonneesSaison() {
   var seasonId = getSeasonId_();
+  var ssSeason = getSeasonSpreadsheet_(seasonId);
 
-  // 1) Appel direct à la lib (prioritaire)
+  // --- Central : ID à récupérer dans les params de la saison
+  var centralId = readParam_(ssSeason, 'GLOBAL_MEMBRES_SHEET_ID') || '';
+  if (!centralId) {
+    throw new Error('Paramètre GLOBAL_MEMBRES_SHEET_ID manquant dans le fichier de saison.');
+  }
+
+  // 0) Mise à jour des MEMBRES_GLOBAL central à partir du fichier XLSX Spordle (Validation_Membres)
+  try {
+    importValidationMembresToGlobal_(centralId);
+    appendImportLog_(ssSeason, 'VM_IMPORT_OK', { central: centralId });
+  } catch (e0) {
+    appendImportLog_(ssSeason, 'VM_IMPORT_FAIL', String(e0));
+    // on n’arrête pas complètement, mais note qu’ici si le central n’est pas à jour → la suite verra les vieilles données
+  }
+
+  // 1) Synchro du sous-ensemble saison à partir du central
+  try {
+    var syncRes = syncMembresGlobalSubsetFromCentral_(seasonId, centralId);
+    appendImportLog_(ssSeason, 'SYNC_MEMBRES_GLOBAL_OK', syncRes);
+  } catch (e1) {
+    appendImportLog_(ssSeason, 'SYNC_MEMBRES_GLOBAL_FAIL', String(e1));
+  }
+
+  // 2) Import classique via la lib (prioritaire)
   if (typeof LIB !== 'undefined' && LIB && typeof LIB.importerDonneesSaison === 'function') {
     var res = LIB.importerDonneesSaison(seasonId);
-    // Log informatif (sans runId)
-    try { appendImportLog_(getSeasonSpreadsheet_(seasonId), 'RUN_IMPORT_LIB', { ok: !!res && res.ok === true }); } catch (_){}
+    try { appendImportLog_(ssSeason, 'RUN_IMPORT_LIB', { ok: !!res && res.ok === true }); } catch (_) {}
     return res;
   }
 
-  // 2) Repli global si la fonction est chargée sans namespace
+  // 3) Repli global si la fonction est chargée sans namespace
   if (typeof importerDonneesSaison === 'function') {
     var res2 = importerDonneesSaison(seasonId);
-    try { appendImportLog_(getSeasonSpreadsheet_(seasonId), 'RUN_IMPORT_LIB', { ok: !!res2 && res2.ok === true }); } catch (_){}
+    try { appendImportLog_(ssSeason, 'RUN_IMPORT_GLOBAL', { ok: !!res2 && res2.ok === true }); } catch (_) {}
     return res2;
   }
 
   throw new Error('importerDonneesSaison introuvable (ni LIB.importerDonneesSaison, ni globale).');
 }
-
-
 
 
 /** Export XLSX — Rétro : Membres (COMPLET GARANTI) */

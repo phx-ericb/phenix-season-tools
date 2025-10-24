@@ -65,37 +65,49 @@ function loadRetroRules_(ss) {
   }
   var rules = [];
   if (raw) {
-    try { var arr = JSON.parse(raw); rules = Array.isArray(arr)?arr:[]; }
-    catch(e){ appendImportLog_(ss, 'RETRO_RULES_JSON_PARSE_FAIL', String(e)); }
+    try { var arr = JSON.parse(raw); rules = Array.isArray(arr) ? arr : []; }
+    catch (e) { appendImportLog_(ss, 'RETRO_RULES_JSON_PARSE_FAIL', String(e)); }
   }
   if (!rules.length) {
     var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_IGNORE_FEES_CSV) || 'senior,u-sé,adulte,ligue';
     var adapteCsv = readParam_(ss, PARAM_KEYS.RETRO_ADAPTE_KEYWORDS) || 'adapté,adapte';
-    var campCsv   = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS)   || 'camp de sélection u13,camp selection u13,camp u13';
-    var photoOn   = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
-    var photoCol  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
-    var warnMmDd  = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
-    var absDate   = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
+    var campCsv = readParam_(ss, PARAM_KEYS.RETRO_CAMP_KEYWORDS) || 'camp de sélection u13,camp selection u13,camp u13';
+    var photoOn = (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_INCLUDE_COL) || 'FALSE').toUpperCase() === 'TRUE';
+    var photoCol = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_EXPIRY_COL) || '';
+    var warnMmDd = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_BEFORE_MMDD) || '03-01';
+    var absDate = readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '';
     rules = [
-      { id:'ignore_fees', enabled:true, scope:'both',
-        when:{ field:'Nom du frais', contains_any: ignoreCsv.split(',') },
-        action:{ type:'ignore_row' } },
-      { id:'adapte_flag', enabled:true, scope:'both',
-        when:{ field:'Nom du frais', contains_any: adapteCsv.split(',') },
-        action:{ type:'set_member_field', field:'adapte', value:1 } },
-      { id:'cdp_2', enabled:true, scope:'articles',
-        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT', text_contains_any:['2','2 entrainements'] },
-        action:{ type:'set_member_field_max', field:'cdp', value:2 } },
-      { id:'cdp_1', enabled:true, scope:'articles',
-        when:{ catalog_exclusive_group:'CDP_ENTRAINEMENT' },
-        action:{ type:'set_member_field_max', field:'cdp', value:1 } },
-      { id:'camp_u13', enabled:true, scope:'articles',
-        when:{ field:'Nom du frais', contains_any: campCsv.split(',') },
-        action:{ type:'set_member_field', field:'camp', value:'Oui' } }
+      {
+        id: 'ignore_fees', enabled: true, scope: 'both',
+        when: { field: 'Nom du frais', contains_any: ignoreCsv.split(',') },
+        action: { type: 'ignore_row' }
+      },
+      {
+        id: 'adapte_flag', enabled: true, scope: 'both',
+        when: { field: 'Nom du frais', contains_any: adapteCsv.split(',') },
+        action: { type: 'set_member_field', field: 'adapte', value: 1 }
+      },
+      {
+        id: 'cdp_2', enabled: true, scope: 'articles',
+        when: { catalog_exclusive_group: 'CDP_ENTRAINEMENT', text_contains_any: ['2', '2 entrainements'] },
+        action: { type: 'set_member_field_max', field: 'cdp', value: 2 }
+      },
+      {
+        id: 'cdp_1', enabled: true, scope: 'articles',
+        when: { catalog_exclusive_group: 'CDP_ENTRAINEMENT' },
+        action: { type: 'set_member_field_max', field: 'cdp', value: 1 }
+      },
+      {
+        id: 'camp_u13', enabled: true, scope: 'articles',
+        when: { field: 'Nom du frais', contains_any: campCsv.split(',') },
+        action: { type: 'set_member_field', field: 'camp', value: 'Oui' }
+      }
     ];
     if (photoOn && photoCol) {
-      rules.push({ id:'photo_policy', enabled:true, scope:'member',
-        action:{ type:'compute_photo', expiry_col:photoCol, warn_mmdd:warnMmDd, abs_date:absDate }});
+      rules.push({
+        id: 'photo_policy', enabled: true, scope: 'member',
+        action: { type: 'compute_photo', expiry_col: photoCol, warn_mmdd: warnMmDd, abs_date: absDate }
+      });
     }
     appendImportLog_(ss, 'RETRO_RULES_JSON_FALLBACK', 'using PARAMS-derived defaults');
   }
@@ -384,7 +396,7 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
 
   // Filtres
   var ignoreCsv = readParam_(ss, PARAM_KEYS.RETRO_GART_IGNORE_FEES_CSV) || readParam_(ss, 'RETRO_IGNORE_FEES_CSV') || 'senior,u-sé,adulte,ligue';
-  var eliteCsv = readParam_(ss, PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS) || 'D1+,LDP,Ligue';
+  var eliteCsv = readParam_(ss, PARAM_KEYS.RETRO_GART_ELITE_KEYWORDS) || 'D1+,CFP,LDP,Ligue,Ligue 2,Ligue 3';
   var requireMp = (String(readParam_(ss, PARAM_KEYS.RETRO_GART_REQUIRE_MAPPING) || 'TRUE').toUpperCase() === 'TRUE');
   var requireInsc = (String(readParam_(ss, PARAM_KEYS.RETRO_GART_REQUIRE_INSCRIPTION) || 'FALSE').toUpperCase() === 'TRUE');
 
@@ -415,7 +427,49 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
   _dbg_(DEBUG, '[GART] memberIdx size', { size: Object.keys(memberIdx).length });
 
   // Set des passeports avec inscription active (normalisés)
+  // Passeports avec inscription active + set "élite"
   var inscActivePass = {};
+  var elitePass = {};
+  // Passeports avec inscription U9-U12 active (basée sur le libellé de l'inscription)
+  var u9u12Pass = {};
+
+
+  function _ga_truthy_(v) { var s = String(v || '').trim().toUpperCase(); return (s === 'TRUE' || s === 'OUI' || s === 'YES' || s === '1'); }
+  function _ga_isActiveInsc_(r) {
+    var st = Number(r['Status'] || 0);
+    var can = _ga_truthy_(r['CANCELLED'] || r['Annulé'] || r['Annule'] || r[CONTROL_COLS && CONTROL_COLS.CANCELLED]);
+    var ex = _ga_truthy_(r['EXCLUDE_FROM_EXPORT'] || r[CONTROL_COLS && CONTROL_COLS.EXCLUDE_FROM_EXPORT]);
+    return (st === 1) && !can && !ex;
+  }
+  function _ga_norm_passport_(ssOrVal, maybeVal) {
+    var v = (typeof ssOrVal === 'string' || ssOrVal == null) ? ssOrVal : maybeVal;
+    var s = String(v || '').trim(); if (!s) return '';
+    return (typeof normalizePassportToText8_ === 'function') ? normalizePassportToText8_(s) : s.replace(/\D/g, '').padStart(8, '0');
+  }
+  function _ga_containsAny_(s, csv) {
+    if (!csv) return false;
+    var hay = (function (x) { try { x = String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) { } return String(x || '').toLowerCase(); })(s || '');
+    return csv.split(',').some(function (w) { return hay.indexOf(String(w || '').trim().toLowerCase()) >= 0; });
+  }
+
+  (insc.rows || []).forEach(function (r) {
+    if (!_ga_isActiveInsc_(r)) return;
+    var p = _ga_norm_passport_(ss, r['Passeport #'] || r['Passeport'] || r['PS']);
+    if (!p) return;
+    inscActivePass[p] = true;
+
+    var feeName = r['Nom du frais'] || r['Frais'] || r['Produit'] || '';
+    if (_ga_containsAny_(feeName, eliteCsv)) elitePass[p] = true;
+
+    // Détection U9-U12 à partir du libellé d’inscription (pas des articles)
+    var mU = String(feeName || '').match(/\bU\s*-?\s*(\d{1,2})\b/i);
+    if (mU) {
+      var uNum = parseInt(mU[1], 10);
+      if (uNum >= 9 && uNum <= 12) u9u12Pass[p] = true;
+    }
+
+  });
+
   (insc.rows || []).forEach(function (r) {
     var p = _ga_norm_passport_(ss, r['Passeport #']); if (!p) return;
     var can = String(r[CONTROL_COLS.CANCELLED] || '').toLowerCase() === 'true';
@@ -593,8 +647,16 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
     var uNum = parseInt(String(Um).replace(/^U/i, ''), 10);
     if (!(uNum >= 9 && uNum <= 12)) return;
 
+    // ⛔ élite ? → on ne génère PAS de CDP0 pour ce passeport
+    if (elitePass[passK]) return;
+
+
     var isAdapte = !!perPassIsAdapte[passK];
     if (isAdapte) return;
+
+    // Nécessite une **inscription U9-U12 réelle** (pas seulement l’âge)
+
+  if (!u9u12Pass[passK]) return;
 
     var hasCDP = perPassExclusive[passK] && (perPassExclusive[passK]['CDP_ENTRAINEMENT'] || perPassExclusive[passK]['CDP']);
     var count = 0;
@@ -616,17 +678,15 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
 
       // Catégorie avec préfixe "CDP " (format paramétrable)
       var varsCDP = {
-        U: Um,
-        U2: U2m,
-        ageCat: U2m,
-        genreInitiale: gInitM || '',
+        U: 'U' + (uNum < 10 ? ('0' + uNum) : uNum),
+        U2: 'U' + (uNum < 10 ? ('0' + uNum) : uNum),
+        genreInitiale: gInitM,
         genre: (gInitM === 'F' ? 'Féminin' : (gInitM === 'M' ? 'Masculin' : (gInitM === 'X' ? 'Mixte' : ''))),
         article: 'CDP0',
         saison: seasonLabel,
         annee: seasonYear
       };
-      var categ = _ga_tpl_(catFmtCDP, varsCDP); // ex: "CDP U10 M"
-
+      var categ = _ga_tpl_(catFmtCDP, varsCDP);
       var nbCols = header.length;
       var rowOut = new Array(nbCols).fill("");
       rowOut[0] = _ga_norm_passport_(ss, passK);
@@ -637,7 +697,6 @@ function buildRetroGroupeArticlesRows(seasonSheetId) {
       rowOut[9] = categ;
       rows.push(rowOut);
 
-      // (facultatif) noter l’exclusivité avec code "CDP0" dans le groupe CDP_ENTRAINEMENT
       perPassExclusive[passK] = perPassExclusive[passK] || {};
       perPassExclusive[passK]['CDP_ENTRAINEMENT'] = perPassExclusive[passK]['CDP_ENTRAINEMENT'] || [];
       perPassExclusive[passK]['CDP_ENTRAINEMENT'].push({ feeName: 'CDP0', code: 'CDP0' });
@@ -698,7 +757,7 @@ function _writeRetroErrors_(ss, errors) {
 
 /* ===================== EXPORT XLSX (Groupe Articles SEUL) — avec filtre optionnel ===================== */
 
-function exportRetroGroupeArticlesXlsxToDrive(seasonSheetId, options){
+function exportRetroGroupeArticlesXlsxToDrive(seasonSheetId, options) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
 
   // 0) ON/OFF incrémental via PARAMS
@@ -734,26 +793,26 @@ function exportRetroGroupeArticlesXlsxToDrive(seasonSheetId, options){
   SpreadsheetApp.flush();
 
   var url = 'https://docs.google.com/spreadsheets/d/' + temp.getId() + '/export?format=xlsx';
-  var blob = UrlFetchApp.fetch(url, { headers:{ Authorization:'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
+  var blob = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() } }).getBlob();
   var ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd-HHmm');
   blob.setName('Export_Retro_Groupe_Articles_' + ts + (filtered ? '_INCR' : '') + '.xlsx');
 
   var folderId = readParam_(ss, PARAM_KEYS.RETRO_GART_EXPORTS_FOLDER_ID)
-              || readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
+    || readParam_(ss, PARAM_KEYS.RETRO_EXPORTS_FOLDER_ID) || '';
   var dest = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
   var file = dest.createFile(blob);
 
   DriveApp.getFileById(temp.getId()).setTrashed(true);
   appendImportLog_(ss, 'RETRO_GART_XLSX_OK', file.getName() + ' -> ' + dest.getName() +
-                        ' (rows=' + rows.length + ', filtered=' + filtered + ')');
-  return { fileId:file.getId(), name:file.getName(), rows: rows.length, filtered: filtered };
+    ' (rows=' + rows.length + ', filtered=' + filtered + ')');
+  return { fileId: file.getId(), name: file.getName(), rows: rows.length, filtered: filtered };
 }
 
 /* ========== Exposition facultative via Library ========== */
 if (typeof Library !== 'undefined') {
-Library.buildRetroGroupeArticlesRows = buildRetroGroupeArticlesRows;
-Library.writeRetroGroupeArticlesSheet = writeRetroGroupeArticlesSheet;
-Library.exportRetroGroupeArticlesXlsxToDrive = exportRetroGroupeArticlesXlsxToDrive;
+  Library.buildRetroGroupeArticlesRows = buildRetroGroupeArticlesRows;
+  Library.writeRetroGroupeArticlesSheet = writeRetroGroupeArticlesSheet;
+  Library.exportRetroGroupeArticlesXlsxToDrive = exportRetroGroupeArticlesXlsxToDrive;
 }
 
 /** Export Groupes-Articles (lignes additionnelles) depuis LEDGER
@@ -761,90 +820,90 @@ Library.exportRetroGroupeArticlesXlsxToDrive = exportRetroGroupeArticlesXlsxToDr
  * - Respecte RETRO_GART_REQUIRE_MAPPING (sinon fallback templates si tu veux)
  * - AllowOrphan: TRUE = autorise si JOUEURS absent (en pratique, JOUEURS couvre déjà articles-seulement)
  */
-function buildRetroGroupesArticlesRowsFromLedger_(seasonSheetId){
+function buildRetroGroupesArticlesRowsFromLedger_(seasonSheetId) {
   var ss = getSeasonSpreadsheet_(seasonSheetId);
 
   // Data
   var ledger = readSheetAsObjects_(ss.getId(), SHEETS.ACHATS_LEDGER).rows || [];
-  var maps   = readSheetAsObjects_(ss.getId(), SHEETS.MAPPINGS).rows || [];
-  var joueurs= readSheetAsObjects_(ss.getId(), 'JOUEURS').rows || [];
+  var maps = readSheetAsObjects_(ss.getId(), SHEETS.MAPPINGS).rows || [];
+  var joueurs = readSheetAsObjects_(ss.getId(), 'JOUEURS').rows || [];
 
-  var articleMaps = maps.filter(function(r){ return String(r['Type']||'').toLowerCase()==='article' && !String(r['Exclude']||'').trim(); });
+  var articleMaps = maps.filter(function (r) { return String(r['Type'] || '').toLowerCase() === 'article' && !String(r['Exclude'] || '').trim(); });
 
   // Params
-  var ignCsv     = (readParam_(ss, 'RETRO_GART_IGNORE_FEES_CSV') || '').toString();
-  var eliteKeys  = (readParam_(ss, 'RETRO_GART_ELITE_KEYWORDS')  || readParam_(ss,'RETRO_GROUP_ELITE_KEYWORDS') || '').toString();
-  var requireMap = String(readParam_(ss, 'RETRO_GART_REQUIRE_MAPPING')||'TRUE').toUpperCase()==='TRUE';
+  var ignCsv = (readParam_(ss, 'RETRO_GART_IGNORE_FEES_CSV') || '').toString();
+  var eliteKeys = (readParam_(ss, 'RETRO_GART_ELITE_KEYWORDS') || readParam_(ss, 'RETRO_GROUP_ELITE_KEYWORDS') || '').toString();
+  var requireMap = String(readParam_(ss, 'RETRO_GART_REQUIRE_MAPPING') || 'TRUE').toUpperCase() === 'TRUE';
 
   // Helpers
-  function _hasAny(s, csv){
+  function _hasAny(s, csv) {
     if (!csv) return false;
-    var hay = _nrmLower_(s||'');
-    return csv.split(',').some(function(w){ return hay.indexOf(_nrmLower_(w.trim()))>=0; });
+    var hay = _nrmLower_(s || '');
+    return csv.split(',').some(function (w) { return hay.indexOf(_nrmLower_(w.trim())) >= 0; });
   }
-  function _ageU2_(ageBracket){
-    var m = String(ageBracket||'').match(/U(\d+)/i);
+  function _ageU2_(ageBracket) {
+    var m = String(ageBracket || '').match(/U(\d+)/i);
     return m ? m[1] : '';
   }
-  function _genreInit_(g){
-    return (String(g||'').toUpperCase().charAt(0) || '');
+  function _genreInit_(g) {
+    return (String(g || '').toUpperCase().charAt(0) || '');
   }
-  function _fmt(tpl, j){
-    return String(tpl||'')
+  function _fmt(tpl, j) {
+    return String(tpl || '')
       .replace(/{{\s*U2\s*}}/g, _ageU2_(j.AgeBracket))
       .replace(/{{\s*genreInitiale\s*}}/g, _genreInit_(j.Genre));
   }
-  function _overlaps(br, umin, umax){
-    var m = String(br||'').match(/U(\d+)\s*-\s*U?(\d+)/i);
+  function _overlaps(br, umin, umax) {
+    var m = String(br || '').match(/U(\d+)\s*-\s*U?(\d+)/i);
     if (!m) return true;
-    var a = Number(m[1]||0), b = Number(m[2]||0);
+    var a = Number(m[1] || 0), b = Number(m[2] || 0);
     return !(b < umin || a > umax);
   }
 
   // JOUEURS index (pour genre/age)
   var jByPass = {};
-  joueurs.forEach(function(j){ var p=String(j['Passeport #']||j['Passeport']||j['PS']||'').trim(); if(p) jByPass[p]=j; });
+  joueurs.forEach(function (j) { var p = String(j['Passeport #'] || j['Passeport'] || j['PS'] || '').trim(); if (p) jByPass[p] = j; });
 
   // Header minimal (même que Groupes)
-  var HEADER = ["Identifiant unique","Catégorie","Équipe/Groupe"];
+  var HEADER = ["Identifiant unique", "Catégorie", "Équipe/Groupe"];
   var out = [];
 
-  ledger.filter(_isActiveRow_).forEach(function(a){
-    var pass = String(a['Passeport #']||'').trim(); if (!pass) return;
-    var pass8 = (typeof normalizePassportToText8_==='function') ? normalizePassportToText8_(pass) : pass.replace(/\D/g,'').padStart(8,'0');
+  ledger.filter(_isActiveRow_).forEach(function (a) {
+    var pass = String(a['Passeport #'] || '').trim(); if (!pass) return;
+    var pass8 = (typeof normalizePassportToText8_ === 'function') ? normalizePassportToText8_(pass) : pass.replace(/\D/g, '').padStart(8, '0');
 
     var fee = a['Nom du frais'] || a['Frais'] || a['Produit'] || '';
-    if (_hasAny(fee, ignCsv))    return; // ignorés
+    if (_hasAny(fee, ignCsv)) return; // ignorés
     if (_hasAny(fee, eliteKeys)) return; // élite
 
     var j = jByPass[pass] || {};
     var ginit = _genreInit_(j.Genre);
-    var best = null, prio=-1;
+    var best = null, prio = -1;
 
     // Trouver mapping Article correspondant (non-exclusif)
-    articleMaps.forEach(function(m){
-      var alias = String(m['AliasContains']||'').trim();
-      if (alias && _nrmLower_(fee).indexOf(_nrmLower_(alias))<0) return;
+    articleMaps.forEach(function (m) {
+      var alias = String(m['AliasContains'] || '').trim();
+      if (alias && _nrmLower_(fee).indexOf(_nrmLower_(alias)) < 0) return;
 
       // SANS ExclusiveGroup ici: on ne veut que les “additionnels”
-      if (String(m['ExclusiveGroup']||'').trim()) return;
+      if (String(m['ExclusiveGroup'] || '').trim()) return;
 
-      var okG = (String(m['Genre']||'*')==='*' || _genreInit_(m['Genre'])===ginit);
-      var okU = _overlaps(j.AgeBracket, Number(m['Umin']||0), Number(m['Umax']||99));
+      var okG = (String(m['Genre'] || '*') === '*' || _genreInit_(m['Genre']) === ginit);
+      var okU = _overlaps(j.AgeBracket, Number(m['Umin'] || 0), Number(m['Umax'] || 99));
       if (!okG || !okU) return;
 
-      var p = Number(m['Priority']||0);
-      if (p>prio){ prio=p; best=m; }
+      var p = Number(m['Priority'] || 0);
+      if (p > prio) { prio = p; best = m; }
     });
 
-    if (!best){
+    if (!best) {
       if (requireMap) return; // pas de mapping = pas d’output
       // sinon: fallback éventuel (peu recommandé) — on peut ignorer pour rester strict
       return;
     }
 
     var cat = _fmt(best['CategorieFmt'], j);
-    var grp = _fmt(best['GroupeFmt'],    j);
+    var grp = _fmt(best['GroupeFmt'], j);
     out.push([pass8, cat, grp]);
   });
 

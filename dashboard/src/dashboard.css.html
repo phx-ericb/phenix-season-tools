@@ -107,7 +107,7 @@ header h1{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
   /* Modaux unifiés */
   .modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.38); display:flex; align-items:center; justify-content:center; z-index:50}
   .modal-backdrop[hidden]{display:none !important}
-  .modal-card{background:#fff; border-radius:16px; padding:18px; width:min(960px,calc(100% - 32px)); box-shadow:0 24px 50px rgba(0,0,0,.28); border:1px solid var(--line)}
+  .modal-card{background:#fff; border-radius:16px; padding:18px; width:min(1200px,calc(100% - 32px));max-height:90vh;overflow:auto; box-shadow:0 24px 50px rgba(0,0,0,.28); border:1px solid var(--line)}
   .modal-header{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:6px 4px 14px; border-bottom:1px solid var(--line)}
   .modal-header h3{margin:0; font-size:16px}
   .modal-body{padding-top:12px}
@@ -129,4 +129,97 @@ header h1{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 
   /* Toast */
   .toast{position:fixed; bottom:16px; right:16px; background:var(--blue); color:#fff; padding:10px 12px; border-radius:10px; box-shadow:0 6px 24px rgba(0,0,0,.2); display:none}
+  
+  /* ===== Ententes: styles légers ===== */
+  .en-toolbar{display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin-bottom:20px;max-width:800px}
+  .en-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:12px}
+  .en-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+  .en-name{font-weight:700}
+  .en-pass{font-family:ui-monospace,Menlo,Consolas,monospace;color:#475569}
+  .en-row{display:grid;grid-template-columns:140px 1fr;gap:6px;margin:4px 0}
+  .en-badges{display:flex;gap:6px;flex-wrap:wrap}
+  .en-status{font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid #e5e7eb;background:#f8fafc;white-space:nowrap}
+  .en-status.paye{background:#ecfdf5;border-color:#bbf7d0;color:#065f46}
+  .en-status.partiel{background:#eef2ff;border-color:#c7d2fe;color:#3730a3}
+  .en-status.ouvert{background:#f8fafc;border-color:#e5e7eb;color:#334155}
+  .en-status.retard{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+
+  .en-ent{border-top:1px dashed #e5e7eb;padding-top:8px;margin-top:8px}
+  .en-ent table{width:100%;border-collapse:collapse;font-size:13px}
+  .en-ent th,.en-ent td{border-bottom:1px solid #e5e7eb;padding:6px 8px;text-align:left}
+  .en-ent thead th{background:#f8fafc;position:sticky;top:0;z-index:1}
+
+  .en-actions{display:flex;gap:6px;flex-wrap:wrap}
+  .en-nums{font-variant-numeric:tabular-nums}
+  .en-gap.bad{color:#b91c1c;font-weight:700}
+  .en-gap.good{color:#065f46;font-weight:700}
+  .en-mini{font-size:12px;color:#64748b}
+  .en-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--line);border-radius:999px;background:#fff}
+  .en-pill b{color:var(--blue)}
+  .en-form-row{display:flex;gap:8px;align-items:center;margin:6px 0}
+  .en-form-row input[type="date"]{min-width:160px}
+  .en-form-row input[type="number"]{width:120px}
+  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:24px;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.2);z-index:9999}
+.toast.ok{background:#065f46}
+.toast.err{background:#7f1d1d}
+.en-saving{opacity:.6;pointer-events:none}
+ .en-card-grid{display:grid;grid-template-columns:1fr 320px;gap:12px;align-items:start}
+  @media (max-width: 900px){ .en-card-grid{grid-template-columns:1fr} }
+  
+
+  /* zone cartes centrée, largeur max */
+  .en-grid{
+    display:grid;
+    grid-template-columns:1fr;
+    gap:12px;
+    max-width:1200px;
+    margin:0 auto;
+  }
+
+  /* Zone cartes centrée (inchangé si déjà fait) */
+  .en-grid{
+    display:grid;
+    grid-template-columns:1fr;
+    gap:12px;
+    max-width:1200px;
+    margin:0 auto;
+  }
+
+  /* Entête de carte : démarcation */
+  .en-hd{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding-bottom:8px; margin-bottom:10px;
+    border-bottom:1px dashed var(--line);
+  }
+
+  /* Section TOP de la carte en 2 colonnes (table = pleine largeur en dessous) */
+  .en-top-grid{
+    display:grid;
+    grid-template-columns:1fr 360px; /* gauche = Achats actifs, droite = Détails */
+    gap:12px; align-items:start;
+    margin-bottom:10px;
+  }
+  @media (max-width: 900px){ .en-top-grid{ grid-template-columns:1fr } }
+
+  /* Titres de colonne (alignés avec "Achats actifs") */
+  .en-col-title{
+    font-size:12px;font-weight:600;color:#64748b;
+    margin:0 0 6px 0; text-transform:uppercase; letter-spacing:.2px;
+  }
+
+  /* Liste des achats actifs (gauche) */
+  .en-fees{list-style:none;margin:0;padding:0}
+  .en-fees li{padding:4px 8px;border-bottom:1px solid var(--line);margin-bottom:4px;font-size:14px;}
+
+  /* Bloc échéancier (tableau) */
+  .en-ent{border-top:1px dashed #e5e7eb; padding-top:10px; margin-top:12px;}
+  .en-ent table{width:100%;border-collapse:collapse;font-size:13px}
+  .en-ent th,.en-ent td{border-bottom:1px solid #e5e7eb;padding:6px 8px;text-align:left}
+
+  /* Un peu d'espace avant la colonne d'actions 💾 ✖ */
+  .en-ent th.actions,
+  .en-ent td.actions{ padding-left:12px; width:92px }
+
 </style>
+
+

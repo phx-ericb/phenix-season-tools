@@ -1,5 +1,0 @@
-function genererRapportsComplets() {
-  genererRapportArticles();
-  genererRapportInscriptions();
-  miseAJourAnnulations();
-}

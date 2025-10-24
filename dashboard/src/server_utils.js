@@ -36,14 +36,45 @@ function setParamValue(key, value) {
   else sh.getRange(row,2).setValue(value);
 }
 
-/** Récupère l’ID du classeur saison (constante > ScriptProperty) */
+/** ======================== SEASON CONTEXT (HARDENED) ======================== */
+
+var __SEASON_CTX__ = __SEASON_CTX__ || { id: null, ss: null, ts: 0 };
+
+function setSeasonId_(seasonId) {
+  seasonId = String(seasonId || '').trim();
+  if (!seasonId) throw new Error('setSeasonId_: seasonId vide');
+  __SEASON_CTX__.id = seasonId;
+  __SEASON_CTX__.ts = Date.now();
+  try { CacheService.getScriptCache().put('SEASON_ID', seasonId, 300); } catch (_){}
+  try { PropertiesService.getScriptProperties().setProperty('SEASON_ID', seasonId); } catch (_){}
+  try { PropertiesService.getScriptProperties().setProperty('ACTIVE_SEASON_ID', seasonId); } catch (_){}
+  return seasonId;
+}
+
+/** IMPORTANT: ne touche PAS aux feuilles ici. Jamais.
+ *  Résolution prioritaire harmonisée (constante → ACTIVE_SEASON_ID → PHENIX_SEASON_SHEET_ID → SEASON_ID legacy)
+ */
 function getSeasonId_() {
+  // 1) Contexte mémoire
+  if (__SEASON_CTX__.id) return __SEASON_CTX__.id;
+
   var props = PropertiesService.getScriptProperties();
-  var id =
-    props.getProperty('ACTIVE_SEASON_ID') ||
-    (SEASON_SHEET_ID && String(SEASON_SHEET_ID).trim()) ||
-    props.getProperty('PHENIX_SEASON_SHEET_ID') ||
-    props.getProperty('SEASON_SPREADSHEET_ID');
+  var id = null;
+
+  // 2) Constante (si fournie)
+  if (!id && SEASON_SHEET_ID && String(SEASON_SHEET_ID).trim()) id = String(SEASON_SHEET_ID).trim();
+
+  // 3) ACTIVE_SEASON_ID (pilotée par l’UI)
+  if (!id) try { id = String(props.getProperty('ACTIVE_SEASON_ID') || '').trim(); } catch (_){}
+
+  // 4) PHENIX_SEASON_SHEET_ID (setSeasonSheetIdOnce)
+  if (!id) try { id = String(props.getProperty('PHENIX_SEASON_SHEET_ID') || '').trim(); } catch (_){}
+
+  // 5) SEASON_ID (legacy/cache)
+  if (!id) {
+    try { id = String(CacheService.getScriptCache().get('SEASON_ID') || '').trim(); } catch (_){}
+    if (!id) try { id = String(props.getProperty('SEASON_ID') || '').trim(); } catch (_){}
+  }
 
   if (!id) {
     throw new Error(
@@ -51,25 +82,104 @@ function getSeasonId_() {
       "ou exécute setSeasonSheetIdOnce() / clique 'Définir active' dans l'UI."
     );
   }
-  return String(id).trim();
+
+  __SEASON_CTX__.id = id;
+  __SEASON_CTX__.ts = Date.now();
+  return id;
 }
+
+/** Open with exponential backoff + léger lock pour éviter l’overlap */
+function openSpreadsheetWithBackoff_(id, opt) {
+  opt = opt || {};
+  var maxAttempts = Math.max(3, opt.maxAttempts || 8);
+  var base = Math.max(200, opt.baseSleepMs || 600);
+  var lastErr = null;
+
+  // Lock court: sérialise l’ouverture entre threads
+  var lock = null;
+  try {
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(2000)) Utilities.sleep(250);
+  } catch (_){}
+
+  try {
+    for (var a = 1; a <= maxAttempts; a++) {
+      try {
+        // petit "poke" Drive pour éviter un cold-start
+        try { DriveApp.getFileById(id).getId(); } catch (_){}
+        var ss = SpreadsheetApp.openById(id);
+        // réchauffe une lecture non-mutante
+        try { var _ = ss.getSheets()[0].getMaxRows(); } catch(_){}
+        return ss;
+      } catch (e) {
+        lastErr = e;
+        var msg = String(e && e.message || e);
+        if (/Permission|not found|Invalid/i.test(msg)) throw e; // non retryable
+        var wait = Math.min(5000, base * Math.pow(1.6, a - 1));
+        Utilities.sleep(wait + Math.floor(Math.random()*200)); // jitter
+      }
+    }
+    throw new Error('openSpreadsheetWithBackoff_: échec après ' + maxAttempts + ' essais — ' + String(lastErr));
+  } finally {
+    try { lock && lock.releaseLock(); } catch(_){}
+  }
+}
+
+/** Toujours utiliser ce point d’entrée unique pour obtenir le classeur saison */
+function getSeasonSpreadsheet_(seasonIdOpt) {
+  var wanted = String(seasonIdOpt || getSeasonId_() || '').trim();
+  if (!wanted) throw new Error('getSeasonSpreadsheet_: seasonId vide');
+
+  var ctx = __SEASON_CTX__;
+  if (ctx.ss && ctx.id === wanted) return ctx.ss;
+
+  var ss = openSpreadsheetWithBackoff_(wanted, { maxAttempts: 8, baseSleepMs: 600 });
+  ctx.id = wanted;
+  ctx.ss = ss;
+  ctx.ts = Date.now();
+
+  // Persistance légère
+  try { CacheService.getScriptCache().put('SEASON_ID', wanted, 300); } catch (_){}
+  try { PropertiesService.getScriptProperties().setProperty('SEASON_ID', wanted); } catch (_){}
+  try { PropertiesService.getScriptProperties().setProperty('ACTIVE_SEASON_ID', wanted); } catch (_){}
+
+  return ss;
+}
+
+function ensureSeasonContext_() {
+  var id = getSeasonId_();
+  var ss = getSeasonSpreadsheet_(id);
+  return { id: id, ss: ss };
+}
+
+/** ======================== PARAMS helpers ======================== */
 
 /** Lecture simple d’un param dans PARAMS (utilisée par runImportAndExports pour DRY_RUN) */
 function readParamValue(key) {
   var ss = getSeasonSpreadsheet_(getSeasonId_());
+  return readParam_(ss, key);
+}
+
+/** Lit un paramètre depuis PARAMS (fallback DocumentProperties) */
+function readParam_(ss, key) {
+  ss = ensureSpreadsheet_(ss);
   var sh = ss.getSheetByName('PARAMS');
-  if (!sh || sh.getLastRow() < 2) return '';
+  if (!sh || sh.getLastRow() < 2) {
+    // fallback éventuel : Document Properties
+    var v = PropertiesService.getDocumentProperties().getProperty(String(key));
+    return v ? String(v) : '';
+  }
   var vals = sh.getRange(2,1, sh.getLastRow()-1, 2).getValues(); // Col A=Clé, B=Valeur
   for (var i=0;i<vals.length;i++) {
     if (String(vals[i][0]||'') === key) return String(vals[i][1]||'');
   }
   return '';
 }
-function readBoolParam_(key, def){
-  var v = (readParamValue(key) || '').toLowerCase();
-  if (['1','true','yes','oui'].indexOf(v) >= 0) return true;
-  if (['0','false','no','non'].indexOf(v) >= 0) return false;
-  return !!def;
+
+/** Garantit qu’on a un Spreadsheet */
+function ensureSpreadsheet_(ss) {
+  if (ss && typeof ss.getId === 'function') return ss;
+  return getSeasonSpreadsheet_(getSeasonId_());
 }
 
 // Utils communs
@@ -119,8 +229,15 @@ function _auditLog_(action, details) {
   }
 }
 
-
-function getSeasonSpreadsheet_(seasonId) { return SpreadsheetApp.openById(seasonId); }
+/** Feuille utilitaire */
+function getSheetOrCreate_(ss, name, headers) {
+  var sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    if (headers && headers.length) sh.getRange(1,1,1,headers.length).setValues([headers]);
+  }
+  return sh;
+}
 
 // PARAM schema partagé (utilisé par server_params)
 var PARAM_SCHEMA = {
@@ -137,12 +254,12 @@ var PARAM_SCHEMA = {
   RETRO_PHOTO_INCLUDE_COL:'BOOLEAN', RETRO_PHOTO_EXPIRY_COL:'STRING', RETRO_PHOTO_WARN_ABS_DATE:'STRING',
   RETRO_PHOTO_WARN_BEFORE_MMDD:'STRING', RETRO_EXCLUDE_MEMBER_IF_ONLY_IGN:'BOOLEAN',
   RETRO_GROUP_SHEET_NAME:'STRING', RETRO_GROUP_EXPORTS_FOLDER_ID:'FOLDER_ID', RETRO_GROUP_ELITE_KEYWORDS:'STRING', RETRO_GROUP_SA_KEYWORDS:'STRING',
-  RETRO_GROUP_SA_GROUPE_LABEL:'STRING', RETRO_GROUP_SA_CATEG_LABEL:'STRING', RETRO_GROUP_GROUPE_FMT:'STRING', RETRO_GROUP_CATEGORIE_FMT:'STRING',
+  RETRO_GROUP_SA_GROUPE_LABEL:'STRING', RETRO_GROUP_SA_CATEG_LABEL:'STRING',
+  RETRO_GROUP_GROUPE_FMT:'STRING', RETRO_GROUP_CATEGORIE_FMT:'STRING',
   RETRO_GART_SHEET_NAME:'STRING', RETRO_GART_EXPORTS_FOLDER_ID:'FOLDER_ID', RETRO_GART_IGNORE_FEES_CSV:'STRING',
   RETRO_GART_ELITE_KEYWORDS:'STRING', RETRO_GART_REQUIRE_MAPPING:'BOOLEAN',
   SEASON_YEAR:'NUMBER',            // ex. 2025 (prioritaire sur le parsing de SEASON_LABEL)
   RETRO_MEMBER_MAX_U:'NUMBER',     // optionnel: ex. 18 → >=19 traité comme adulte pour la validation
-
 };
 function _coerceByType_(key, val) {
   var t = PARAM_SCHEMA[key] || 'STRING';
@@ -151,7 +268,6 @@ function _coerceByType_(key, val) {
   if (t === 'NUMBER') return Number(val);
   return String(val);
 }
-// Helpers PARAMS
 function _upsertParam_(ss, key, value, type, desc) {
   var sh = ss.getSheetByName('PARAMS') || ss.insertSheet('PARAMS');
   if (sh.getLastRow() === 0) sh.appendRow(['Clé','Valeur','Type','Description']);
@@ -166,17 +282,15 @@ function _upsertParam_(ss, key, value, type, desc) {
   }
   sh.appendRow([key, value, type||'', desc||'']);
 }
-function _inferSeasonLabelFromTitle_(title) {
-  var m = title.match(/^(.+?)(?:\s*-\s*Saison)?$/i);
-  return (m ? m[1] : title).trim();
-}
+
+/** Divers utilitaires */
 function getSheet_(ss, name, createIfMissing) {
   return createIfMissing ? getSheetOrCreate_(ss, name) : ss.getSheetByName(name);
 }
-
-function norm_(s){ return String(s||'').trim().toLowerCase()
-  .normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
-
+function norm_(s){
+  return String(s||'').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+}
 function isIgnoredFeeRetro_(ss, fee){
   var v = norm_(fee);
   if (!v) return false;
@@ -190,4 +304,19 @@ function isIgnoredFeeRetro_(ss, fee){
   // filet si le param n'était pas encore rempli
   if (/(entraineur|entra[îi]neur|coach)/i.test(String(fee||''))) return true;
   return false;
+}
+
+// Backward-compat: si certains appels utilisent encore __openByIdWithRetry__
+if (typeof __openByIdWithRetry__ !== 'function') {
+  function __openByIdWithRetry__(id, attempts) {
+    // si on me demande la saison active, renvoie le handle existant
+    try {
+      var sid = getSeasonId_();
+      if (sid && String(id) === String(sid)) return getSeasonSpreadsheet_(sid);
+    } catch (_){}
+    // sinon open direct (ou via openSpreadsheetWithBackoff_ si dispo)
+    return (typeof openSpreadsheetWithBackoff_ === 'function')
+      ? openSpreadsheetWithBackoff_(id, { maxAttempts: Math.max(3, attempts || 5), baseSleepMs: 600 })
+      : SpreadsheetApp.openById(id);
+  }
 }

@@ -15,7 +15,11 @@ var SHEETS = {
   STAGING_INSCRIPTIONS: 'STAGING_INSCRIPTIONS',
   STAGING_ARTICLES: 'STAGING_ARTICLES',
   EXPORT_LOG: 'EXPORT_LOG',
-  MODIFS_INSCRIPTIONS: 'MODIFS_INSCRIPTIONS' // v0.7 — log champ-à-champ des modifications
+  MODIFS_INSCRIPTIONS: 'MODIFS_INSCRIPTIONS', // v0.7 — log champ-à-champ des modifications
+   LATE_DATE_U9U12:  'LATE_DATE_U9U12',  // date ISO (yyyy‑MM‑dd) à partir de laquelle U9‑U12 est en mode tardif
+  LATE_DATE_U13U18:'LATE_DATE_U13U18',  // idem pour U13‑U18
+  LATE_SHEET_U9U12: 'LATE_SHEET_U9U12', // ID du fichier Google Sheets pour les U9‑U12 tardifs
+  LATE_SHEET_U13U18:'LATE_SHEET_U13U18' // ID du fichier Google Sheets pour les U13‑U18 tardifs
 };
 
 /** Clés de paramètres (si stockés dans PARAMS ou Properties) */

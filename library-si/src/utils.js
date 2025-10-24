@@ -161,15 +161,12 @@ function ensureCoreSheets_(ss) {
   getSheetOrCreate_(ss, SHEETS.PARAMS);
   getSheetOrCreate_(ss, SHEETS.IMPORT_LOG, ['Horodatage','Action','Détails']);
   ensureMailOutbox_(ss);
-  getSheetOrCreate_(ss, SHEETS.MAIL_LOG, ['Type','To','Sujet','KeyHash','SentAt','Result']);
-  // ERREURS enrichi v0.7
+    // ERREURS enrichi v0.7
   getSheetOrCreate_(ss, SHEETS.ERREURS, ['Passeport','Nom','Prénom','NomComplet','Scope','Type','Severite','Saison','Frais','Message','Contexte','CreatedAt']);
-  getSheetOrCreate_(ss, SHEETS.EXPORT_LOG, ['Horodatage','ExportType','Fichier','Checksum','Lien']);
   // Annulations (avec colonnes "actifs restants")
   getSheetOrCreate_(ss, SHEETS.ANNULATIONS_INSCRIPTIONS, ['Horodatage','Passeport','Nom','Prénom','NomComplet','Saison','Frais','DateAnnulation','A_ENCORE_ACTIF','ACTIFS_RESTANTS']);
   getSheetOrCreate_(ss, SHEETS.ANNULATIONS_ARTICLES,     ['Horodatage','Passeport','Nom','Prénom','NomComplet','Saison','Frais','DateAnnulation','A_ENCORE_ACTIF','ACTIFS_RESTANTS']);
   // Modifs
-  getSheetOrCreate_(ss, SHEETS.MODIFS_INSCRIPTIONS, ['Horodatage','Passeport','Nom','Prénom','NomComplet','Saison','ChangedFieldsJSON']);
 }
 
 /** Lit un paramètre depuis PARAMS (fallback DocumentProperties) */
@@ -441,31 +438,6 @@ function ensureMailOutbox_(ss) {
   return sh;
 }
 
-/**
- * Ajoute N lignes dans MAIL_OUTBOX (idempotence via KeyHash+Type gérée par l’appelant).
- * rows = array of [Type,To,Cc,Sujet,Corps,Attachments,KeyHash,'pending',now,'','']
- */
-function enqueueOutboxRows_(ssId, rows) {
-  if (!rows || !rows.length) return 0;
-  var ss = ensureSpreadsheet_(ssId);
-  // ⬇️ Assure l’upgrade pour afficher Passeport/NomComplet/Frais
-  var sh = upgradeMailOutboxForDisplay_(ss);
-  var headers = getMailOutboxHeaders_();
-  var W = headers.length;
-
-  var toWrite = rows.map(function(r){
-    var arr = (r && r.slice) ? r.slice(0, W) : [];
-    while (arr.length < W) arr.push('');
-    return arr;
-  });
-
-  var start = sh.getLastRow() + 1;
-  if (toWrite.length) {
-    sh.insertRowsAfter(sh.getLastRow(), toWrite.length);
-    sh.getRange(start, 1, toWrite.length, W).setValues(toWrite);
-  }
-  return toWrite.length;
-}
 
 
 function setCancelFlags_(sheet, rowNumber, headers, cancelled, exclude) {
@@ -1001,3 +973,4 @@ function pickAgeBracketFromLedgerRows_(rows){ // rows = lignes LEDGER pour ce pa
   if (bands.has('Adulte')) return 'Adulte';
   return '';
 }
+

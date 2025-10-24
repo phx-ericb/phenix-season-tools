@@ -1,417 +1,560 @@
 <!DOCTYPE html>
-<html>
+<html lang="fr">
 <head>
   <meta charset="utf-8" />
-  <title>Back-Office Phénix</title>
-  <?!= include('dashboard.css.html'); ?>
-  <style>
-    .app{display:grid;grid-template-columns:260px 1fr;height:100vh;}
-    nav{background:var(--blue);color:#fff;padding:16px 12px;display:flex;flex-direction:column;gap:8px;}
-    nav h1{font-size:16px;margin:0 0 8px;font-weight:700;letter-spacing:.2px}
-    .link{display:block;padding:10px 12px;border-radius:10px;text-decoration:none;color:#fff;opacity:.85}
-    .link.active{background:rgba(255,255,255,.18);opacity:1}
-    main{background:#fafafa;padding:18px;overflow:auto;}
-    .view{display:none}.view.active{display:block}
-    .fade{opacity:.5;pointer-events:none;transition:opacity .2s}
-    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .btn{padding:8px 12px;border-radius:10px;border:0;background:#0f4599;color:#fff;cursor:pointer}
-    .btn.secondary{background:#334155}
-    .card{background:#fff;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
-    .subcard{background:#f8fafc;border-radius:10px;padding:12px}
-    .kpi{font-size:28px;font-weight:700;line-height:1}
-    .sub{font-size:12px;opacity:.8}
-    .table{width:100%;border-collapse:collapse}
-    .table th,.table td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;font-size:14px}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
-    .table-wrap{overflow:auto}
-    .pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:8px}
-    .section-busy{display:flex;gap:8px;align-items:center}
-    .spinner{width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:#0f4599;border-radius:50%;animation:spin 0.9s linear infinite}
-    @keyframes spin{to{transform:rotate(360deg)}}
-    .note{opacity:.8}
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gestion Phénix</title>
+  <?!= include('app_ui.css.html'); ?>
+
   <script>
-    // === helpers DOM ===
-    const $ = sel => document.querySelector(sel);
+    // === helpers DOM (déclarés une seule fois) ===
+// Par:
+window.$ = (sel) => {
+  if (!sel) return null;
+  // si on te donne déjà un élément (ou le document), renvoie-le tel quel
+  if (sel.nodeType === 1 || sel === document || sel === window) return sel;
+  return document.querySelector(String(sel));
+};
+// (optionnel) un équivalent $$ pratique
+window.$$ = (sel) => (typeof sel === 'string') ? Array.from(document.querySelectorAll(sel)) : [];
 
-    // Promisify google.script.run
-    function call_(fn, args = []) {
+window.call_ = function (fn, args = []) {
       return new Promise((resolve, reject) => {
-        try{
-          google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn].apply(null, args);
-        }catch(e){ reject(e); }
+        try {
+          google.script.run
+            .withSuccessHandler((res) => resolve(res))
+            .withFailureHandler((err) => reject(err))
+            [fn].apply(null, args);
+        } catch (e) { reject(e); }
       });
-    }
-
-    // Router
-    function routeTo(h) {
-      const r = (h || location.hash || '#/dashboard');
-      document.querySelectorAll('a.link').forEach(a => a.classList.toggle('active', a.getAttribute('href') === r));
-      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-      const id = 'view-' + r.replace('#/', '');
-      const el = document.getElementById(id);
-      if (el) el.classList.add('active');
-
-      // Hooks de navigation
-      if (id === 'view-dashboard') {
-        try { refreshImportLog(); } catch(_) {}
-      }
-      if (id === 'view-joueurs') {
-        // auto-charge la première page si rien n'a été chargé
-        if (!window.__JOU_loaded__) { try { joueursLoadPage(0); } catch(_) {} }
-      }
-    }
-    window.addEventListener('hashchange', () => routeTo());
-    window.addEventListener('DOMContentLoaded', () => routeTo());
-
-    // Redirection douce vers ?view=ui (Paramètres intégrés)
-    function goParams(ev) {
-      ev && ev.preventDefault();
-      const base = window.location.href.split('#')[0].split('?')[0];
-      document.querySelector('nav')?.classList.add('fade');
-      document.querySelector('main')?.classList.add('fade');
-      window.location.href = base + '?view=ui';
-    }
-
-    // ==== EXPORTS ENTRAÎNEURS (existant) ====
-    async function doExportEntraineursMembres(btn) {
-      if (btn) btn.disabled = true;
-      try {
-        const res = await call_('runExportEntraineursMembres');
-        alert('Export membres OK: ' + (res?.name || 'fichier généré'));
-      } catch (e) { console.error(e); alert('Erreur export membres.'); }
-      finally { if (btn) btn.disabled = false; }
-    }
-    async function doExportEntraineursGroupes(btn) {
-      if (btn) btn.disabled = true;
-      try {
-        const res = await call_('runExportEntraineursGroupes');
-        alert('Export groupes OK: ' + (res?.name || 'fichier généré'));
-      } catch (e) { console.error(e); alert('Erreur export groupes.'); }
-      finally { if (btn) btn.disabled = false; }
-    }
-
-    // ==== IMPORTS (NOUVEAU ONGLET) ====
-    async function doImportGlobal(btn){
-      if (btn) btn.disabled = true;
-      try{
-        const res = await call_('runImportAndExports');      // import global + exports rétro
-        alert(res?.ok ? 'Import global terminé ✅' : 'Import global terminé (vérifie Journal).');
-        try { await refreshImportLog(); } catch(_) {}
-        try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}
-      }catch(e){
-        console.error(e); alert('Erreur: import global.');
-      }finally{
-        if (btn) btn.disabled = false;
-      }
-    }
-
-    async function doImportValidationMembres(btn){
-      if (btn) btn.disabled = true;
-      try {
-        const res = await call_('runImportValidationMembres'); // met à jour MEMBRES_GLOBAL
-        alert(`Import Membres: +${res?.created ?? 0} créés, ${res?.updated ?? 0} maj, ${res?.unchanged ?? 0} inchangés`);
-        try { await refreshImportLog(); } catch(_) {}
-        try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}
-      } catch(e){ console.error(e); alert('Erreur import Membres Spordle.'); }
-      finally { if (btn) btn.disabled = false; }
-    }
-
-    async function refreshImportLog(){
-      const tb = document.querySelector('#tabImportLog tbody');
-      if (tb) tb.innerHTML = '<tr><td colspan="3">Chargement…</td></tr>';
-      try{
-        const mode = document.getElementById('importLogMode')?.value || 'essential';
-        const rows = await call_('getRecentActivity', [mode, 50]); // mode + limit
-        renderImportLog(rows || []);
-      }catch(e){
-        console.warn(e);
-        if (tb) tb.innerHTML = '<tr><td colspan="3">Impossible de lire le journal.</td></tr>';
-      }
-    }
-
-    async function doImportGlobalIncr(btn){
-      if (btn) btn.disabled = true;
-      try{
-        const res = await call_('runImportRulesExportsIncr');   // flow incrémental
-        alert(res?.ok ? 'Import incrémental terminé ✅' : 'Import incrémental: vérifie Journal.');
-        try { await refreshImportLog(); } catch(_) {}
-        try { await loadDashboardKpis(); } catch(_) {}
-        try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch(_) {}
-      }catch(e){
-        console.error(e); alert('Erreur: import incrémental.');
-      }finally{
-        if (btn) btn.disabled = false;
-      }
-    }
-
-    function renderImportLog(rows){
-      const tb = document.querySelector('#tabImportLog tbody');
-      if (!tb) return;
-      tb.innerHTML = '';
-      (rows||[]).forEach(r=>{
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${r.date||''}</td><td>${r.type||''}</td><td>${r.details||''}</td>`;
-        tb.appendChild(tr);
-      });
-      if (!rows || !rows.length){
-        tb.innerHTML = '<tr><td colspan="3">Aucune activité récente.</td></tr>';
-      }
-    }
-async function doImportFullFlow(btn){
-  if (btn) btn.disabled = true;
-  try{
-    const res = await call_('runImportRulesExportsFull'); // ← appel direct vers server_flow.js
-    alert(res?.ok ? 'Import FULL terminé ✅' : 'Import FULL terminé (vérifie Journal).');
-    try { await refreshImportLog(); } catch(_) {}
-  }catch(e){
-    console.error(e);
-    alert('Erreur: import FULL.');
-  }finally{
-    if (btn) btn.disabled = false;
-  }
-}
-
-
-   
-    // ====== J O U E U R S  (nouvel onglet parent) ======
-    let J_state = { offset:0, limit:50, total:0 };
-    function joueursQuery(){
-      return {
-        offset: J_state.offset, limit: J_state.limit,
-        search: $('#jSearch')?.value || '',
-        band:   $('#jBand')?.value || '',
-        adapte: $('#jAdapte')?.value || '',
-        photo:  $('#jPhoto')?.value || ''
-      };
-    }
-
-    async function joueursLoadPage(offset){
-      if (typeof offset === 'number') J_state.offset = Math.max(0, offset);
-      const tb = $('#tabJoueurs tbody');
-      if (tb) tb.innerHTML = '<tr><td colspan="7">Chargement…</td></tr>';
-      try{
-        // On suppose côté serveur: apiListJoueursPage(opt)
-        const res = await call_('apiListJoueursPage', [ joueursQuery() ]);
-        window.__JOU_loaded__ = true;
-        J_state.total = res?.total || 0;
-        J_state.limit = res?.limit || J_state.limit;
-        const rows = res?.rows || [];
-        tb.innerHTML = '';
-        rows.forEach(r=>{
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td><a href="#" data-p="${r.passeport}">${r.passeport||''}</a></td>
-            <td>${r.nom||''}</td>
-            <td>${r.prenom||''}</td>
-            <td>${r.band||''}</td>
-            <td>${r.adapte||''}</td>
-            <td>${(r.photo||'')}${r.photoDate?(' ('+r.photoDate+')'):''}</td>
-            <td>${r.courriels||''}</td>`;
-          tb.appendChild(tr);
-        });
-        if (!rows.length){
-          tb.innerHTML = '<tr><td colspan="7" style="text-align:center;opacity:.7">Aucun joueur.</td></tr>';
-        }
-        $('#jPageInfo').textContent = `${Math.min(J_state.offset+1, J_state.total)}–${Math.min(J_state.offset+J_state.limit, J_state.total)} / ${J_state.total}`;
-      }catch(e){
-        console.error(e);
-        if (tb) tb.innerHTML = '<tr><td colspan="7">Erreur de chargement (apiListJoueursPage).</td></tr>';
-      }
-    }
-
-    async function joueursShowDetail(passeport){
-      const box = $('#jDetail');
-      if (box){ box.style.display='block'; box.innerHTML = '<div class="section-busy"><div class="spinner"></div><span class="busy-text">Chargement…</span></div>'; }
-      try{
-        // On suppose côté serveur: apiGetJoueurDetail(passeport)
-        const res = await call_('apiGetJoueurDetail', [passeport]);
-        if (res?.notFound){ box.innerHTML = '<div class="note">Introuvable.</div>'; return; }
-        const j = res?.joueur || {}; const acts = res?.activites || [];
-        box.innerHTML = `<h3>${j.prenom||''} ${j.nom||''} — ${j.passeport||''}</h3>
-          <div><b>Genre:</b> ${j.genre||''} · <b>Band:</b> ${j.band||''} · <b>Adapté:</b> ${j.adapte||''}</div>
-          <div><b>Photo:</b> ${j.photo||''} ${j.photoDate?('('+j.photoDate+')'):''}</div>
-          <div><b>Courriels:</b> ${j.courriels||''}</div>
-          <h4 style="margin-top:8px;">Activités (LEDGER)</h4>
-          <ul>${acts.map(a=>`<li>[${a.type||''}] ${a.nom||''} — ${a.band||''} <i>${a.tags||''}</i></li>`).join('')}</ul>`;
-      }catch(e){
-        console.error(e);
-        if (box) box.innerHTML = '<div class="note">Erreur (apiGetJoueurDetail).</div>';
-      }
-    }
-
-    document.addEventListener('DOMContentLoaded', ()=>{
-      // Brancher événements Joueurs
-      $('#jReload')?.addEventListener('click', ()=> joueursLoadPage(0));
-      $('#jPrev')?.addEventListener('click', ()=> joueursLoadPage(Math.max(0, J_state.offset - J_state.limit)));
-      $('#jNext')?.addEventListener('click', ()=> {
-        if (J_state.offset + J_state.limit < J_state.total) joueursLoadPage(J_state.offset + J_state.limit);
-      });
-      ['jSearch','jBand','jAdapte','jPhoto'].forEach(id=>{
-        const el = $('#'+id);
-        el && el.addEventListener('change', ()=> joueursLoadPage(0));
-        el && el.addEventListener('keyup', (e)=>{ if (e.key==='Enter') joueursLoadPage(0); });
-      });
-      // Détail via clic table
-      $('#tabJoueurs')?.addEventListener('click', (e)=>{
-        const a = e.target.closest('a[data-p]'); if (!a) return;
-        e.preventDefault(); joueursShowDetail(a.dataset.p);
-      });
-    });
+    };
+    window.waitIdle = (ms) => new Promise(r => setTimeout(r, ms || 0));
   </script>
 </head>
 
 <body>
-  <div class="app">
-    <nav>
-      <h1>Back-Office Phénix</h1>
-      <a class="link" href="#/dashboard">Tableau de bord</a>
-      <a class="link" href="#/rapports">Rapports</a>
-      <a class="link" href="#/joueurs">Joueurs</a> <!-- NOUVEL ONGLET PARENT -->
-      <a class="link" href="#/entraineurs">Entraîneurs</a>
-      <a class="link" href="#/parametres" id="nav-params">Paramètres</a>
+  <div class="app-layout">
+    <!-- ===== Sidebar ===== -->
+    <nav class="sidebar">
+      <!-- Brand -->
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <img src="https://i0.wp.com/phenixdesrivieres.com/wp-content/uploads/2024/11/logo-phenix-des-rivieres-principal.png" alt="Phénix des Rivières" />
+        </div>      </div>
+
+      <div class="sidebar__divider"></div>
+
+      <!-- Routes principales -->
+      <a class="sidebar-nav__item sidebar-nav__item--active" href="#/dashboard">
+        <span class="ico">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 13h8V3H3z" /><path d="M13 21h8v-8h-8z" /><path d="M13 3h8v6h-8z" /><path d="M3 21h8v-6H3z" />
+          </svg>
+        </span>
+        <span class="label">Tableau de bord</span>
+      </a>
+
+      <a class="sidebar-nav__item" href="#/retro">
+        <span class="ico">
+          <!-- Tray + arrow-down -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 21h18v-4H3z" /><path d="M12 3v12" /><path d="M8 11l4 4 4-4" />
+          </svg>
+        </span>
+        <span class="label">Imports Rétroaction</span>
+      </a>
+
+      <a class="sidebar-nav__item" href="#/rapports">
+        <span class="ico">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3h18v18H3z" /><path d="M7 14l3-3 2 2 4-4 1 1" />
+          </svg>
+        </span>
+        <span class="label">Rapports</span>
+      </a>
+
+      <a class="sidebar-nav__item" href="#/joueurs">
+        <span class="ico">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M16 11a4 4 0 1 0-8 0 4 4 0 0 0 8 0z" /><path d="M3 21a7 7 0 0 1 18 0" />
+          </svg>
+        </span>
+        <span class="label">Joueurs</span>
+      </a>
+
+      <a class="sidebar-nav__item" href="#/entraineurs">
+        <span class="ico">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5z" /><path d="M20 21a8 8 0 0 0-16 0" />
+          </svg>
+        </span>
+        <span class="label">Entraîneurs</span>
+      </a>
+
+      <a class="sidebar-nav__item" href="#/parametres" id="nav-params">
+        <span class="ico">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.54V21a2 2 0 1 1-4 0v-.11a1.7 1.7 0 0 0-1-1.54 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.54-1H3a2 2 0 1 1 0-4h.11a1.7 1.7 0 0 0 1.54-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8 4.6 1.7 1.7 0 0 0 9 3.06V3a2 2 0 1 1 4 0v.11a1.7 1.7 0 0 0 1 1.54 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 21 9h.11a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.54 1z" />
+          </svg>
+        </span>
+        <span class="label">Paramètres</span>
+      </a>
+
+      <div class="sidebar__divider"></div>
+
+      <!-- Groupes avec sous-menus (conservés) -->
+      <div class="sidebar-group" data-group="inscriptions">
+        <button class="sidebar-group__toggle" data-target="sub-inscriptions">
+          <span class="ico">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 4h16v6H4z" /><path d="M4 14h16v6H4z" />
+            </svg>
+          </span>
+          <span class="label">Inscriptions</span>
+          <span class="chev" aria-hidden>▸</span>
+        </button>
+        <div id="sub-inscriptions" class="sidebar-group__submenu">
+          <a class="sidebar-sub__item" href="#/insc-overview">Vue d’ensemble</a>
+          <a class="sidebar-sub__item" href="#/erreurs">Suivi des erreurs</a>
+          <a class="sidebar-sub__item" href="#/annulations">Suivi des annulations</a>
+          <a class="sidebar-sub__item" href="https://rapports.phenixdesrivieres.com" target="_blank" rel="noopener">Rapports — consulter</a>
+          <a class="sidebar-sub__item" href="#" onclick="alert('Brancher la fonction: lancer la mise à jour des rapports'); return false;">Rapports — mise à jour</a>
+        </div>
+      </div>
+
+      <div class="sidebar-group" data-group="finances">
+        <button class="sidebar-group__toggle" data-target="sub-finances">
+          <span class="ico">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="9" /><path d="M8 12h8M12 8v8" />
+            </svg>
+          </span>
+          <span class="label">Finances</span>
+          <span class="chev" aria-hidden>▸</span>
+        </button>
+        <div id="sub-finances" class="sidebar-group__submenu">
+          <a class="sidebar-sub__item" href="#/ententes">Ententes — module</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/forms/d/1W-q2NoLnSgy1_9EUsE6gO-V8l1RFdZ0e0ESf6YPLuDw/edit" target="_blank" rel="noopener">Remboursement — formulaire</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1zhaV_-ML4FnCPGdt2x_Gt5wW8jeytMUWaPDVo9sayak/edit?resourcekey=&gid=2112583123#gid=2112583123" target="_blank" rel="noopener">Remboursement — réponses</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1jIBAPpziouHRTcHx-tSu49gqzB8xOp0fkYot6LkF2Kg/edit?gid=0#gid=0" target="_blank" rel="noopener">Caisse CSRQ</a>
+        </div>
+      </div>
+
+      <div class="sidebar-group" data-group="registrariat">
+        <button class="sidebar-group__toggle" data-target="sub-registrariat">
+          <span class="ico">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 4h16v16H4z" /><path d="M4 9h16" />
+            </svg>
+          </span>
+          <span class="label">Régistrariat</span>
+          <span class="chev" aria-hidden>▸</span>
+        </button>
+        <div id="sub-registrariat" class="sidebar-group__submenu">
+          <a class="sidebar-sub__item" href="https://docs.google.com/forms/d/1qN9C5viQA4A0k_2wDs886ZcS6jPk7-odkRO5LBPso5o/edit" target="_blank" rel="noopener">Permis de voyage — formulaire</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1tOTv0xKadVDOCYTbEoo6-VT3IEcgxUnKFNT4OtDpbdc/edit?resourcekey=&gid=681447492#gid=681447492" target="_blank" rel="noopener">Permis de voyage — réponses</a>
+        </div>
+      </div>
+
+      <div class="sidebar-group" data-group="technique">
+        <button class="sidebar-group__toggle" data-target="sub-technique">
+          <span class="ico">
+            <!-- Soccer ball -->
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="M12 7l3 2-1 3h-4L9 9l3-2z"></path>
+              <path d="M12 7V3"></path><path d="M12 21v-4"></path>
+              <path d="M3 12h4"></path><path d="M21 12h-4"></path>
+              <path d="M6 18l3-2"></path><path d="M18 18l-3-2"></path>
+              <path d="M6 6l3 2"></path><path d="M18 6l-3 2"></path>
+            </svg>
+          </span>
+          <span class="label">Technique</span>
+          <span class="chev" aria-hidden>▸</span>
+        </button>
+        <div id="sub-technique" class="sidebar-group__submenu">
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1DB5xci5rTE0D9TOv9YKq37AlVg7L6wHCaLTsu3Nugyc/edit?gid=1423478046#gid=1423478046" target="_blank" rel="noopener">Assignation éducateurs</a>
+          <a class="sidebar-sub__item" href="https://jumelage.phenixdesrivieres.com" target="_blank" rel="noopener">Jumelage — formulaire</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1V_Mctu25HXMVkuvDavEPpH4Gohrn8MqUD4lebZIZ8lc/edit?resourcekey=&gid=2126564758#gid=2126564758" target="_blank" rel="noopener">Jumelage — réponses</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1hua4HA96XxBu7iJ662a0QzucVpbixEV2afGXAHdYNmQ/edit?gid=1570704737#gid=1570704737" target="_blank" rel="noopener">Suivi U9-U12</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1DB5xci5rTE0D9TOv9YKq37AlVg7L6wHCaLTsu3Nugyc/edit?gid=719469622#gid=719469622" target="_blank" rel="noopener">Gestion Éducateurs</a>
+        </div>
+      </div>
+
+      <div class="sidebar-group" data-group="admin">
+        <button class="sidebar-group__toggle" data-target="sub-admin">
+          <span class="ico">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 12h18" /><path d="M3 6h18" /><path d="M3 18h18" />
+            </svg>
+          </span>
+        <span class="label">Administration</span>
+          <span class="chev" aria-hidden>▸</span>
+        </button>
+        <div id="sub-admin" class="sidebar-group__submenu">
+          <a class="sidebar-sub__item" href="https://docs.google.com/forms/d/1Tbvuj7G8Zdvcxh8PLf8I5QrJy_9O69ndXhdli9XSxuU/edit" target="_blank" rel="noopener">Mouvements — formulaire</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1zTohXHT8dgmYqtV6XypmlWC0-sSpGGFPHZUnyl3aFsQ/edit?resourcekey=&gid=42770599#gid=42770599" target="_blank" rel="noopener">Mouvements — réponses</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1L2QtnW37WzvEtEAPpGGOa2S_GaWBvV0p_V0j7X6gwiY/edit?gid=0#gid=0" target="_blank" rel="noopener">Horaire central</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/15TyHEvVpeSZxeL_9hVmpkpyXxRi9wQuLYcvyrHhUH5w/edit?gid=449369846#gid=449369846" target="_blank" rel="noopener">Matchs de la semaine</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1JUMaoCj0dKhL31jI-CjGudfGtZMXvvrD4HcF9Eu9YDQ/edit?gid=1790290869#gid=1790290869" target="_blank" rel="noopener">Générateur d’activités</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1MgLl9cukFqzC-AccnGU1n5Tdpk5_ACYsWzPpNr7wX38/edit?gid=190143781#gid=190143781" target="_blank" rel="noopener">Gestion uniformes</a>
+          <a class="sidebar-sub__item" href="https://docs.google.com/spreadsheets/d/1-1mernZIkILaJ6yq2apRNyfHaiEujzV8ueTpNZ7Ewvk/edit?gid=1275629345#gid=1275629345" target="_blank" rel="noopener">Formation U4-U8</a>
+        </div>
+      </div>
     </nav>
 
-    <main>
-      <!-- DASHBOARD (parent) -->
-      <section id="view-dashboard" class="view active">
-        <div class="card" style="margin-bottom:14px;">
-    <h3>Imports</h3>
-    <div class="toolbar" style="gap:8px; margin-top:6px;">
-      <button class="btn" onclick="doImportFullFlow(this)">🚀 Lancer Importation complète</button>
-    </div>
-    <p class="note" style="margin-top:8px;">
-      Ce bouton exécute <code>runImportRulesExportsFull</code> et génère tout en une seule passe.
-    </p>
-  </div>
+    <!-- ===== Main ===== -->
+    <main class="main-content">
+      <!-- DASHBOARD -->
+      <section id="view-dashboard" class="view view--active"></section>
 
-  <div class="card">
-    <h3>Journal des imports</h3>
-    <div class="toolbar" style="margin-bottom:8px;">
-      <label>Vue:</label>
-      <select id="importLogMode" onchange="refreshImportLog()" style="min-width:140px;">
-        <option value="essential" selected>Essentiel</option>
-        <option value="all">Complet</option>
-      </select>
-      <button class="btn secondary" onclick="refreshImportLog()">Actualiser</button>
-    </div>
-    <div class="table-wrap" style="overflow:auto; max-height:420px;">
-      <table id="tabImportLog" class="table">
-        <thead><tr><th style="width:170px;">Date</th><th>Type</th><th>Détails</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>       
+      <!-- IMPORTS / RÉTROACTION -->
+      <section id="view-retro" class="view">
+        <div class="card">
+          <div class="card__header">
+            <h3 class="card__title">Imports</h3>
+          </div>
+          <div class="card__body">
+            <div class="toolbar">
+              <button class="btn btn--primary" onclick="doImportFullFlow(this)">🚀 Lancer Importation complète</button>
+              <button class="btn btn--secondary" onclick="showImportSummary(true)">Voir le résumé du dernier import</button>
+            </div>
+            <p class="note">Ce bouton exécute <code>runImportRulesExportsFull</code> et génère tout en une seule passe.</p>
+          </div>
+        </div>
 
+        <div class="card">
+          <div class="card__header">
+            <h3 class="card__title">Journal des imports</h3>
+          </div>
+          <div class="card__body">
+            <div class="toolbar">
+              <label for="importLogMode">Vue:</label>
+              <select id="importLogMode" class="form-control" onchange="refreshImportLog()">
+                <option value="essential" selected>Essentiel</option>
+                <option value="all">Complet</option>
+              </select>
+              <button class="btn btn--secondary" onclick="refreshImportLog()">Actualiser</button>
+            </div>
+            <div class="table-wrap table-wrap--max">
+              <table id="tabImportLog" class="data-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Type</th>
+                    <th>Détails</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </section>
 
-<!-- RAPPORTS  -->
-<section id="view-rapports" class="view">
-   <div>
-              <iframe  style="width:100%; aspect-ratio: 16 / 9; height:auto; border:0;" loading="lazy" src="https://lookerstudio.google.com/embed/reporting/12ab0549-8d96-4a3a-b0da-92a19c63494f/page/p_9u5bv38aqd" frameborder="0" allowfullscreen sandbox="allow-storage-access-by-user-activation allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+      <!-- RAPPORTS  -->
+      <section id="view-rapports" class="view">
+        <div class="embed embed--16x9">
+          <iframe width="100%" height="600" loading="lazy"
+            src="https://lookerstudio.google.com/embed/reporting/12ab0549-8d96-4a3a-b0da-92a19c63494f/page/p_9u5bv38aqd"
+            frameborder="0" allowfullscreen
+            sandbox="allow-storage-access-by-user-activation allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+        </div>
+      </section>
+
+      <!-- JOUEURS -->
+      <section id="view-joueurs" class="view">
+        <div class="card">
+          <div class="card__header">
+            <h3 class="card__title">Joueurs — liste</h3>
           </div>
+          <div class="card__body">
+            <div class="toolbar">
+              <input id="jSearch" class="form-control" placeholder="Nom / passeport / email" />
+              <select id="jBand" class="form-control">
+                <option value="">Band</option>
+                <option>U4-U8</option>
+                <option>U9-U12</option>
+                <option>U13-U18</option>
+                <option>Adulte</option>
+              </select>
+              <select id="jAdapte" class="form-control">
+                <option value="">Adapté?</option>
+                <option value="1">Oui</option>
+                <option value="0">Non</option>
+              </select>
+              <select id="jPhoto" class="form-control">
+                <option value="">Photo</option>
+                <option value="missing">Aucune</option>
+                <option value="expired">Expirée</option>
+                <option value="soon">Bientôt</option>
+              </select>
+              <button class="btn btn--primary" id="jReload">Rechercher</button>
+            </div>
+
+            <div class="table-wrap">
+              <table id="tabJoueurs" class="data-table">
+                <thead>
+                  <tr>
+                    <th>Passeport</th>
+                    <th>Nom</th>
+                    <th>Prénom</th>
+                    <th>Band</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+
+            <div class="pager">
+              <button class="btn btn--secondary" id="jPrev">◀</button>
+              <span id="jPageInfo" class="pager__info">—</span>
+              <button class="btn btn--secondary" id="jNext">▶</button>
+            </div>
+
+            <div id="jDetail" class="card" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ENTRAÎNEURS -->
+      <section id="view-entraineurs" class="view">
+        <div class="card">
+          <div class="card__header">
+            <h3 class="card__title">Exports Entraîneurs</h3>
+          </div>
+          <div class="card__body">
+            <div class="toolbar">
+              <button class="btn btn--primary" onclick="doExportEntraineursMembres(this)">Exporter <b>retro-entraineurs-membres.xlsx</b></button>
+              <button class="btn btn--secondary" onclick="doExportEntraineursGroupes(this)">Exporter <b>retro-entraineurs-groupes.xlsx</b></button>
+            </div>
+            <p class="note">Les rôles proviennent de la feuille <code>ENTRAINEURS_ROLES</code>.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__header">
+            <h3 class="card__title">Entraîneurs — liste unique</h3>
+          </div>
+          <div class="card__body">
+            <div class="toolbar">
+              <input id="fSearch" class="form-control" placeholder="Filtrer (nom, rôle, équipe…)" />
+              <select id="fPhoto" class="form-control">
+                <option value="">Photo: tous</option>
+                <option value="OK">Photo: OK</option>
+                <option value="ÉCHUE">Photo: ÉCHUE</option>
+                <option value="À RENOUVELER">Photo: À RENOUVELER</option>
+              </select>
+              <select id="fCasier" class="form-control">
+                <option value="">Casier: tous</option>
+                <option value="OK">Casier: OK</option>
+                <option value="EXPIRÉ">Casier: EXPIRÉ</option>
+              </select>
+              <button class="btn btn--primary" onclick="loadEntraineurs()">Rafraîchir</button>
+            </div>
+            <div class="table-wrap">
+              <table id="tabEntraineurs" class="data-table">
+                <thead>
+                  <tr>
+                    <th>Passeport</th>
+                    <th>Nom</th>
+                    <th>Prénom</th>
+                    <th>Rôles</th>
+                    <th>Photo (expire)</th>
+                    <th>Statut photo</th>
+                    <th>Casier</th>
+                    <th>Valide ?</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PARAMÈTRES -->
+      <section id="view-parametres" class="view">
+        <div class="card card--flush">
+          <div id="ui-embed-root" class="embed-host">
+            <?!= includeEval('parametres'); ?>
+          </div>
+        </div>
+      </section>
+
+      <!-- INSCRIPTIONS — VUE D’ENSEMBLE -->
+<section id="view-insc-overview" class="view">
+  <div class="card card--wide">
+    <div class="card__header card__header--split">
+      <h3 class="card__title">Inscriptions — Vue d’ensemble</h3>
+      <div class="toolbar">
+        <button class="btn btn--secondary" id="ov-reload">Recharger</button>
+        <span class="stat-pill"><span class="mini">MAJ:</span> <b id="ov-last">—</b></span>
+        <span class="stat-pill"><span class="mini">Total:</span> <b id="ov-grand">0</b> (<span id="ov-m">M:0</span> | <span id="ov-f">F:0</span>)</span>
+      </div>
+    </div>
+    <div class="card__body">
+      <div class="grid grid--responsive" id="ov-grid">
+        <!-- Cartes secteurs injectées ici -->
+      </div>
+    </div>
+  </div>
 </section>
 
 
-      <!-- J O U E U R S (nouvel onglet parent) -->
-      <section id="view-joueurs" class="view">
+      <!-- ERREURS -->
+      <section id="view-erreurs" class="view">
         <div class="card">
-          <h3>Joueurs — liste</h3>
-          <div class="toolbar" style="margin-bottom:8px;">
-            <input id="jSearch" placeholder="Nom / passeport / email" style="padding:8px; min-width:240px;">
-            <select id="jBand">
-              <option value="">Band</option>
-              <option>U4-U8</option>
-              <option>U9-U12</option>
-              <option>U13-U18</option>
-              <option>Adulte</option>
-            </select>
-            <select id="jAdapte">
-              <option value="">Adapté?</option>
-              <option value="1">Oui</option>
-              <option value="0">Non</option>
-            </select>
-            <select id="jPhoto">
-              <option value="">Photo</option>
-              <option value="missing">Aucune</option>
-              <option value="expired">Expirée</option>
-              <option value="soon">Bientôt</option>
-            </select>
-            <button class="btn" id="jReload">Rechercher</button>
+          <div class="card__header card__header--split">
+            <h3 class="card__title">Erreurs & Avertissements — Inscriptions</h3>
+            <div class="toolbar">
+              <button class="btn btn--secondary" id="en-toggle-view">Vue: Liste</button>
+              <button class="btn btn--secondary" id="er-reload">Recharger</button>
+            </div>
           </div>
-
-          <div class="table-wrap">
-            <table id="tabJoueurs" class="table">
-              <thead>
-                <tr>
-                  <th>Passeport</th><th>Nom</th><th>Prénom</th><th>Band</th>
-                  <th>Adapté</th><th>Photo</th><th>Courriels</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
+          <div class="card__body">
+            <div class="er-meta">
+              <span class="sub">MAJ:</span> <span id="er-last-updated" class="sub">—</span>
+              <div class="er-badges">
+                <span class="badge badge--danger" id="er-badge-err">0 err</span>
+                <span class="badge badge--warn" id="er-badge-warn">0 warn</span>
+                <span class="badge badge--info" id="er-badge-info">0 info</span>
+                <span class="badge" id="er-badge-cumul" title="Total cumulé d’erreurs signalées">0 cumul</span>
+              </div>
+            </div>
+            <div class="toolbar">
+              <input id="er-search" class="form-control" type="search" placeholder="Filtrer (nom, passeport, message…)" />
+            </div>
+            <div id="er-box"></div>
+            <div id="er-cards" class="er-grid"></div>
           </div>
-          <div class="pager">
-            <button class="btn secondary" id="jPrev">◀</button>
-            <span id="jPageInfo" style="min-width:120px;text-align:center">—</span>
-            <button class="btn secondary" id="jNext">▶</button>
-          </div>
-
-          <div id="jDetail" class="card" style="margin-top:10px; display:none;"></div>
         </div>
-      </section>
+      </section>      
 
-      <!-- ENTRAÎNEURS (existant) -->
-      <section id="view-entraineurs" class="view">
-        <div class="card" style="margin-bottom:14px;">
-          <h3>Exports Entraîneurs</h3>
-          <div class="toolbar" style="margin-top:6px;">
-            <button class="btn" onclick="doExportEntraineursMembres(this)">Exporter <b>retro-entraineurs-membres.xlsx</b></button>
-            <button class="btn secondary" onclick="doExportEntraineursGroupes(this)">Exporter <b>retro-entraineurs-groupes.xlsx</b></button>
-          </div>
-          <p class="note" style="margin-top:8px;">Les rôles proviennent de la feuille <code>ENTRAINEURS_ROLES</code>.</p>
-        </div>
-
+      <!-- ANNULATIONS -->
+      <section id="view-annulations" class="view">
         <div class="card">
-          <h3>Entraîneurs — liste unique</h3>
-          <div class="toolbar" style="gap:8px; margin-bottom:8px;">
-            <input id="fSearch" placeholder="Filtrer (nom, rôle, équipe…)" style="padding:8px; min-width:240px;">
-            <select id="fPhoto">
-              <option value="">Photo: tous</option>
-              <option value="OK">Photo: OK</option>
-              <option value="ÉCHUE">Photo: ÉCHUE</option>
-              <option value="À RENOUVELER">Photo: À RENOUVELER</option>
-            </select>
-            <select id="fCasier">
-              <option value="">Casier: tous</option>
-              <option value="OK">Casier: OK</option>
-              <option value="EXPIRÉ">Casier: EXPIRÉ</option>
-            </select>
-            <button class="btn" onclick="loadEntraineurs()">Rafraîchir</button>
+          <div class="card__header card__header--split">
+            <h3 class="card__title">Suivi des annulations — Inscriptions & Articles</h3>
+            <div class="toolbar">
+              <input id="an-search" class="form-control" type="search" placeholder="Filtrer (nom, passeport, élément…)" />
+              <button class="btn btn--secondary" id="an-reload">Recharger</button>
+              <button class="btn btn--secondary" id="en-toggle-view">Vue: Liste</button>
+
+            </div>
           </div>
-          <div class="table-wrap" style="overflow:auto;">
-            <table id="tabEntraineurs" class="table">
-              <thead>
-                <tr>
-                  <th>Passeport</th><th>Nom</th><th>Prénom</th><th>Rôles</th>
-                  <th>Photo (expire)</th><th>Statut photo</th><th>Casier</th><th>Valide ?</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
+          <div class="card__body">
+            <div class="note" id="an-last">MAJ: —</div>
+            <div id="an-box"></div>
+
+            <div class="grid grid--responsive">
+              <div class="card">
+                <div class="card__header">
+                  <h3 class="card__title">À corriger <span id="an-badge-todo" class="chip chip--accent">0</span></h3>
+                </div>
+                <div class="card__body">
+                  <div class="table-wrap table-wrap--max">
+                    <table class="data-table" id="an-tab-todo">
+                      <thead>
+                        <tr>
+                          <th>Passeport</th>
+                          <th>Membre</th>
+                          <th>Élément annulé</th>
+                          <th>Date</th>
+                          <th>Frais actifs restants</th>
+                          <th>Corrigé</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr><td colspan="6">Chargement…</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card__header">
+                  <h3 class="card__title">Traités <span id="an-badge-done" class="chip">0</span></h3>
+                </div>
+                <div class="card__body">
+                  <div class="table-wrap table-wrap--max">
+                    <table class="data-table" id="an-tab-done">
+                      <thead>
+                        <tr>
+                          <th>Passeport</th>
+                          <th>Membre</th>
+                          <th>Élément annulé</th>
+                          <th>Date</th>
+                          <th>Frais actifs restants</th>
+                          <th>Corrigé</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr><td colspan="6">—</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
 
-      <!-- PARAMÈTRES : embed UI complet -->
-      <section id="view-parametres" class="view">
-        <div class="card" style="padding:0;">
-          <div id="ui-embed-root" style="border-radius:12px; overflow:hidden;">
-            <?!= includeEval('ui_embed'); ?>
+      <!-- ENTENTES DE PAIEMENT -->
+      <section id="view-ententes" class="view">
+        <div class="card card--wide">
+          <div class="card__header">
+            <h3 class="card__title">Ententes de paiements</h3>
+          </div>
+          <div class="card__body">
+            <div class="toolbar en-toolbar">
+              <input id="en-search" class="form-control" type="search" placeholder="Rechercher (nom, passeport)…" />
+              <select id="en-sort" class="form-control">
+                <option value="soldeDesc" selected>Solde ⬇</option>
+                <option value="soldeAsc">Solde ⬆</option>
+                <option value="nom">Nom A→Z</option>
+              </select>
+              <label class="checkbox-pill" for="en-only-no-plan">
+                <input id="en-only-no-plan" type="checkbox" />
+                <span>Sans entente seulement</span>
+              </label>
+              <label class="checkbox-pill" for="en-only-late">
+                <input id="en-only-late" type="checkbox" />
+                <span>En retard seulement</span>
+              </label>
+              <button class="btn btn--secondary" id="en-toggle-view">Vue: Liste</button>
+              <button class="btn btn--secondary" id="en-sync">↻ Mise à jour</button>
+              <span class="stat-pill"><span class="mini">Membres:</span> <b id="en-count">0</b></span>
+              <span class="stat-pill"><span class="mini">Solde total:</span> <b id="en-sum">0,00 $</b></span>
+            </div>
           </div>
         </div>
+        <div id="en-box" class="en-grid"></div>
       </section>
+
     </main>
   </div>
+
+  <!-- Modal unifié -->
+  <div id="uniModal" class="modal-backdrop" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="mTitle">—</h3>
+        <button class="btn btn--secondary" id="mClose">Fermer</button>
+      </div>
+      <div class="modal-body" id="mBody">
+        <div class="section-busy">
+          <div class="spinner"></div><span>Chargement…</span>
+        </div>
+      </div>
+      <div class="modal-actions" id="mActions"></div>
+    </div>
+  </div>
+
+  <!-- Les scripts applicatifs seront inclus/chargés séparément -->
+  <?!= include('app_ui.js.html'); ?>
 </body>
 </html>

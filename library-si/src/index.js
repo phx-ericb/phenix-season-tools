@@ -56,9 +56,22 @@ var Library = {
 
   // Augmentations
   runPostImportAugmentations: runPostImportAugmentations_,
+
+    // --- Late registration utilities (exported from external_utils.js) ---
+  late_onEditHandler: (typeof late_onEditHandler === 'function') ? late_onEditHandler : undefined,
+  late_sendAssignmentEmail: (typeof late_sendAssignmentEmail === 'function') ? late_sendAssignmentEmail : undefined,
+   // --- ÉCRITURE dans la feuille tardive (appelée par __sendSummariesV2__) ---
+  // (Expose-la surtout si tu veux aussi la tester/appeler manuellement)
+  writeLateRegistrations_: (typeof writeLateRegistrations_ === 'function') ? writeLateRegistrations_ : undefined,
+
+  // --- Optionnel : sync générique si tu veux l’appeler depuis ton flow d’import ---
+  late_syncPlayersToTargetSheet: (typeof late_syncPlayersToTargetSheet === 'function') ? late_syncPlayersToTargetSheet : undefined,
+
+
 };
 
 // wrapper pratique pour lancer l’export
 function runExportRetroMembres() {
   return exportRetroMembresXlsxToDrive(SpreadsheetApp.getActiveSpreadsheet().getId());
 }
+

@@ -1,0 +1,1841 @@
+<script>
+  // Mise en évidence immédiate du lien actif (avant boot Apps Script)
+  (function preBootHighlight() {
+    const r = (location.hash || '#/dashboard').split('?')[0];
+
+    // Couvre: nouveau (.sidebar-nav__item, .sidebar-sub__item) + legacy (.link)
+    const anchors = document.querySelectorAll('a.sidebar-nav__item, a.sidebar-sub__item, a.link');
+
+    anchors.forEach(a => {
+      const isActive = a.getAttribute('href') === r;
+
+      // Nouveau système (principal)
+      if (a.classList.contains('sidebar-nav__item')) {
+        a.classList.toggle('sidebar-nav__item--active', isActive);
+      }
+      if (a.classList.contains('sidebar-sub__item')) {
+        a.classList.toggle('is-active', isActive);
+        if (isActive) {
+          const submenu = a.closest('.sidebar-group__submenu, .nav-sub');
+          if (submenu) {
+            submenu.classList.add('open');
+            const toggle = submenu.previousElementSibling;
+            if (toggle && (toggle.matches('.sidebar-group__toggle, .nav-toggle'))) {
+              toggle.classList.add('open');
+            }
+          }
+        }
+      }
+    });
+  })();
+
+  function EN_toast(msg, ok = true) {
+    const el = document.createElement('div');
+    el.className = 'toast ' + (ok ? 'toast--ok' : 'toast--err'); // nouveau naming
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 1400);
+  }
+
+
+  // Mise à jour optimiste de la carte (ajoute les échéances sans re-fetch)
+  function EN_optimisticAdd(passport, payments) {
+    const m = EN.raw.find(x => x.passport === passport);
+    if (!m) return;
+    const baseline = +(+m.totalPaid || 0);
+    m.ent = m.ent || [];
+    payments.forEach(p => {
+      m.ent.push({
+        rowNum: -Date.now(),  // temporaire (remplacé au prochain fetch)
+        dateStr: p.date,      // JJ/MM/AAAA
+        amount: +(+p.amount || 0),
+        received: 0,
+        status: 'Ouvert',
+        baseline: baseline
+      });
+    });
+    m.scheduled = +((m.scheduled || 0) + payments.reduce((s, p) => s + (+p.amount || 0), 0)).toFixed(2);
+    m.gap = +((m.outstanding - m.scheduled).toFixed(2));
+    EN_filterAndRender(); // re-render local
+  }
+
+  // Attends que le pont Apps Script réponde
+  async function waitServerReady(max = 8) {
+    for (let i = 0; i < max; i++) {
+      try {
+        const pong = await call_('API_ping');
+        if (pong === 'pong') return;
+      } catch (_) { }
+      await new Promise(r => setTimeout(r, 150 * (i + 1)));
+    }
+  }
+
+// Évite les callbacks de google.script.run quand on quitte la page
+let __UNLOADING__ = false;
+window.addEventListener('beforeunload', () => { __UNLOADING__ = true; });
+
+
+function safeOn(el, evt, fn) {
+  if (!el) return;
+  const key = `__bound_${evt}__`;
+  if (el[key]) return;
+  el.addEventListener(evt, fn);
+  el[key] = true;
+}
+
+
+  // Promisify google.script.run
+function call_(fn, args = []) {
+  return new Promise((resolve, reject) => {
+    try {
+      const runner = google?.script?.run;
+      if (!runner) return reject(new Error('google.script.run non disponible'));
+      const api = runner[fn];
+      if (typeof api !== 'function') return reject(new Error(`Fonction Apps Script "${fn}" introuvable.`));
+
+      runner
+        .withSuccessHandler((res) => { if (!__UNLOADING__) resolve(res); })
+        .withFailureHandler((err)  => {
+          if (__UNLOADING__) return; // on ignore l’erreur si on quitte la page
+          const msg = (err && (err.message || err.toString())) || 'Erreur inconnue';
+          reject(new Error(`[${fn}] ${msg}`));
+        })
+        [fn].apply(runner, args);
+
+    } catch (e) { reject(e); }
+  });
+}
+
+  // Déduplique les appels identiques en vol (clé = nom + args JSON)
+  const __apiInflight = new Map();
+  function callDedup(fn, args = []) {
+    const key = fn + '|' + JSON.stringify(args || []);
+    if (__apiInflight.has(key)) return __apiInflight.get(key);
+    const p = call_(fn, args).finally(() => __apiInflight.delete(key));
+    __apiInflight.set(key, p);
+    return p;
+  }
+
+  // Petit utilitaire: séquence d'étapes asynchrones avec délai entre chaque
+  async function runInSeries(steps, gapMs = 150) {
+    for (const step of steps) {
+      try { await step(); } catch (e) { console.warn('Step failed:', e); }
+      if (gapMs) await new Promise(r => setTimeout(r, gapMs));
+    }
+  }
+
+
+  // ================= IMPORT LOG POLLER =================
+let IM_timer = null, IM_pollMs = 3000, IM_running = false;
+
+async function IM_boot() {
+  if (IM_timer) clearInterval(IM_timer);
+  await IM_refresh();
+  IM_timer = setInterval(IM_refresh, IM_pollMs);
+}
+
+async function IM_refresh() {
+  if (IM_running) return; IM_running = true;
+  try {
+    const call = (typeof callDedup === 'function') ? callDedup : call_;
+    const r = await call('API_IMPORT_tail', [200]);
+    if (r?.ok) IM_render(r.rows || []);
+    else if (!r?.busy) console.warn('IMPORT tail fail', r);
+    // (si busy: classeur occupé → on attend le prochain tick)
+  } catch (e) {
+    console.error('IM_refresh', e);
+  } finally {
+    IM_running = false;
+  }
+}
+
+// Rendu très simple (adapte si tu as déjà un renderer)
+function IM_render(rows) {
+  const box = document.getElementById('im-box');
+  if (!box) return;
+  if (!rows.length) { box.innerHTML = '<div class="muted">Aucun événement d’import récent.</div>'; return; }
+
+  // mini table “snapshot”
+  const heads = Object.keys(rows[0]);
+  const thead = '<thead><tr>' + heads.map(h=>`<th>${h}</th>`).join('') + '</tr></thead>';
+  const tbody = '<tbody>' + rows.map(r =>
+    '<tr>' + heads.map(h=>`<td>${(r[h] ?? '')}</td>`).join('') + '</tr>'
+  ).join('') + '</tbody>';
+  box.innerHTML = `<table class="table-compact">${thead}${tbody}</table>`;
+}
+// =====================================================
+
+
+  /* ===== Modal helper — harmonisé au nouveau CSS ===== */
+
+  /* 1) Assure le conteneur modal (créé à la volée si absent) */
+  function ensureUniModal() {
+    if (document.getElementById('uniModal')) return;
+    const root = document.createElement('div');
+    root.id = 'uniModal';
+    root.className = 'modal-backdrop';
+    root.hidden = true;
+    root.innerHTML = `
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+      <div class="modal-header">
+        <h3 id="mTitle">—</h3>
+        <button class="btn btn--secondary" id="mClose">Fermer</button>
+      </div>
+      <div class="modal-body" id="mBody"></div>
+      <div class="modal-actions" id="mActions"></div>
+    </div>`;
+    document.body.appendChild(root);
+  }
+
+  /* 2) API Modal (utilise uniquement les classes du nouveau système) */
+  const Modal = (() => {
+    const R = () => document.getElementById('uniModal');
+    const T = () => document.getElementById('mTitle');
+    const B = () => document.getElementById('mBody');
+    const A = () => document.getElementById('mActions');
+
+    function open({ title = '', html = '', actions = [] } = {}) {
+      ensureUniModal();
+      const root = R(); if (!root) { console.warn('Modal root introuvable'); return; }
+      const t = T(), b = B(), a = A();
+
+      if (t) t.textContent = title;
+      if (b) b.innerHTML = html;
+
+      if (a) {
+        a.innerHTML = '';
+        (actions || []).forEach(({ label, onClick, variant = 'secondary' }) => {
+          const btn = document.createElement('button');
+          btn.className = `btn ${variant === 'primary' ? 'btn--primary' :
+            variant === 'danger' ? 'btn--danger' :
+              'btn--secondary'}`;
+          btn.textContent = label;
+          btn.addEventListener('click', onClick);
+          a.appendChild(btn);
+        });
+      }
+
+      root.hidden = false;
+      document.getElementById('mClose')?.addEventListener('click', close, { once: true });
+    }
+
+    function close() {
+      const root = R();
+      if (root) root.hidden = true;
+    }
+
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+
+    return { open, close };
+  })();
+
+
+  /* ====== 3) Fallback Joueurs si modal/API indispo ====== */
+  function fallbackOpenInJoueurs(p) {
+    try { Modal.close(); } catch (_) { }
+    location.hash = '#/joueurs';
+    setTimeout(() => { if (typeof joueursShowDetail === 'function') joueursShowDetail(p); }, 80);
+  }
+
+  /* ====== 4) Fiche joueur : tente modal + API, sinon fallback ====== */
+
+  // Normalisation client (tolère l’apostrophe et le padding)
+  function normPassClient(x) {
+    let s = String(x || '').trim();
+    if (s.startsWith("'")) s = s.slice(1);
+    s = s.replace(/\s+/g, '');
+    if (/^\d+$/.test(s) && s.length < 8) s = ('00000000' + s).slice(-8);
+    return s;
+  }
+
+  // mini-cache en mémoire + dédoublonnage des requêtes en vol
+  const __personCache = new Map();   // key: passeport normalisé -> payload
+  const __inflight = new Map();   // key -> Promise
+
+  async function fetchPersonDetail(pass) {
+    const pid = normPassClient(pass);
+    if (__personCache.has(pid)) return __personCache.get(pid);
+    if (__inflight.has(pid)) return __inflight.get(pid);
+
+    const prom = call_('API_getJoueurDetailLoose', [pid])
+      .then(res => { __personCache.set(pid, res); return res; })
+      .finally(() => __inflight.delete(pid));
+
+    __inflight.set(pid, prom);
+    return prom;
+  }
+
+
+  /* ====== 5) Délégation globale : capte tous les clics sur a[data-p] ====== */
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[data-p]');
+    if (!a) return;
+    e.preventDefault();
+    const p = a.dataset.p;
+    if (!p) return;
+    // Ouvre la fiche (avec fallback si modal ou API absent)
+    openPersonModal(p);
+  });
+
+
+  /* ===== Fiche joueur (ouvre modal sur clic passeport) ===== */
+  let __modalToken = 0; // discard responses from older clicks
+
+  async function openPersonModal(passeport) {
+    const myToken = ++__modalToken;
+
+    // Ouverture immédiate (état busy)
+    Modal.open({
+      title: `Chargement — ${passeport}`,
+      html: '<div class="section-busy"><div class="spinner"></div><span>Chargement…</span></div>',
+      actions: [{ label: 'Fermer', onClick: Modal.close }]
+    });
+
+    // Récupération (avec dédoublonnage)
+    let res = null;
+    try {
+      res = await fetchPersonDetail(passeport); // utilise le cache interne
+    } catch (e) {
+      if (myToken !== __modalToken) return; // une requête plus récente a gagné
+      Modal.open({
+        title: `Introuvable — ${passeport}`,
+        html: `<div class="note">Erreur de chargement: ${ER_escapeHtml(e.message || e)}</div>`,
+        actions: [{ label: 'Fermer', onClick: Modal.close }]
+      });
+      return;
+    }
+    if (myToken !== __modalToken) return;
+
+    if (!res || res.notFound) {
+      Modal.open({
+        title: `Introuvable — ${passeport}`,
+        html: `<div class="note">Impossible de trouver la fiche pour <b>${ER_escapeHtml(String(passeport))}</b>.</div>`,
+        actions: [
+          {
+            label: 'Ouvrir dans Joueurs',
+            onClick: () => {
+              Modal.close();
+              location.hash = '#/joueurs';
+              setTimeout(() => {
+                if (typeof joueursShowDetail === 'function') {
+                  joueursShowDetail(passeport);
+                }
+              }, 80);
+            }
+          },
+          { label: 'Fermer', onClick: Modal.close }
+        ]
+      });
+      return;
+    }
+
+    const j = res.joueur || {};
+    const acts = res.activites || [];
+
+    const ledgerRows =
+      acts.map(a => (
+        `<tr>
+         <td>${ER_escapeHtml(a.type || '')}</td>
+         <td>${ER_escapeHtml(a.nom || '')}</td>
+         <td>${ER_escapeHtml(a.band || '')}</td>
+         <td>${ER_escapeHtml(a.tags || '')}</td>
+       </tr>`
+      )).join('') ||
+      `<tr><td colspan="4"><span class="sub">Aucune activité.</span></td></tr>`;
+
+    const html = `
+    <div class="grid grid--responsive">
+      <div class="card">
+        <div class="card__header"><h3 class="card__title">Profil</h3></div>
+        <div class="card__body">
+          <div><b>Passeport:</b> ${ER_escapeHtml(j.passeport || passeport)}</div>
+          <div><b>Nom:</b> ${ER_escapeHtml(j.nom || '')}</div>
+          <div><b>Prénom:</b> ${ER_escapeHtml(j.prenom || '')}</div>
+          <div><b>Band:</b> ${ER_escapeHtml(j.band || '')}</div>
+          <div><b>Adapté:</b> ${ER_escapeHtml(j.adapte || '')}</div>
+          <div><b>Photo:</b> ${ER_escapeHtml(j.photo || '')} ${j.photoDate ? `(${ER_escapeHtml(j.photoDate)})` : ''}</div>
+          <div><b>Courriels:</b> ${ER_escapeHtml(j.courriels || '')}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table data-table--compact">
+        <thead>
+          <tr><th>Type</th><th>Élément</th><th>Band</th><th>Tags</th></tr>
+        </thead>
+        <tbody>${ledgerRows}</tbody>
+      </table>
+    </div>`;
+
+    Modal.open({
+      title: `${ER_escapeHtml(j.prenom || '')} ${ER_escapeHtml(j.nom || '')} — ${ER_escapeHtml(j.passeport || passeport)}`,
+      html,
+      actions: [
+        {
+          label: 'Ouvrir dans Joueurs',
+          onClick: () => {
+            Modal.close();
+            location.hash = '#/joueurs';
+            setTimeout(() => {
+              if (typeof joueursShowDetail === 'function') {
+                joueursShowDetail(j.passeport || passeport);
+              }
+            }, 80);
+          }
+        },
+        { label: 'Fermer', onClick: Modal.close }
+      ]
+    });
+  }
+
+
+
+
+  /* ===== Résumé du dernier import (modal) — harmonisé ===== */
+  async function showImportSummary(autoOpen) {
+    if (autoOpen) {
+      Modal.open({
+        title: 'Résumé du dernier import',
+        html: '<div class="section-busy"><div class="spinner"></div><span>Compilation…</span></div>'
+      });
+    }
+
+    try {
+      const rows = await call_('getRecentActivity', ['all', 200]);
+      const parsed = (rows || []).map(r => {
+        const d = new Date(r.date || r.timestamp || Date.now());
+        let details = r.details;
+        if (typeof details === 'string' && /^[\[{]/.test(details)) {
+          try { details = JSON.parse(details); } catch (_) { }
+        }
+        return { date: d, type: r.type || '', details };
+      }).sort((a, b) => a.date - b.date);
+
+      if (!parsed.length) {
+        Modal.open({
+          title: 'Résumé du dernier import',
+          html: '<div class="note">Aucune activité récente.</div>',
+          actions: [{ label: 'Fermer', onClick: Modal.close }]
+        });
+        return;
+      }
+
+      // Fenêtre de ~10 min autour du dernier événement
+      const lastTs = parsed[parsed.length - 1].date.getTime();
+      const win = parsed.filter(x => (lastTs - x.date.getTime()) <= 10 * 60 * 1000);
+
+      const byType = {};
+      const membres = { created: 0, updated: 0, unchanged: 0 };
+
+      win.forEach(x => {
+        byType[x.type] = (byType[x.type] || 0) + 1;
+        const d = x.details;
+        if (d && typeof d === 'object') {
+          membres.created += +(d.created || 0);
+          membres.updated += +(d.updated || 0);
+          membres.unchanged += +(d.unchanged || 0);
+        }
+      });
+
+      const lines = win.map(x => `
+      <tr>
+        <td>${x.date.toLocaleString()}</td>
+        <td>${ER_escapeHtml(x.type)}</td>
+        <td>${ER_escapeHtml(typeof x.details === 'string' ? x.details : JSON.stringify(x.details || {}))}</td>
+      </tr>`
+      ).join('');
+
+      const html = `
+      <div class="grid grid--responsive">
+        <div class="card">
+          <div class="card__header"><h3 class="card__title">Fenêtre analysée</h3></div>
+          <div class="card__body">
+            <div>Fin: ${new Date(lastTs).toLocaleString()}</div>
+            <div>Durée: ~10 minutes</div>
+            <div>Événements: ${win.length}</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__header"><h3 class="card__title">Membres</h3></div>
+          <div class="card__body">
+            <div>Créés: <b>${membres.created}</b></div>
+            <div>Mise à jour: <b>${membres.updated}</b></div>
+            <div>Inchangés: <b>${membres.unchanged}</b></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__header"><h3 class="card__title">Événements</h3></div>
+          <div class="card__body">
+            <ul class="list">
+              ${Object.keys(byType).sort()
+          .map(k => `<li>${ER_escapeHtml(k)} <span class="chip">${byType[k]}</span></li>`)
+          .join('') || '<li>(aucun)</li>'
+        }
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-wrap table-wrap--max">
+        <table class="data-table data-table--compact">
+          <thead>
+            <tr><th>Date</th><th>Type</th><th>Détails</th></tr>
+          </thead>
+          <tbody>${lines}</tbody>
+        </table>
+      </div>
+    `;
+
+      Modal.open({
+        title: 'Résumé du dernier import',
+        html,
+        actions: [{ label: 'Fermer', onClick: Modal.close }]
+      });
+    } catch (e) {
+      Modal.open({
+        title: 'Résumé du dernier import',
+        html: `<div class="note">Impossible de construire le résumé: ${ER_escapeHtml(e.message || e)}</div>`,
+        actions: [{ label: 'Fermer', onClick: Modal.close }]
+      });
+    }
+  }
+
+const IMPORT_ROUTE = '#/retro'; // ← ajuste si ton lien est '#/imports'
+
+  // Router
+  function routeTo(h) {
+    const r = (h || location.hash || '#/dashboard').split('?')[0];
+
+    // 1) Navigation active (principal + sous-menus)
+    document.querySelectorAll('a.sidebar-nav__item').forEach(a => {
+      a.classList.toggle('sidebar-nav__item--active', a.getAttribute('href') === r);
+    });
+
+    document.querySelectorAll('a.sidebar-sub__item').forEach(a => {
+      const isActive = a.getAttribute('href') === r;
+      a.classList.toggle('is-active', isActive);
+
+      // Ouvre le sous-menu si un item est actif
+      const submenu = a.closest('.sidebar-group__submenu');
+      const toggle = submenu ? submenu.previousElementSibling : null;
+      if (submenu) submenu.classList.toggle('open', isActive);
+      if (toggle && toggle.classList.contains('sidebar-group__toggle')) {
+        toggle.classList.toggle('open', isActive);
+      }
+    });
+
+    // START/STOP du poller Import
+  if (r === IMPORT_ROUTE) {
+    IM_boot();
+  } else {
+    if (IM_timer) { clearInterval(IM_timer); IM_timer = null; }
+  }
+
+    // 2) Routing des vues
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('view--active'));
+    const id = 'view-' + r.replace('#/', '');
+    const el = document.getElementById(id);
+    if (el) el.classList.add('view--active');
+
+    // 3) Hooks de navigation
+    switch (id) {
+      case 'view-dashboard':
+        try { refreshImportLog(); } catch (_) { }
+        break;
+
+      case 'view-joueurs':
+        if (!window.__JOU_loaded__) { try { joueursLoadPage(0); } catch (_) { } }
+        break;
+
+      case 'view-erreurs':
+        if (!window.__ER_boot_promise__) {
+          const p = ER_boot();
+          window.__ER_boot_promise__ = p;
+          p.then(() => { window.__ER_booted__ = true; })
+            .catch(e => { console.error('ER_boot failed:', e); })
+            .finally(() => { /* on garde la promesse pour éviter les races; ne pas la nuller ici */ });
+        }
+        break;
+
+
+      case 'view-annulations':
+        if (!window.__AN_booted__) { try { AN_boot(); window.__AN_booted__ = true; } catch (_) { } }
+        break;
+
+      case 'view-entraineurs':
+        if (!window.__ENT_loaded__) { try { loadEntraineurs(); window.__ENT_loaded__ = true; } catch (_) { } }
+        break;
+
+      case 'view-retro': // anciennement "imports"
+        if (!window.__IMP_loaded__) { try { refreshImportLog(); window.__IMP_loaded__ = true; } catch (_) { } }
+        break;
+
+      case 'view-ententes':
+        if (!window.__EN_booted__) { try { EN_load(); window.__EN_booted__ = true; } catch (_) { } }
+        break;
+
+      // >>> NOUVELLE VUE : Inscriptions — Vue d’ensemble
+      case 'view-insc-overview':
+        if (!window.__OV_boot_promise__) {
+          window.__OV_boot_promise__ = OV_boot()
+            .then(() => { window.__OV_booted__ = true; })
+            .catch(e => { console.error('OV_boot failed:', e); window.__OV_boot_promise__ = null; });
+        }
+        break;
+    }
+  }
+
+
+  // Redirection douce vers ?view=ui (Paramètres intégrés)
+  function goParams(ev) {
+    ev && ev.preventDefault();
+    const base = window.location.href.split('#')[0].split('?')[0];
+    document.querySelector('nav')?.classList.add('fade');
+    document.querySelector('main')?.classList.add('fade');
+    window.location.href = base + '?view=ui';
+  }
+
+
+  // ==== EXPORTS ENTRAÎNEURS (existant) ====
+  async function doExportEntraineursMembres(btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const res = await call_('runExportEntraineursMembres');
+      alert('Export membres OK: ' + (res?.name || 'fichier généré'));
+    } catch (e) { console.error(e); alert('Erreur export membres.'); }
+    finally { if (btn) btn.disabled = false; }
+  }
+  async function doExportEntraineursGroupes(btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const res = await call_('runExportEntraineursGroupes');
+      alert('Export groupes OK: ' + (res?.name || 'fichier généré'));
+    } catch (e) { console.error(e); alert('Erreur export groupes.'); }
+    finally { if (btn) btn.disabled = false; }
+  }
+
+  // ==== IMPORTS (NOUVEL ONGLET) ====
+  async function doImportGlobal(btn) {
+    location.hash = '#/dashboard';          // évite de laisser la vue Erreurs ouverte
+window.__IMPORT_LOCK__ = true;
+
+    if (btn) btn.disabled = true;
+    try {
+      const res = await call_('runImportAndExports');
+      EN_toast(res?.ok ? 'Import global terminé ✅' : 'Import global terminé (voir Journal).', !!res?.ok);
+      try { await refreshImportLog(); } catch (_) { }
+      try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch (_) { }
+    } catch (e) {
+      console.error(e);
+      EN_toast('Erreur: import global.', false);
+    } finally {
+      window.__IMPORT_LOCK__ = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function doImportValidationMembres(btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const res = await call_('runImportValidationMembres');
+      EN_toast(`Import Membres: +${res?.created ?? 0} créés, ${res?.updated ?? 0} maj, ${res?.unchanged ?? 0} inchangés`, true);
+      try { await refreshImportLog(); } catch (_) { }
+      try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch (_) { }
+    } catch (e) {
+      console.error(e);
+      EN_toast('Erreur import Membres Spordle.', false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function refreshImportLog() {
+    const tb = document.querySelector('#tabImportLog tbody');
+    if (tb) tb.innerHTML = '<tr><td colspan="3"><span class="sub">Chargement…</span></td></tr>';
+    try {
+      const mode = document.getElementById('importLogMode')?.value || 'essential';
+      const rows = await call_('getRecentActivity', [mode, 50]);
+      renderImportLog(rows || []);
+    } catch (e) {
+      console.warn(e);
+      if (tb) tb.innerHTML = '<tr><td colspan="3"><span class="note">Impossible de lire le journal.</span></td></tr>';
+    }
+  }
+
+  async function doImportGlobalIncr(btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const res = await call_('runImportRulesExportsIncr');
+      EN_toast(res?.ok ? 'Import incrémental terminé ✅' : 'Import incrémental: voir Journal.', !!res?.ok);
+      try { await refreshImportLog(); } catch (_) { }
+      try { await loadDashboardKpis(); } catch (_) { }
+      try { await call_('runSyncInscriptionsEntraineurs'); await loadEntraineurs(); } catch (_) { }
+    } catch (e) {
+      console.error(e);
+      EN_toast('Erreur: import incrémental.', false);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function renderImportLog(rows) {
+    const tb = document.querySelector('#tabImportLog tbody');
+    if (!tb) return;
+    if (!rows || !rows.length) {
+      tb.innerHTML = '<tr><td colspan="3"><span class="sub">Aucune activité récente.</span></td></tr>';
+      return;
+    }
+    tb.innerHTML = '';
+    (rows || []).forEach(r => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+      <td>${ER_escapeHtml(r.date || '')}</td>
+      <td>${ER_escapeHtml(r.type || '')}</td>
+      <td>${ER_escapeHtml(typeof r.details === 'string' ? r.details : JSON.stringify(r.details || {}))}</td>`;
+      tb.appendChild(tr);
+    });
+  }
+
+  async function doImportFullFlow(btn) {
+
+    location.hash = '#/dashboard';          // évite de laisser la vue Erreurs ouverte
+    window.__IMPORT_LOCK__ = true;
+
+    if (btn) btn.disabled = true;
+    try {
+      const res = await call_('runImportRulesExportsFull');
+      EN_toast(res?.ok ? 'Import FULL terminé ✅' : 'Import FULL terminé (voir Journal).', !!res?.ok);
+      try { await refreshImportLog(); } catch (_) { }
+      try { await showImportSummary(true); } catch (_) { }
+    } catch (e) {
+      console.error(e);
+      EN_toast('Erreur: import FULL.', false);
+    } finally {
+      window.__IMPORT_LOCK__ = false;
+      if (btn) btn.disabled = false;
+    }
+
+
+  }
+
+  // ====== J O U E U R S  (nouvel onglet parent) ======
+  let J_state = { offset: 0, limit: 50, total: 0 };
+
+  function joueursQuery() {
+    return {
+      offset: J_state.offset,
+      limit: J_state.limit,
+      search: $('#jSearch')?.value || '',
+      band: $('#jBand')?.value || '',
+      adapte: $('#jAdapte')?.value || '',
+      photo: $('#jPhoto')?.value || ''
+    };
+  }
+
+// ------- Inflight guard pour Joueurs --------
+let J_req = 0;
+async function joueursLoadPage(offset = 0) {
+  const my = ++J_req;
+  const q = joueursQuery();                 // ← utilise la vraie query
+  const params = { offset, limit: J_state.limit, filters: q };
+  let resp;
+  try {
+    resp = await callDedup('API_listJoueursPage', [params]);
+  } catch (e) {
+    if (my !== J_req) return;
+    console.error('joueursLoadPage:', e);
+    return;
+  }
+  if (my !== J_req) return;
+  J_state.total = resp?.total ?? 0;
+  J_state.offset = offset;
+  J_state.rows = resp?.rows ?? [];
+  joueursRender();
+}
+
+
+// ------- Debounce des champs de recherche/filtre --------
+const debounce = (fn, ms=200) => {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+};
+['jSearch','jBand','jAdapte','jPhoto'].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  safeOn(el, 'input',  debounce(() => joueursLoadPage(0), 220));  // input = plus fiable
+  safeOn(el, 'change', debounce(() => joueursLoadPage(0), 220));
+});
+safeOn(document.getElementById('jReload'), 'click', () => joueursLoadPage(0));
+safeOn(document.getElementById('jPrev'),   'click', () => joueursLoadPage(Math.max(0, J_state.offset - J_state.limit)));
+safeOn(document.getElementById('jNext'),   'click', () => {
+  if (J_state.offset + J_state.limit < J_state.total) joueursLoadPage(J_state.offset + J_state.limit);
+});
+
+  async function joueursShowDetail(passeport) {
+    const box = $('#jDetail');
+    if (!box) return;
+
+    // Affiche le conteneur et état busy
+    box.hidden = false;
+    box.innerHTML = `
+    <div class="section-busy">
+      <div class="spinner"></div>
+      <span class="busy-text">Chargement…</span>
+    </div>`;
+
+    try {
+      const res = await call_('API_getJoueurDetailLoose', [passeport]);
+      if (res?.notFound) {
+        box.innerHTML = '<div class="note">Introuvable.</div>';
+        return;
+      }
+
+      const j = res?.joueur || {};
+      const acts = res?.activites || [];
+
+      const actsList = acts.length
+        ? `<ul class="list">${acts.map(a =>
+          `<li>[${ER_escapeHtml(a.type || '')}] ${ER_escapeHtml(a.nom || '')} — ${ER_escapeHtml(a.band || '')} <i>${ER_escapeHtml(a.tags || '')}</i></li>`
+        ).join('')}</ul>`
+        : '<div class="sub">Aucune activité.</div>';
+
+      box.innerHTML = `
+      <div class="card__header">
+        <h3 class="card__title">${ER_escapeHtml(j.prenom || '')} ${ER_escapeHtml(j.nom || '')} — ${ER_escapeHtml(j.passeport || passeport)}</h3>
+      </div>
+      <div class="card__body">
+        <div><b>Genre:</b> ${ER_escapeHtml(j.genre || '')} · <b>Band:</b> ${ER_escapeHtml(j.band || '')} · <b>Adapté:</b> ${ER_escapeHtml(j.adapte || '')}</div>
+        <div><b>Photo:</b> ${ER_escapeHtml(j.photo || '')} ${j.photoDate ? '(' + ER_escapeHtml(j.photoDate) + ')' : ''}</div>
+        <div><b>Courriels:</b> ${ER_escapeHtml(j.courriels || '')}</div>
+        <h4 class="mt-2">Activités (LEDGER)</h4>
+        ${actsList}
+      </div>`;
+    } catch (e) {
+      console.error(e);
+      box.innerHTML = '<div class="note">Erreur (API_getJoueurDetailLoose).</div>';
+    }
+  }
+
+
+
+  /* === Sidebar: toggles avec délégation + persistance === */
+function initSidebarToggles() {
+  // Ne PAS poser le flag tout de suite — attendre que le nav existe
+  if (window.__SIDEBAR_BOUND__) return;
+
+  const nav = document.querySelector('nav.sidebar, .sidebar');
+  if (!nav) {
+    // DOM pas prêt ? on réessaie au prochain tick (et on ne pose pas le flag)
+    setTimeout(initSidebarToggles, 0);
+    return;
+  }
+
+  window.__SIDEBAR_BOUND__ = true; // ✅ maintenant seulement
+
+  const KEY = 'phoenix_nav_open';
+  const state = JSON.parse(localStorage.getItem(KEY) || '{}');
+
+  // Applique l’état initial (ouvre ce qui était ouvert)
+  Object.entries(state).forEach(([groupKey, val]) => {
+    if (!val) return;
+    const btn = nav.querySelector(`[data-target="${groupKey}"], .sidebar-group[data-group="${groupKey}"] .sidebar-group__toggle`);
+    const sub = document.getElementById(groupKey)
+      || nav.querySelector(`.sidebar-group[data-group="${groupKey}"] .sidebar-group__submenu, .sidebar-group[data-group="${groupKey}"] .sidebar-group__content, .sidebar-group[data-group="${groupKey}"] .submenu`);
+    if (sub) sub.classList.add('open');
+    if (btn) btn.classList.add('open');
+  });
+
+  // Délégation — un seul listener pour tous les toggles
+  nav.addEventListener('click', (e) => {
+    const btn = e.target.closest('.sidebar-group__toggle,[data-target]');
+    if (!btn || !nav.contains(btn)) return;
+
+    const targetId = btn.dataset.target;
+    const group = btn.closest('.sidebar-group');
+    const groupKey = group?.dataset.group || targetId;
+    if (!groupKey) return;
+
+    const sub = (targetId ? document.getElementById(targetId) : null)
+      || group?.querySelector('.sidebar-group__submenu, .sidebar-group__content, .submenu');
+    if (!sub) return;
+
+    const isOpen = sub.classList.toggle('open');
+    btn.classList.toggle('open', isOpen);
+
+    const st = JSON.parse(localStorage.getItem(KEY) || '{}');
+    st[groupKey] = isOpen ? 1 : 0;
+    localStorage.setItem(KEY, JSON.stringify(st));
+
+    // Évite une navigation “#” accidentelle si jamais le toggle est un <a>
+    if (btn.tagName === 'A' && (!btn.getAttribute('href') || btn.getAttribute('href') === '#')) {
+      e.preventDefault();
+    }
+  });
+
+  // Accessibilité clavier
+  nav.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const btn = e.target.closest('.sidebar-group__toggle,[data-target]');
+    if (!btn || !nav.contains(btn)) return;
+    e.preventDefault();
+    btn.click();
+  });
+}
+
+
+  /* ====================== AJOUT : Logique UI “Erreurs” (harmonisée) ====================== */
+  // --- Helpers de validation + échappement
+  function ER_escapeHtml(s) { return String(s || '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
+  function ER_isValidPayload(p) { return !!(p && Array.isArray(p.groups)); }
+
+// Resolver robuste: NE PAS appeler getSeasonId_ d’emblée
+function ER_resolveSeasonId_(overrideId) {
+  var sid = String(overrideId || '').trim();
+  if (sid) { try { setSeasonId_(sid); } catch(_) {} return sid; }
+
+  var props = PropertiesService.getScriptProperties();
+  sid = String(
+    props.getProperty('ACTIVE_SEASON_ID') ||
+    props.getProperty('SEASON_SHEET_ID') || ''
+  ).trim();
+
+  if (sid) { try { setSeasonId_(sid); } catch(_) {} return sid; }
+
+  // Dernier essai: si getSeasonId_ existe ET qu’il est primé, on l’utilise.
+  if (typeof getSeasonId_ === 'function') {
+    try { sid = String(getSeasonId_() || '').trim(); } catch(_) {}
+    if (sid) return sid;
+  }
+  throw new Error('ER_resolveSeasonId_: aucune saison active (ACTIVE_SEASON_ID manquant).');
+}
+
+
+  // Petits helpers UI
+  function ER_pill(txt) { return `<span class="chip">${ER_escapeHtml(String(txt || ''))}</span>`; }
+  function ER_csvCell(v) {
+    const s = String(v == null ? '' : v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+  function ER_downloadText(filename, text) {
+    const a = document.createElement('a');
+    a.href = 'data:text/plain;charset=utf-8,' + encodeURIComponent(text);
+    a.download = filename; a.click();
+  }
+  function ER_copy(text) {
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text);
+    else {
+      const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+    }
+  }
+  // Attend que le pont google.script.run (call_) soit prêt.
+  // Retourne true si prêt, false sinon (après retries).
+  async function ER_ensureBridgeReady_(retries = 10) {
+    // backoff doux: 40ms, 80ms, 120ms, ...
+    for (let i = 0; i < retries; i++) {
+      if (typeof call_ === 'function') return true;
+      await new Promise(r => setTimeout(r, 40 * (i + 1)));
+    }
+    return false;
+  }
+
+
+
+  // Badges de synthèse (haut de page)
+  function ER_renderBadges(counts) {
+    $('#er-badge-err').textContent = `${counts?.err || 0} err`;
+    $('#er-badge-warn').textContent = `${counts?.warn || 0} warn`;
+    $('#er-badge-info').textContent = `${counts?.info || 0} info`;
+  }
+
+  // Cartes par groupe d’erreurs
+  function ER_renderCards(payload) {
+    const wrap = $('#er-cards'); if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!payload || !Array.isArray(payload.groups)) return;
+
+    const needle = (window.__ER_filter || '').toLowerCase();
+    const byCode = (payload.mailOutbox && payload.mailOutbox.byCode) || {};
+
+    payload.groups.forEach(g => {
+      // Titre lisible
+      const firstMsg = (g.items && g.items[0]?.message) || '';
+      const title = g.element || firstMsg || g.titre || g.code || 'Groupe';
+      const code = g.code || '';
+      const active = (g.items || []).length;
+      const detected = byCode[code] || 0;
+      const resolved = Math.max(0, detected - active);
+
+      const rowsHtml = (g.items || [])
+        .filter(it => {
+          if (!needle) return true;
+          const hay = [it.passeport, it.nom, it.prenom, it.message].join(' ').toLowerCase();
+          return hay.includes(needle);
+        })
+        .map(it => `
+        <tr>
+          <td><a href="#" data-p="${ER_escapeHtml(it.passeport)}">${ER_escapeHtml(it.passeport)}</a></td>
+          <td>${ER_escapeHtml(it.nom || '')}</td>
+          <td>${ER_escapeHtml(it.prenom || '')}</td>
+        </tr>
+      `).join('');
+
+      if (!rowsHtml && needle) return; // masque la carte si filtrée à vide
+
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+      <div class="card__header">
+        <h3 class="card__title">${ER_escapeHtml(title)}</h3>
+        <div class="toolbar">
+          <span class="chip" title="Nombre total détecté via MAIL_OUTBOX pour ${ER_escapeHtml(code)}">Détectés: ${detected}</span>
+          <span class="chip">Réglés: ${resolved}</span>
+          <span class="chip chip--accent">Actifs: ${active}</span>
+        </div>
+      </div>
+      <div class="card__body">
+        <div class="table-wrap">
+          <table class="data-table data-table--compact">
+            <thead>
+              <tr><th>Passeport</th><th>Nom</th><th>Prénom</th></tr>
+            </thead>
+            <tbody>
+              ${rowsHtml || `<tr><td colspan="3" class="text-center"><span class="sub">Aucun cas actif.</span></td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+      // Délégation clic passeport → modal joueur
+      card.addEventListener('click', (e) => {
+        const a = e.target.closest('a[data-p]'); if (!a) return;
+        e.preventDefault();
+        if (typeof openPersonModal === 'function') openPersonModal(a.dataset.p);
+      });
+
+      wrap.appendChild(card);
+    });
+
+    if (!wrap.children.length) {
+      wrap.innerHTML = '<div class="note">Aucun résultat pour ce filtre.</div>';
+    }
+  }
+
+  // --- Fetch robuste: 1) API_listErreurs  2) invalidate cache  3) retry  4) diag
+  // --- Fetch robuste: vérifie le pont, ping, puis charge; sinon renvoie un debug utile
+  async function ER_fetchUiPayload() {
+    // 0) S’assurer que le pont est prêt
+    const ready = await ER_ensureBridgeReady_(12);
+    if (!ready) {
+      return {
+        _invalid: true,
+        _debug: { error: 'bridge_missing', detail: 'call_ indisponible sur cette vue (google.script.run non initialisé).' }
+      };
+    }
+
+    // 1) Ping serveur (détecte déploiement ou autorisations pétées)
+    try {
+      await callDedup('API_ping');
+    } catch (e) {
+      return {
+        _invalid: true,
+        _debug: { error: 'ping_failed', detail: String(e && e.message || e) }
+      };
+    }
+
+    // 2) Premier essai
+    try {
+      const p1 = await callDedup('API_listErreurs');
+      if (ER_isValidPayload(p1)) return p1;
+    } catch (_) { }
+
+    // 3) Invalidation cache côté serveur (2 signatures possibles)
+    try { await call_('API_ER_invalidateCache'); } catch (_) {
+      try { await call_('ER_invalidateCache_'); } catch (__) { }
+    }
+
+    // 4) Deuxième essai
+    try {
+      const p2 = await callDedup('API_listErreurs');
+      if (ER_isValidPayload(p2)) return p2;
+    } catch (_) { }
+
+    // 5) Debug serveur (ne doit pas throw; si ça throw, on capture)
+    let dbg = null;
+    try { dbg = await call_('API_listErreurs_debug'); } catch (e) {
+      dbg = { error: 'debug_call_failed', detail: String(e && e.message || e) };
+    }
+
+    return { _invalid: true, _debug: dbg || { note: 'no_debug_payload' } };
+  }
+
+  // --- BOOT (idempotent, sans throw; 1 retry doux intégré)
+  async function ER_boot() {
+    if (window.__IMPORT_LOCK__) {
+  // évite d’empiler des accès Spreadsheet pendant un FULL/Global
+  const box = document.getElementById('er-box');
+  if (box) box.innerHTML = '<div class="note">Import en cours… réessaie après.</div>';
+  return false;
+}
+
+
+    const box = document.getElementById('er-box');
+    if (box) {
+      box.innerHTML = '<div class="section-busy"><div class="spinner"></div><span>Chargement…</span></div>';
+    }
+
+    // Attendre le warm si nécessaire (et le dédupliquer)
+    if (!window.__ER_warm_done__) {
+      try { await callDedup('API_ER_warm'); window.__ER_warm_done__ = true; } catch (e) { }
+    }
+
+
+    // Ensuite seulement, lire les erreurs
+    const payload = await ER_fetchUiPayload();
+
+    if (!ER_isValidPayload(payload)) {
+      if (box) {
+        box.innerHTML = '<div class="note">Impossible de charger les erreurs. Nouvelle tentative…</div>';
+      }
+      // retry doux unique
+      if (!window.__ER_retry__) {
+        window.__ER_retry__ = true;
+        try { await call_('API_ER_invalidateCache'); } catch (_) { }
+        const p2 = await call_('API_listErreurs').catch(() => null);
+        window.__ER_retry__ = false;
+
+        if (ER_isValidPayload(p2)) {
+          window.__ER_payload = p2;
+          const upd = document.getElementById('er-last-updated');
+          if (upd) upd.textContent = p2.updatedAt || '';
+          if (typeof ER_renderBadges === 'function') ER_renderBadges(p2.counts || {});
+          {
+            const cumulEl = document.getElementById('er-badge-cumul');
+            if (cumulEl) cumulEl.textContent = `${p2.historicErrorTotal || 0} cumul`;
+          }
+          if (typeof ER_renderCards === 'function') ER_renderCards(p2);
+          if (box) box.innerHTML = '';
+          return true;
+        }
+      }
+
+      // affichage diag si dispo
+      const infoObj = (payload && payload._debug) || { note: 'no_debug' };
+      const info = ER_escapeHtml(JSON.stringify(infoObj, null, 2));
+      if (box) {
+        box.innerHTML = `
+        <div class="note">Impossible de charger les erreurs.</div>
+        <pre>${info}</pre>
+      `;
+      }
+      return false; // surtout ne pas throw
+    }
+
+    // === succès ===
+    window.__ER_payload = payload;
+    {
+      const upd = document.getElementById('er-last-updated');
+      if (upd) upd.textContent = payload.updatedAt || '';
+    }
+    if (typeof ER_renderBadges === 'function') ER_renderBadges(payload.counts || {});
+    {
+      const cumulEl = document.getElementById('er-badge-cumul');
+      if (cumulEl) cumulEl.textContent = `${payload.historicErrorTotal || 0} cumul`;
+    }
+    if (typeof ER_renderCards === 'function') ER_renderCards(payload);
+
+
+    if (box) box.innerHTML = '';
+    return true;
+  }
+
+  // --- Recharger manuellement
+  async function ER_reload() {
+    try { await call_('API_JO_invalidateCache'); } catch (_) { }
+    try { await call_('API_ER_invalidateCache'); } catch (_) { try { await call_('ER_invalidateCache_'); } catch (__) { } }
+    window.__ER_boot_promise__ = null;
+    window.__ER_booted__ = false;
+    await ER_boot();
+  }
+
+
+
+  /* ==================== FIN panneau Erreurs ==================== */
+
+
+  /* ===== Inscriptions — Vue d’ensemble (OV) ===== */
+
+  async function OV_boot() {
+    try {
+      const payload = await call_('API_OV_getSummary', []);
+      OV_render(payload);
+    } catch (e) {
+      const grid = $('#ov-grid'); if (grid) grid.innerHTML = `<div class="note">Erreur: ${String(e && e.message || e)}</div>`;
+    }
+  }
+
+  function OV_render(payload) {
+    if (!payload || !payload.ok) return;
+    $('#ov-last').textContent = payload.updatedAt || '—';
+    $('#ov-grand').textContent = (payload.grandTotals?.total || 0);
+    $('#ov-m').textContent = 'M:' + (payload.grandTotals?.M || 0);
+    $('#ov-f').textContent = 'F:' + (payload.grandTotals?.F || 0);
+
+    const grid = $('#ov-grid'); if (!grid) return;
+    grid.innerHTML = '';
+
+    (payload.sectors || []).forEach(sec => {
+      const t = sec?.data?.totals || { M: 0, F: 0, total: 0 };
+      const fees = sec?.data?.fees || {};
+      const rows = Object.keys(fees).sort().map(lbl => {
+        const r = fees[lbl] || { M: 0, F: 0, total: 0 };
+        return `<tr>
+        <td>${escapeHtml(lbl)}</td>
+        <td class="num">${r.M}</td>
+        <td class="num">${r.F}</td>
+        <td class="num"><b>${r.total}</b></td>
+      </tr>`;
+      }).join('') || `<tr><td colspan="4">—</td></tr>`;
+
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+      <div class="card__header">
+        <h3 class="card__title">${sec.id} <span class="chip">${t.total}</span></h3>
+      </div>
+      <div class="card__body">
+        <div class="table-wrap table-wrap--max">
+          <table class="data-table">
+            <thead>
+              <tr><th>Type de frais (Inscription)</th><th>M</th><th>F</th><th>Total</th></tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+      grid.appendChild(card);
+    });
+  }
+
+  // petit utilitaire si non défini ailleurs
+  function escapeHtml(s) {
+    return String(s || '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+
+  /* ====================== UI — Suivi Annulations ====================== */
+
+  function AN__ts(d) {
+    const s = String((d || '')).trim();
+    // on accepte yyyy-mm-dd ou Date; sinon 0
+    if (!s) return 0;
+    const t = Date.parse(s);
+    return isNaN(t) ? 0 : t;
+  }
+
+  function AN_escapeHtml(s) { return String(s || '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
+  function AN_csvCell(v) { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }
+
+  async function AN_fetch() {
+    try {
+      const p1 = await call_('API_listAnnulations');
+      return p1;
+    } catch (e) {
+      try { await call_('API_AN_invalidateCache'); } catch (_) { }
+      return await call_('API_listAnnulations');
+    }
+  }
+
+  async function AN_boot() {
+    const box = document.getElementById('an-box');
+    if (box) box.innerHTML = '<div class="section-busy"><div class="spinner"></div><span>Compilation…</span></div>';
+    try {
+      const payload = await AN_fetch();
+      window.__AN_payload = payload || { rows: [] };
+      AN_render(window.__AN_payload);
+      if (box) box.innerHTML = '';
+    } catch (e) {
+      if (box) box.innerHTML = `<div class="note">Impossible de charger les annulations: ${AN_escapeHtml(e.message || e)}</div>`;
+    }
+  }
+
+  async function AN_reload() {
+    try { await call_('API_AN_invalidateCache'); } catch (_) { }
+    return AN_boot();
+  }
+
+  function AN_render(payload) {
+    payload = payload || { rows: [] };
+    const rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
+
+    const upd = document.getElementById('an-last');
+    if (upd) upd.textContent = 'MAJ: ' + (payload.updatedAt || '—');
+
+    const needle = (document.getElementById('an-search')?.value || '').toLowerCase().trim();
+    const filt = needle
+      ? rows.filter(r => {
+        const H = [
+          r.passeport, r.nom, r.prenom,
+          r.cancelled?.type, r.cancelled?.label, r.cancelled?.date,
+          (r.active || []).map(a => a.type + ' ' + a.label).join(' ')
+        ].join(' ').toLowerCase();
+        return H.includes(needle);
+      })
+      : rows;
+
+    // Tri par défaut: date d’annulation décroissante
+    const filtSorted = (filt || []).slice().sort((a, b) => AN__ts(b?.cancelled?.date) - AN__ts(a?.cancelled?.date));
+    const todo = filtSorted.filter(r => !r.corrige);
+    const done = filtSorted.filter(r => r.corrige);
+
+    const bTodo = document.getElementById('an-badge-todo'); if (bTodo) bTodo.textContent = String(todo.length);
+    const bDone = document.getElementById('an-badge-done'); if (bDone) bDone.textContent = String(done.length);
+
+    function renderTable(tbodyId, items) {
+      const table = document.getElementById(tbodyId);
+      const tb = table?.querySelector('tbody') || document.querySelector('#' + tbodyId + ' tbody');
+      if (!tb) return;
+
+      tb.innerHTML = '';
+      if (!items.length) {
+        tb.innerHTML = '<tr><td colspan="6" class="text-center"><span class="sub">—</span></td></tr>';
+        return;
+      }
+
+      items.forEach(r => {
+        const tr = document.createElement('tr');
+
+        const act = (r.active || [])
+          .map(a => `${AN_escapeHtml(a.type)} — ${AN_escapeHtml(a.label)}`)
+          .join('<br>');
+
+        const el = `
+        <div><b>${AN_escapeHtml(r.cancelled?.label || '')}</b></div>
+        <div class="sub">${AN_escapeHtml(r.cancelled?.type || '')}</div>
+      `;
+        const dateCell = AN_escapeHtml(r.cancelled?.date || '');
+
+        tr.innerHTML = `
+        <td><a href="#" data-p="${AN_escapeHtml(r.passeport)}">${AN_escapeHtml(r.passeport)}</a></td>
+        <td>${AN_escapeHtml(r.nom || '')}, ${AN_escapeHtml(r.prenom || '')}</td>
+        <td>${el}</td>
+        <td>${dateCell || '<span class="sub">—</span>'}</td>
+        <td>${act || '<span class="sub">(aucun)</span>'}</td>
+        <td class="text-center">
+          <label class="checkbox-pill">
+            <input type="checkbox" class="an-toggle" data-key="${AN_escapeHtml(r.key)}" ${r.corrige ? 'checked' : ''}>
+            <span>${r.corrige ? 'Oui' : 'Non'}</span>
+          </label>
+        </td>
+      `;
+
+        // clic passeport → modal
+        tr.addEventListener('click', (e) => {
+          const a = e.target.closest('a[data-p]'); if (!a) return;
+          e.preventDefault();
+          if (typeof openPersonModal === 'function') openPersonModal(a.dataset.p);
+        });
+
+        // toggle corrigé
+        tr.addEventListener('change', async (e) => {
+          const cb = e.target.closest('input.an-toggle'); if (!cb) return;
+          const key = cb.dataset.key; const val = !!cb.checked;
+          try {
+            await call_('API_toggleAnnulationCorrige', [key, val]);
+            const all = window.__AN_payload?.rows || [];
+            const found = all.find(x => x.key === key);
+            if (found) found.corrige = val;
+            AN_render(window.__AN_payload);
+          } catch (err) {
+            EN_toast('Échec de mise à jour « Corrigé ».', false);
+            cb.checked = !val;
+          }
+        });
+
+        tb.appendChild(tr);
+      });
+    }
+
+    renderTable('an-tab-todo', todo);
+    renderTable('an-tab-done', done);
+  }
+
+
+  /* ===================== ENTENTES — UI LOGIC ===================== */
+  const EN = {
+    raw: [],
+    filtered: [],
+    sumOutstanding: 0
+  };
+
+  function en_fmt(n) {
+    try { return (n ?? 0).toLocaleString('fr-CA', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+    catch { return String(n ?? 0); }
+  }
+  function en_statusBadge(s) {
+    const k = (String(s || '').toLowerCase());
+    if (k.startsWith('pay')) return '<span class="en-status paye">Payé</span>';
+    if (k.startsWith('par')) return '<span class="en-status partiel">Partiel</span>';
+    if (k.includes('retard')) return '<span class="en-status retard">En retard</span>';
+    return '<span class="en-status ouvert">Ouvert</span>';
+  }
+
+  async function EN_load() {
+    const box = document.getElementById('en-box');
+    if (box) box.innerHTML = '<div class="section-busy"><div class="spinner"></div><span>Chargement…</span></div>';
+    try {
+      const res = await call_('API_ententes_list', [null]); // seasonId si tu veux le passer
+      const arr = (res && res.members) ? res.members : [];
+      EN.raw = Array.isArray(arr) ? arr : [];
+      EN_filterAndRender();
+    } catch (e) {
+      if (box) box.innerHTML = `<div class="note">Erreur de chargement: ${ER_escapeHtml(e.message || e)}</div>`;
+    }
+  }
+
+  function EN_filterAndRender() {
+    const q = (document.getElementById('en-search')?.value || '').toLowerCase().trim();
+    const mode = document.getElementById('en-sort')?.value || 'soldeDesc';
+    const onlyNoPlan = !!document.getElementById('en-only-no-plan')?.checked;
+    const onlyLate = !!document.getElementById('en-only-late')?.checked;
+
+    EN.filtered = EN.raw.filter(m => {
+      const H = [m.firstName, m.lastName, m.passport].join(' ').toLowerCase();
+      if (!H.includes(q)) return false;
+      if (onlyNoPlan && m.ent && m.ent.length) return false;
+      if (onlyLate && !EN_isLate(m)) return false;
+      return true;
+    });
+
+    if (mode === 'soldeDesc') EN.filtered.sort((a, b) => b.outstanding - a.outstanding);
+    else if (mode === 'soldeAsc') EN.filtered.sort((a, b) => a.outstanding - b.outstanding);
+    else EN.filtered.sort((a, b) => (a.lastName + a.firstName).localeCompare(b.lastName + b.firstName));
+
+    EN.sumOutstanding = EN.filtered.reduce((s, m) => s + (m.outstanding || 0), 0);
+    document.getElementById('en-count').textContent = EN.filtered.length;
+    document.getElementById('en-sum').textContent = en_fmt(EN.sumOutstanding) + ' $';
+    EN_renderCards();
+  }
+
+
+  function EN_isLate(m) {
+    // 1) S’il existe déjà au moins une ligne “En retard”, on considère le membre en retard
+    const hasLineLate = (m.ent || []).some(e => String(e.status || '').toLowerCase().includes('retard'));
+    if (hasLineLate) return true;
+
+    // 2) Sans entente → pas de plan à respecter → pas "en retard"
+    if (!m.ent || !m.ent.length) return false;
+
+    // 3) Règle membre: paidNow < baselineMin + somme(prévus dont date ≤ aujourd’hui)
+    const todayYmd = new Date().toISOString().slice(0, 10);
+    let baselineMin = null, planADate = 0;
+    for (const e of m.ent) {
+      const bl = +(e.baseline || 0);
+      if (baselineMin === null || bl < baselineMin) baselineMin = bl;
+      const iso = EN_toIso(e.dateStr);
+      if (iso && iso <= todayYmd) planADate += +(e.amount || 0);
+    }
+    const paidNow = +(m.totalPaid || 0);
+    const required = +((baselineMin || 0) + planADate).toFixed(2);
+    return paidNow + 1e-9 < required;
+  }
+
+
+  function EN_renderCards() {
+    const box = document.getElementById('en-box');
+    if (!box) return;
+
+    // Ne pas toucher aux classes ici (le toggle s’en charge)
+    box.innerHTML = '';
+    if (!EN.filtered.length) {
+      box.innerHTML = '<div class="note">Aucun membre.</div>';
+      return;
+    }
+    const todayYmd = (new Date()).toISOString().slice(0, 10);
+
+    EN.filtered.forEach(m => {
+      // 🔧 Normalisation des échéances (supporte m.ent | m.schedule | m.plan)
+      const lines = Array.isArray(m.ent) ? m.ent
+        : Array.isArray(m.schedule) ? m.schedule
+          : Array.isArray(m.plan) ? m.plan
+            : [];
+
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const fullName = `${m.lastName || ''}, ${m.firstName || ''}`.replace(/^,\s*/, '').trim();
+      const scheduled = +(m.scheduled || 0);
+      const gap = +(((m.outstanding || 0) - scheduled).toFixed(2));
+      const gapClass = gap > 0.005 ? 'bad' : (gap < -0.005 ? 'good' : '');
+
+      // ---- retard "membre" (baseline min + échéances <= aujourd'hui) ----
+      let baselineMin = null, planADate = 0;
+      lines.forEach(e => {
+        if (baselineMin === null || (e.baseline ?? Infinity) < baselineMin) baselineMin = +(+e.baseline || 0);
+        const iso = EN_toIso(e.dateStr);
+        if (iso && iso <= todayYmd) planADate += +(+e.amount || 0);
+      });
+      const paidNow = +(+m.totalPaid || 0);
+      const isLateMember = EN_isLate(m);
+
+      card.innerHTML = `
+      <div class="card__header">
+        <div class="card__title">
+          <a class="en-pass" href="#" data-p="${ER_escapeHtml(m.passport)}">${ER_escapeHtml(m.passport)}</a>
+          &nbsp;|&nbsp; ${ER_escapeHtml(fullName || '(Nom manquant)')}
+          ${isLateMember ? ' ' + en_statusBadge('En retard') : ''}
+        </div>
+        <div class="toolbar">
+          <button class="btn btn--secondary" data-act="add" data-p="${ER_escapeHtml(m.passport)}">+ Paiements</button>
+        </div>
+      </div>
+
+      <div class="card__body">
+        <div class="grid grid--responsive mb-2">
+          <div>
+            <div class="mini">Achats actifs</div>
+            <ul>
+              ${(m.activeFees && m.activeFees.length)
+          ? m.activeFees.map(l => `<li>${ER_escapeHtml(l)}</li>`).join('')
+          : '<li><span class="sub">—</span></li>'}
+            </ul>
+          </div>
+          <div>
+            <div class="mini">Détails des frais dûs</div>
+            <div class="d-flex justify-content-between"><div class="mini">Total dû</div><div class="font-semibold">${en_fmt(m.totalDue)} $</div></div>
+            <div class="d-flex justify-content-between"><div class="mini">Reçu</div><div>${en_fmt(m.totalPaid)} $</div></div>
+            <div class="d-flex justify-content-between"><div class="mini">Solde</div><div class="font-semibold">${en_fmt(m.outstanding)} $</div></div>
+            <div class="d-flex justify-content-between"><div class="mini">Planifié</div><div>${en_fmt(scheduled)} $</div></div>
+            <div class="d-flex justify-content-between"><div class="mini">Écart</div><div class="en-gap ${gapClass}">${gap > 0 ? '+' : ''}${en_fmt(gap)} $</div></div>
+          </div>
+        </div>
+
+        <div class="mb-2">
+          ${lines.length ? '' : '<span class="chip pending">Aucune échéance</span>'}
+        </div>
+
+        <div class="table-wrap table-wrap--max">
+          <table class="data-table data-table--compact">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Prévu</th>
+                <th>Reçu</th>
+                <th>Statut</th>
+                <th class="cell--actions"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${lines.map(e => `
+                  <tr data-row="${e.rowNum}">
+                    <td><input class="form-control" type="date" value="${EN_toIso(e.dateStr)}" data-f="date" /></td>
+                    <td><input class="form-control" type="number" step="0.01" value="${+(e.amount || 0)}" data-f="amount" /></td>
+                    <td class="en-nums">${en_fmt(e.received)} $</td>
+                    <td>${en_statusBadge(e.status)}</td>
+                    <td class="cell--actions">
+                      <button class="btn btn--secondary" data-act="save-item" data-row="${e.rowNum}" title="Sauvegarder">💾</button>
+                      <button class="btn btn--danger" data-act="del-item" data-row="${e.rowNum}" title="Supprimer">✖</button>
+                    </td>
+                  </tr>
+                `).join('')
+        || `<tr><td colspan="5" class="text-center"><span class="sub">—</span></td></tr>`
+        }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+      // Délégations (inchangées)
+      card.addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const act = btn.dataset.act;
+
+        if (act === 'add') {
+          EN_openAddModal(m);
+        } else if (act === 'save-item') {
+          const row = btn.dataset.row;
+          const tr = card.querySelector(`tr[data-row="${row}"]`);
+          if (!tr) return;
+          const dIso = tr.querySelector('input[data-f="date"]')?.value;
+          const amt = parseFloat(tr.querySelector('input[data-f="amount"]')?.value) || 0;
+          const jj = EN_fromIso(dIso);
+          await call_('API_ententes_updateItem', [null, +row, { date: jj, amount: amt }]);
+          await EN_syncThenReload();
+        } else if (act === 'del-item') {
+          const row = +btn.dataset.row;
+          if (!confirm('Supprimer cette échéance ?')) return;
+          await call_('API_ententes_deleteItem', [null, row]);
+          await EN_syncThenReload();
+        }
+      });
+
+      card.addEventListener('click', (e) => {
+        const a = e.target.closest('a[data-p]'); if (!a) return;
+        e.preventDefault();
+        if (typeof openPersonModal === 'function') openPersonModal(a.dataset.p);
+      });
+
+      box.appendChild(card);
+    });
+  }
+
+  function EN_toIso(jjmmAAAA) {
+    if (!jjmmAAAA || String(jjmmAAAA).indexOf('/') < 0) return '';
+    const [jj, mm, aa] = String(jjmmAAAA).split('/');
+    return `${aa}-${String(mm).padStart(2, '0')}-${String(jj).padStart(2, '0')}`;
+  }
+  function EN_fromIso(iso) {
+    if (!iso || String(iso).indexOf('-') < 0) return '';
+    const [aa, mm, jj] = String(iso).split('-');
+    return `${jj}/${mm}/${aa}`;
+  }
+
+  /* ---- Modal d’ajout d’échéances multiples ---- */
+  function EN_openAddModal(m) {
+    const id = `en-add-${m.passport}`;
+    let rowsHtml = EN_buildPayRow(id, 0);
+
+    Modal.open({
+      title: `Planifier des paiements — ${ER_escapeHtml(m.firstName)} ${ER_escapeHtml(m.lastName)} (${ER_escapeHtml(m.passport)})`,
+      html: `
+  <div class="en-form">
+    <div class="note" style="margin-bottom:8px;">Solde réel: <b>${en_fmt(m.outstanding)} $</b> — Planifié actuel: ${en_fmt(m.scheduled)} $ — Écart: ${en_fmt((m.outstanding || 0) - (m.scheduled || 0))} $</div>
+    <div id="${id}-rows">${rowsHtml}</div>
+    <button class="btn secondary" id="${id}-add">+ Paiement</button>
+    <div style="margin-top:8px;">
+      <label>Commentaire</label>
+      <textarea id="${id}-comment" placeholder="Notes internes…"></textarea>
+    </div>
+    <div id="${id}-status" class="mini" style="margin-top:6px;height:18px;"></div>
+  </div>
+`,
+
+      actions: [
+        { label: 'Annuler', onClick: Modal.close, variant: 'secondary' },
+        {
+          label: 'Sauvegarder', onClick: () => {
+            const payload = EN_collectModalRows(id);
+            if (!payload.payments.length) { EN_toast('Ajoute au moins un paiement.', false); return; }
+
+            // 1) fermeture immédiate + update optimiste
+            Modal.close();
+            EN_optimisticAdd(m.passport, payload.payments);
+            EN_toast('Entente enregistrée');
+
+            // 2) écriture serveur en arrière-plan, puis 1 seul refresh après réconciliation
+            call_('API_ententes_savePlan', [null, { passport: m.passport, payments: payload.payments, comment: payload.comment }])
+              .then(() => call_('API_ententes_detectAndSync', [null]))
+              .then(() => EN_load()) // un seul reload
+              .catch(() => EN_toast('Erreur de sauvegarde', false));
+          }
+        }
+
+      ]
+    });
+
+    // Hook +Paiement
+    document.getElementById(`${id}-add`)?.addEventListener('click', () => {
+      const wrap = document.getElementById(`${id}-rows`);
+      const idx = wrap.querySelectorAll('.en-form-row').length;
+      wrap.insertAdjacentHTML('beforeend', EN_buildPayRow(id, idx));
+    });
+  }
+  function EN_buildPayRow(id, i) {
+    return `
+    <div class="en-form-row">
+      <input type="date" id="${id}-d-${i}">
+      <input type="number" step="0.01" id="${id}-a-${i}" placeholder="Montant">
+      <button class="btn danger" onclick="this.parentNode.remove()">✖</button>
+    </div>
+  `;
+  }
+  function EN_collectModalRows(id) {
+    const wrap = document.getElementById(`${id}-rows`);
+    const payments = [];
+    wrap.querySelectorAll('.en-form-row').forEach((row, idx) => {
+      const d = row.querySelector(`#${id}-d-${idx}`)?.value;
+      const a = parseFloat(row.querySelector(`#${id}-a-${idx}`)?.value || '0');
+      if (d && a > 0) payments.push({ date: EN_fromIso(d), amount: +a.toFixed(2) });
+    });
+    const comment = document.getElementById(`${id}-comment`)?.value || '';
+    return { payments, comment };
+  }
+
+  /* ===== Toggle vue liste/grille (réutilisable) ===== */
+  (function EN_viewToggleSetup() {
+    const KEY = 'phoenix_en_view'; // 'list' | 'grid'
+    const btn = document.getElementById('en-toggle-view'); // ← ajoute un <button id="en-toggle-view"> dans ta toolbar Ententes
+    const box = document.getElementById('en-box');
+    if (!box) return;
+
+    function apply(mode) {
+      box.classList.remove('en-list', 'en-grid');
+      box.classList.add(mode === 'grid' ? 'en-grid' : 'en-list');
+      localStorage.setItem(KEY, mode);
+      if (btn) btn.textContent = (mode === 'grid') ? 'Vue: Grille' : 'Vue: Liste';
+    }
+
+    // état initial
+    const initMode = localStorage.getItem(KEY) || 'list';
+    apply(initMode);
+
+    // handler bouton (si présent)
+    btn?.addEventListener('click', () => {
+      const next = (localStorage.getItem(KEY) === 'grid') ? 'list' : 'grid';
+      apply(next);
+    });
+
+    // expose pour réutiliser ailleurs si tu veux
+    window.__applyListGrid = apply;
+  })();
+
+
+
+  /* ---- Réconciliation globale & reload ---- */
+  async function EN_syncThenReload() {
+    try { await call_('API_ententes_detectAndSync', [null]); } catch (_) { }
+    await EN_load();
+  }
+
+  /* =================== FIN ENTENTES — UI LOGIC =================== */
+
+
+  // ===================== BOOT UNIQUE =====================
+  (function bootOnce() {
+    // petit utilitaire pour lier sans double-bind
+    function safeOn(el, evt, fn) {
+      if (!el) return;
+      const key = `__bound_${evt}__`;
+      if (el[key]) return;
+      el.addEventListener(evt, fn);
+      el[key] = true;
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+    
+      // 0) Hooks UI génériques
+      try { initSidebarToggles?.(); } catch (_) { }
+      try { markExternalLinks?.(); } catch (_) { }
+
+      
+      // 1) Pont prêt
+      try { await waitServerReady(); } catch (_) { }
+
+    
+
+      // 2) Branchement des listeners (toutes vues)
+
+      // ---- ANNULATIONS
+      safeOn(document.getElementById('an-reload'), 'click', () => AN_reload());
+      safeOn(document.getElementById('an-search'), 'input', () => AN_render(window.__AN_payload || { rows: [] }));
+
+
+
+      
+      // ---- JOUEURS
+      safeOn(document.getElementById('jReload'), 'click', () => joueursLoadPage(0));
+      safeOn(document.getElementById('jPrev'), 'click', () => joueursLoadPage(Math.max(0, J_state.offset - J_state.limit)));
+      safeOn(document.getElementById('jNext'), 'click', () => {
+        if (J_state.offset + J_state.limit < J_state.total) joueursLoadPage(J_state.offset + J_state.limit);
+      });
+      ['jSearch', 'jBand', 'jAdapte', 'jPhoto'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        safeOn(el, 'change', () => joueursLoadPage(0));
+        safeOn(el, 'keyup', (e) => { if (e.key === 'Enter') joueursLoadPage(0); });
+      });
+      // clic table joueurs → détail
+      const tabJ = document.getElementById('tabJoueurs');
+      if (tabJ) {
+        safeOn(tabJ, 'click', (e) => {
+          const a = e.target.closest('a[data-p]'); if (!a) return;
+          e.preventDefault(); joueursShowDetail(a.dataset.p);
+        });
+      }
+
+      // ---- ERREURS
+      safeOn(document.getElementById('er-reload'), 'click', async () => {
+        try { await call_('API_JO_invalidateCache'); } catch (_) { }
+        try { await call_('API_ER_invalidateCache'); } catch (_) {
+          try { await call_('ER_invalidateCache_'); } catch (__) { }
+        }
+        window.__ER_boot_promise__ = null;
+        window.__ER_booted__ = false;
+        try { await ER_boot(); } catch (_) { }
+      });
+
+      // ---- ENTENTES
+      safeOn(document.getElementById('en-refresh'), 'click', EN_load);
+      safeOn(document.getElementById('en-sync'), 'click', EN_syncThenReload);
+      safeOn(document.getElementById('en-search'), 'input', EN_filterAndRender);
+      safeOn(document.getElementById('en-sort'), 'change', EN_filterAndRender);
+      safeOn(document.getElementById('en-only-no-plan'), 'change', EN_filterAndRender);
+      safeOn(document.getElementById('en-only-late'), 'change', EN_filterAndRender);
+
+      // ---- INSCRIPTIONS — VUE D’ENSEMBLE (OV)
+      safeOn(document.getElementById('ov-reload'), 'click', async () => {
+        try { await call_('API_OV_invalidateCache', []); } catch (_) { }
+        // relance douce, en respectant la promesse pour éviter les doubles runs
+        window.__OV_boot_promise__ = null;
+        try { await OV_boot(); } catch (e) { console.error('OV_reload failed:', e); }
+      });
+
+      // 3) WARM — une seule fois avant de router (évite les pages vides)
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+const list = await call_('getSeasonList'); // doit retourner seasons[] avec isActive
+const seasons = list?.data || list?.seasons || [];
+const active = seasons.find(s => s.isActive) || seasons[0];
+
+if (active?.id) {
+  await call_('API_setActiveSeason', [active.id]);
+} else {
+  console.warn('Aucune saison disponible pour setActive.');
+}
+
+// Maintenant seulement on lance les warmers, en séquence
+try {
+  await call_('API_JO_warm'); await sleep(180);
+  await call_('API_ER_warm'); await sleep(180);
+  await call_('API_AN_warm');
+} catch (e) {
+  console.warn('Warm sequence issue:', e);
+}
+
+// Forcer la nav hash-only pour tous les liens de menu
+document.querySelectorAll('a.sidebar-nav__item, a.sidebar-sub__item, nav a').forEach(a => {
+  const href = a.getAttribute('href') || '';
+  if (!href || href.startsWith('#/')) {
+    // hash → OK (laisse faire)
+    return;
+  }
+  // Intercepte tout lien "plein" et reroute vers son équivalent hash si possible
+  a.addEventListener('click', (e) => {
+    const dataRoute = a.dataset.route || ''; // si tu as un data-route, sinon laisse
+    if (dataRoute) {
+      e.preventDefault();
+      if (location.hash !== dataRoute) location.hash = dataRoute;
+    }
+  });
+});
+
+      // 4) Routing initial + écoute hash
+      try { routeTo(location.hash || '#/dashboard'); } catch (_) { }
+      window.addEventListener('hashchange', () => { try { routeTo(location.hash); } catch (_) { } });
+    });
+  })();
+  // =====================================================
+
+
+
+</script>

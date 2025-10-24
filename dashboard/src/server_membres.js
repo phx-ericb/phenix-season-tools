@@ -1,147 +1,422 @@
-/***** server_membres.js *****/
-// --- Shims utilitaires (si absents du projet courant)
+/***** server_membres.js *****
+ * Chaîne complète: GLOBAL → SAISON (subset) → JOUEURS (maj photo)
+ * - API_VM_importToGlobal(force)
+ * - API_VM_refreshSeasonSubset()
+ * - API_VM_fullRefresh(force)
+ *
+ * Hypothèses:
+ *  - Fonctions utilitaires potentiellement déjà présentes: readParam_, readParamValue,
+ *    getSeasonId_, _vm_findLatestActiveFile_, _vm_readFileAsSheetValues_,
+ *    _vm_indexCols_, _vm_toISODate_, _vm_to01_, _vm_hashRow_, _vm_groupRuns_,
+ *    _vm_nowISO_, _vm_rowValues_, log_, normalizePassportToText8_, getSheetOrCreate_.
+ *  - Ce fichier fournit des “shims” qui s’activent seulement si tes versions n’existent pas.
+ */
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Shims utilitaires (activés seulement si absents du projet courant)        */
+/* ────────────────────────────────────────────────────────────────────────── */
+
 if (typeof getSheetOrCreate_ !== 'function') {
   function getSheetOrCreate_(ss, name, headersOpt) {
-    var sh = ss.getSheetByName(name);
-    if (!sh) {
-      sh = ss.insertSheet(name);
-      if (headersOpt && headersOpt.length) {
-        sh.getRange(1, 1, 1, headersOpt.length).setValues([headersOpt]);
-      }
+    var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+    if (headersOpt && headersOpt.length && sh.getLastRow() === 0) {
+      sh.getRange(1, 1, 1, headersOpt.length).setValues([headersOpt]);
     }
     return sh;
   }
 }
-// --- Shims passeport (utilise tes fonctions si elles existent déjà)
+
+// --- Lecture générique d’un fichier (Sheet, CSV/TSV, XLSX) en 2D array [rows][cols]
+if (typeof _vm_readFileAsSheetValues_ !== 'function') {
+
+  function _vm_readFileAsSheetValues_(file, wantedHeadersOpt) {
+    // wantedHeadersOpt: tableau de libellés probables pour aider à choisir la bonne feuille (facultatif)
+    // Retour: Array<Array<any>> incluant l’en-tête en [0]
+    if (!file) throw new Error('_vm_readFileAsSheetValues_: file manquant');
+
+    var mime = (file.getMimeType && file.getMimeType()) || '';
+    var name = (file.getName && file.getName()) || '';
+    var blob = (file.getBlob && file.getBlob()) ? file.getBlob() : null;
+
+    // 1) Google Sheet natif
+    if (mime === 'application/vnd.google-apps.spreadsheet') {
+      var ss = SpreadsheetApp.openById(file.getId());
+      return _vm__readBestSheetValues_(ss, wantedHeadersOpt);
+    }
+
+    // 2) CSV / texte délimité
+    if (/^text\/|csv|tab-separated|tsv|plain|application\/vnd\.ms-excel$/.test(mime) || /\.(csv|tsv)$/i.test(name)) {
+      // lire comme texte puis parser
+      var text = blob ? blob.getDataAsString() : '';
+      if (!text) return [];
+      var delim = _vm__detectDelimiter_(text); // ; , \t
+      var rows = Utilities.parseCsv(text, delim);
+      return rows || [];
+    }
+
+// 3) Excel (xlsx/xls) → convertir vers Google Sheet puis lire
+if (
+  /\.xlsx$/i.test(name) || /\.xls$/i.test(name) ||
+  /application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet/.test(mime) ||
+  /application\/vnd\.ms-excel/.test(mime)
+) {
+  if (typeof Drive === 'undefined' || !Drive.Files) {
+    throw new Error("Lecture XLSX requiert le service avancé Drive activé + API Drive activée (v2 ou v3).");
+  }
+
+  // Ressource cible = Google Sheet
+  var resource = {
+    title: name.replace(/\.(xlsx|xls)$/i, '') + ' (temp import)',
+    mimeType: 'application/vnd.google-apps.spreadsheet'
+  };
+
+  // v3: create(...) ; v2: insert(...)
+  var useCreate = (typeof Drive.Files.create === 'function');
+  var useInsert = (typeof Drive.Files.insert === 'function');
+  if (!useCreate && !useInsert) {
+    throw new Error("Drive.Files.create/insert introuvable. Vérifie que Drive avancé (v3 ou v2) est bien ON.");
+  }
+
+  // upload + conversion
+  var tempFile = useCreate
+    ? Drive.Files.create(resource, blob)          // v3
+    : Drive.Files.insert(resource, blob);         // v2
+
+  try {
+    var ssConv = SpreadsheetApp.openById(tempFile.id);
+    var vals   = _vm__readBestSheetValues_(ssConv, wantedHeadersOpt);
+
+    // Nettoyage (v3: delete, v2: remove)
+    try {
+      if (typeof Drive.Files.delete === 'function') Drive.Files.delete(tempFile.id); // v3
+      else if (typeof Drive.Files.remove === 'function') Drive.Files.remove(tempFile.id); // v2
+    } catch (_) {}
+    return vals;
+  } catch (e) {
+    try {
+      if (typeof Drive.Files.delete === 'function') Drive.Files.delete(tempFile.id);
+      else if (typeof Drive.Files.remove === 'function') Drive.Files.remove(tempFile.id);
+    } catch (_) {}
+    throw e;
+  }
+}
+
+    // 4) Dernier recours: essayer CSV
+    if (blob) {
+      var txt = blob.getDataAsString();
+      if (txt) {
+        var d = _vm__detectDelimiter_(txt);
+        var r = Utilities.parseCsv(txt, d);
+        if (r && r.length) return r;
+      }
+    }
+
+    throw new Error("Type de fichier non supporté pour VM: " + name + " (" + mime + ")");
+  }
+
+  // --- Choisit la meilleure feuille d’un classeur puis renvoie toutes les valeurs
+  function _vm__readBestSheetValues_(ss, wantedHeadersOpt) {
+    var sheets = ss.getSheets();
+    if (!sheets || !sheets.length) return [];
+
+    // Heuristique: choisir la feuille qui a (1) des en-têtes “prometteurs” si dispos, sinon (2) le plus de cellules non vides
+    var best = null, bestScore = -1, bestVals = null;
+
+    for (var i = 0; i < sheets.length; i++) {
+      var sh = sheets[i];
+      var lr = sh.getLastRow(), lc = sh.getLastColumn();
+      if (lr < 1 || lc < 1) continue;
+
+      var vals = sh.getRange(1, 1, lr, lc).getValues();
+      if (!vals || !vals.length) continue;
+
+      var header = (vals[0] || []).map(function(h){ return String(h||'').trim().toLowerCase(); });
+
+      var score = 0;
+      if (wantedHeadersOpt && wantedHeadersOpt.length) {
+        // bonus par correspondance d'en-têtes exactes/partielles
+        for (var k=0;k<wantedHeadersOpt.length;k++) {
+          var needle = String(wantedHeadersOpt[k]).trim().toLowerCase();
+          if (header.indexOf(needle) !== -1) score += 5;
+          else {
+            // match partiel
+            for (var h=0;h<header.length;h++) {
+              if (header[h].indexOf(needle) !== -1) { score += 2; break; }
+            }
+          }
+        }
+      }
+      // densité: nb cellules non vides (cap à 1000 pour ne pas gonfler démesurément)
+      var nonEmpty = 0;
+      for (var r=0;r<Math.min(vals.length, 1000); r++) {
+        for (var c=0;c<Math.min(vals[r].length, 50); c++) {
+          if (vals[r][c] !== '' && vals[r][c] !== null) nonEmpty++;
+        }
+      }
+      score += Math.min(nonEmpty, 1000) / 50; // +20 max
+
+      if (score > bestScore) { bestScore = score; best = sh; bestVals = vals; }
+    }
+
+    return bestVals || [];
+  }
+
+  // --- Détecte ; , ou \t comme délimiteur probable
+  function _vm__detectDelimiter_(text) {
+    // échantillon de quelques lignes
+    var lines = text.split(/\r?\n/).slice(0, 5);
+    var counts = { ',':0, ';':0, '\t':0 };
+    lines.forEach(function(line){
+      counts[',']  += (line.match(/,/g)  || []).length;
+      counts[';']  += (line.match(/;/g)  || []).length;
+      counts['\t'] += (line.match(/\t/g) || []).length;
+    });
+    // priorité: la plus fréquente; tie-breaker: ; puis , puis \t (souvent VM FR = ;)
+    var best = ','; var max = counts[','];
+    if (counts[';'] > max) { best = ';'; max = counts[';']; }
+    if (counts['\t'] > max) { best = '\t'; max = counts['\t']; }
+    return best;
+  }
+}
+
+
+if (typeof getSheet_ !== 'function') {
+  function getSheet_(ss, name, createIfMissing) {
+    return createIfMissing ? getSheetOrCreate_(ss, name) : ss.getSheetByName(name);
+  }
+}
+
 if (typeof normalizePassportPlain8_ !== 'function') {
   function normalizePassportPlain8_(v) {
     if (typeof normalizePassportToText8_ === 'function') {
-      return normalizePassportToText8_(v); // ta version texte 8 chars si dispo
+      return normalizePassportToText8_(v);
     }
     var s = String(v || '').replace(/\D/g, '');
     return s ? s.padStart(8, '0') : '';
   }
 }
 
-if (typeof getSheet_ !== 'function') {
-  // Alias pratique (certains modules appellent getSheet_(..., true))
-  function getSheet_(ss, name, createIfMissing) {
-    return createIfMissing ? getSheetOrCreate_(ss, name) : ss.getSheetByName(name);
+// --- Fallback si la fonction n'est pas visible dans l'environnement actuel
+if (typeof _vm_findLatestActiveFile_ !== 'function') {
+  function _vm_findLatestActiveFile_(folderId) {
+    if (!folderId) return { file: null, source: 'fallback:no-folder' };
+    var folder = DriveApp.getFolderById(folderId);
+    var it = folder.getFiles();
+    var latest = null, latestTs = -1;
+
+    while (it.hasNext()) {
+      var f = it.next();
+      // on prend tout type de fichier; la lecture/parse sera gérée plus loin (_vm_readFileAsSheetValues_)
+      var ts = (f.getLastUpdated && +f.getLastUpdated()) || 0;
+      if (ts > latestTs) { latest = f; latestTs = ts; }
+    }
+    return { file: latest, source: 'fallback' };
   }
 }
 
-/**
- * Importe le dernier export Validation_Membres du dossier paramétré
- * et UPSERT dans le classeur CENTRAL (targetSpreadsheetId) la feuille MEMBRES_GLOBAL.
- *
- * - Lit les paramètres dans le classeur SAISON (getSeasonId_()):
- *   - DRIVE_FOLDER_VALIDATION_MEMBRES
- *   - SEASON_YEAR
- *   - PHOTO_INVALID_FROM_MMDD
- * - Écrit dans le classeur CENTRAL (targetSpreadsheetId):
- *   MEMBRES_GLOBAL avec l'entête normalisée (voir colOrder).
- *
- * Attentes helpers existants:
- *  - normalizePassportPlain8_, _vm_findLatestActiveFile_, _vm_readFileAsSheetValues_,
- *    _vm_indexCols_, _vm_toISODate_, _vm_to01_, _vm_hashRow_, _vm_groupRuns_,
- *    getSheetOrCreate_, log_, _vm_nowISO_, _vm_rowValues_, _vm_notifyImportMembres_
- */
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Helpers locaux                                                             */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+function _readParamFromSeasonOrGlobal_(ssSeason, key, fallback) {
+  try {
+    if (typeof readParam_ === 'function') {
+      var v1 = readParam_(ssSeason, key);
+      if (v1) return v1;
+    }
+  } catch (_) {}
+  try {
+    if (typeof readParamValue === 'function') {
+      var v2 = readParamValue(key);
+      if (v2) return v2;
+    }
+  } catch (_) {}
+  return fallback || '';
+}
+
+function _indexByHeader_(headers, wantedList) {
+  var idx = -1;
+  var map = {};
+  headers.forEach(function(h, i) { map[String(h).trim().toLowerCase()] = i; });
+  for (var k = 0; k < wantedList.length; k++) {
+    var w = String(wantedList[k]).trim().toLowerCase();
+    if (w in map) return map[w];
+  }
+  for (var j = 0; j < wantedList.length; j++) {
+    var needle = String(wantedList[j]).trim().toLowerCase();
+    for (var key in map) if (key.indexOf(needle) !== -1) return map[key];
+  }
+  return idx;
+}
+
+function _readSheet_(sh) {
+  var lr = sh.getLastRow(), lc = sh.getLastColumn();
+  if (lr < 1 || lc < 1) return { headers: [], rows: [] };
+  var values = sh.getRange(1, 1, lr, lc).getValues();
+  var headers = values.shift() || [];
+  return { headers: headers, rows: values };
+}
+
+function _writeWholeSheet_(sh, headers, rows) {
+  sh.clearContents();
+  if (headers && headers.length) sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (rows && rows.length) sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* IMPORT GLOBAL: lit dernier fichier VM et upsert CENTRAL.MEMBRES_GLOBAL     */
+/* ────────────────────────────────────────────────────────────────────────── */
+
 function importValidationMembresToGlobal_(targetSpreadsheetId) {
-  // --- SAISON: params & dossier source ---
-  var seasonId = getSeasonId_(); // on s'appuie sur ta saison active
+  var seasonId = getSeasonId_();
   var ssSeason = SpreadsheetApp.openById(seasonId);
 
-  var folderId = readParam_ ? readParam_(ssSeason, 'DRIVE_FOLDER_VALIDATION_MEMBRES')
-                            : (readParamValue('DRIVE_FOLDER_VALIDATION_MEMBRES') || '');
-  if (!folderId) throw new Error('Paramètre DRIVE_FOLDER_VALIDATION_MEMBRES manquant (classeur saison).');
+  var folderId = _readParamFromSeasonOrGlobal_(ssSeason, 'DRIVE_FOLDER_VALIDATION_MEMBRES', '');
+  if (!folderId) throw new Error('DRIVE_FOLDER_VALIDATION_MEMBRES manquant (saison).');
 
-  var seasonYear = Number( (readParam_ ? readParam_(ssSeason, 'SEASON_YEAR') : readParamValue('SEASON_YEAR')) || new Date().getFullYear() );
-  var photoInvalidFrom = String( (readParam_ ? readParam_(ssSeason, 'PHOTO_INVALID_FROM_MMDD') : readParamValue('PHOTO_INVALID_FROM_MMDD')) || '04-01' ).trim();
+  var seasonYear = Number(_readParamFromSeasonOrGlobal_(ssSeason, 'SEASON_YEAR', new Date().getFullYear()));
+  var photoInvalidFrom = String(_readParamFromSeasonOrGlobal_(ssSeason, 'PHOTO_INVALID_FROM_MMDD', '04-01')).trim();
 
-  // --- CENTRAL: feuille cible ---
-  if (!targetSpreadsheetId) throw new Error('ID du classeur CENTRAL manquant (targetSpreadsheetId).');
+  if (!targetSpreadsheetId) throw new Error('ID du classeur CENTRAL manquant.');
   var ssCentral = SpreadsheetApp.openById(targetSpreadsheetId);
 
-  // --- Fichier source ---
   var found = _vm_findLatestActiveFile_(folderId);
   var file = found && found.file;
   if (!file) {
-    log_('VM_IMPORT_NOFILE', 'Aucun fichier actif dans le dossier Validation_Membres.');
-    return { updated: 0, unchanged: 0, created: 0 };
+    if (typeof log_ === 'function') log_('VM_IMPORT_NOFILE', 'Aucun fichier actif dans Validation_Membres.');
+    return { created: 0, updated: 0, unchanged: 0 };
   }
-  log_('VM_IMPORT_START', 'Lecture: ' + file.getName() + ' (' + file.getId() + ')');
+  if (typeof log_ === 'function') log_('VM_IMPORT_START', file.getName() + ' (' + file.getId() + ')');
 
   var values = _vm_readFileAsSheetValues_(file);
-  if (!values || values.length < 2) throw new Error('Fichier Validation_Membres vide ou illisible.');
+  if (!values || values.length < 2) throw new Error('Fichier Validation_Membres vide/illisible.');
 
   var headers = values[0].map(function(h){ return String(h).trim(); });
-  var idx = _vm_indexCols_(headers, [
-    'Passeport #', 'Prénom', 'Nom', 'Date de naissance',
-    'Identité de genre', 'Statut du membre',
-    'Date d\'expiration de la photo de profil',
-    'Vérification du casier judiciaire est expiré'
-  ]);
 
-  var seasonInvalidDate = seasonYear + '-' + photoInvalidFrom;   // ex 2025-04-01
-  var cutoffNextJan1    = (seasonYear + 1) + '-01-01';           // ex 2026-01-01
+  // Index principaux (via ton util; sinon fallback strict)
+  var idx = (typeof _vm_indexCols_ === 'function')
+    ? _vm_indexCols_(headers, [
+        'Passeport #','Prénom','Nom','Date de naissance',
+        'Identité de genre','Statut du membre',
+        "Date d'expiration de la photo de profil",
+        'Vérification du casier judiciaire est expiré',
+        'Courriel','Email','Parent 1 - Courriel','Parent 2 - Courriel'
+      ])
+    : {};
 
-  // --- Build: passeport -> objet cible (aligné EXACTEMENT sur l'entête finale) ---
+  function findIdx_(label) {
+    var want = String(label).trim().toLowerCase();
+    for (var i = 0; i < headers.length; i++) {
+      if (String(headers[i]).trim().toLowerCase() === want) return i;
+    }
+    return -1;
+  }
+
+  function idxOf(label) {
+    return (idx && label in idx && idx[label] >= 0) ? idx[label] : findIdx_(label);
+  }
+
+  var iPass   = idxOf('Passeport #');
+  var iPrenom = idxOf('Prénom');
+  var iNom    = idxOf('Nom');
+  var iDOB    = idxOf('Date de naissance');
+  var iGenre  = idxOf('Identité de genre');
+  var iStatut = idxOf('Statut du membre');
+  var iPhoto  = idxOf("Date d'expiration de la photo de profil");
+  var iCasier = idxOf('Vérification du casier judiciaire est expiré');
+
+  var iCourriel     = idxOf('Courriel');
+  var iEmail        = (iCourriel < 0) ? idxOf('Email') : -1;
+  var iParent1Mail  = idxOf('Parent 1 - Courriel');
+  var iParent2Mail  = idxOf('Parent 2 - Courriel');
+
+  var seasonInvalidDate = seasonYear + '-' + photoInvalidFrom; // p.ex. 2026-04-01
+  var cutoffNextJan1    = (seasonYear + 1) + '-01-01';
+
+  function pickPrimaryEmail_(parts) {
+    var bad = /noreply|no-reply|invalid|example|test/i;
+    var list = [];
+    parts.forEach(function(p){
+      String(p || '').split(/[;,]/).forEach(function(s){
+        var t = s.trim();
+        if (t) list.push(t);
+      });
+    });
+    for (var k = 0; k < list.length; k++) if (!bad.test(list[k])) return list[k];
+    return list[0] || '';
+  }
+
   var targetByPassport = new Map();
+
   for (var r = 1; r < values.length; r++) {
     var row = values[r];
     if (!row || row.length === 0) continue;
 
-    var passportRaw = row[idx['Passeport #']];
-    var passport = normalizePassportPlain8_(passportRaw);
+    var passport = normalizePassportPlain8_(row[iPass]);
     if (!passport) continue;
 
-    var prenom   = String(row[idx['Prénom']] || '').trim();
-    var nom      = String(row[idx['Nom']] || '').trim();
-    var dobRaw   = row[idx['Date de naissance']];
-    var genre    = String(row[idx['Identité de genre']] || '').trim();
-    var statut   = String(row[idx['Statut du membre']] || '').trim();
-    var photoExp = _vm_toISODate_(row[idx['Date d\'expiration de la photo de profil']]);
-    var casier01 = _vm_to01_(row[idx['Vérification du casier judiciaire est expiré']]); // 1 = expiré
+    var prenom   = String(row[iPrenom] || '').trim();
+    var nom      = String(row[iNom] || '').trim();
+    var dob      = (typeof _vm_toISODate_ === 'function') ? _vm_toISODate_(row[iDOB]) : row[iDOB];
+    var genre    = String(row[iGenre] || '').trim();
+    var statut   = String(row[iStatut] || '').trim();
+    var photoExp = (typeof _vm_toISODate_ === 'function') ? _vm_toISODate_(row[iPhoto]) : row[iPhoto];
+    var casier01 = (typeof _vm_to01_ === 'function') ? _vm_to01_(row[iCasier]) : (row[iCasier] ? 1 : 0);
 
-    var photoInvalide = (!photoExp || photoExp < cutoffNextJan1) ? 1 : 0;
+    var photoInvalide = (!photoExp || String(photoExp) < cutoffNextJan1) ? 1 : 0;
     var photoDuesLe   = photoInvalide ? seasonInvalidDate : '';
 
-    // ⚠️ IMPORTANT: utiliser les mêmes clés que l'entête finale (CasierExpiré avec accent)
+    var courriel = pickPrimaryEmail_([
+      (iCourriel >= 0 ? row[iCourriel] : ''),
+      (iEmail    >= 0 ? row[iEmail]    : ''),
+      (iParent1Mail >= 0 ? row[iParent1Mail] : ''),
+      (iParent2Mail >= 0 ? row[iParent2Mail] : '')
+    ]);
+
     var obj = {
       'Passeport': passport,
       'Prenom': prenom,
       'Nom': nom,
-      'DateNaissance': _vm_toISODate_(dobRaw),
+      'DateNaissance': dob,
       'Genre': genre,
       'StatutMembre': statut,
       'PhotoExpireLe': photoExp,
       'PhotoInvalideDuesLe': photoDuesLe,
       'PhotoInvalide': photoInvalide,
-      'CasierExpiré': casier01,          // <-- clé EXACTE = entête
-      'SeasonYear': seasonYear
+      'CasierExpiré': casier01,
+      'SeasonYear': seasonYear,
+      'Courriel': courriel
     };
 
-    obj.RowHash = _vm_hashRow_(obj);
+    obj.RowHash = (typeof _vm_hashRow_ === 'function') ? _vm_hashRow_(obj) : JSON.stringify(obj);
     targetByPassport.set(passport, obj);
   }
 
-  // --- Upsert CENTRAL.MEMBRES_GLOBAL (diff par RowHash) ---
-  var sheetName = (readParam_ ? readParam_(ssSeason, 'SHEET_MEMBRES_GLOBAL') : readParamValue('SHEET_MEMBRES_GLOBAL')) || 'MEMBRES_GLOBAL';
+  var sheetName = _readParamFromSeasonOrGlobal_(ssSeason, 'SHEET_MEMBRES_GLOBAL', 'MEMBRES_GLOBAL');
   var sh = getSheetOrCreate_(ssCentral, sheetName);
 
   var colOrder = [
     'Passeport','Prenom','Nom','DateNaissance','Genre','StatutMembre',
     'PhotoExpireLe','PhotoInvalideDuesLe','PhotoInvalide',
-    'CasierExpiré','SeasonYear','RowHash','LastUpdate'
+    'CasierExpiré','SeasonYear','RowHash','LastUpdate','Courriel'
   ];
-  _vm_ensureHeader_(sh, colOrder);
 
-  var data   = sh.getDataRange().getValues();
+  if (typeof _vm_ensureHeader_ === 'function') {
+    _vm_ensureHeader_(sh, colOrder);
+  } else {
+    var hdr = sh.getLastRow() ? sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0] : [];
+    if (!hdr || hdr.join('|') !== colOrder.join('|')) {
+      sh.clear();
+      sh.getRange(1,1,1,colOrder.length).setValues([colOrder]);
+    }
+  }
+
+  var data = sh.getDataRange().getValues();
   var header = data[0];
   var colIdx = {};
   header.forEach(function(h, i){ colIdx[String(h)] = i; });
 
-  // index existant: passeport -> {rowIndex, RowHash}
   var existingIdx = new Map();
   for (var i = 1; i < data.length; i++) {
     var pass = String(data[i][colIdx['Passeport']] || '').trim();
@@ -153,29 +428,36 @@ function importValidationMembresToGlobal_(targetSpreadsheetId) {
     }
   }
 
-  var nowISO = _vm_nowISO_();
-  var toWrite = [];   // [rowIndex (1-based), rowValues]
+  var nowISO = (typeof _vm_nowISO_ === 'function') ? _vm_nowISO_() : new Date().toISOString();
+  function buildRow_(obj) {
+    if (typeof _vm_rowValues_ === 'function') return _vm_rowValues_(colOrder, obj, nowISO);
+    var out = [];
+    colOrder.forEach(function(k){
+      if (k === 'LastUpdate') out.push(nowISO);
+      else out.push(obj.hasOwnProperty(k) ? obj[k] : '');
+    });
+    return out;
+  }
+
+  var toWrite = [];   // [rowIndex(1-based), rowValues]
   var toAppend = [];  // [rowValues]
   var updated = 0, created = 0, unchanged = 0;
 
   targetByPassport.forEach(function(obj, pass){
-    var exists = existingIdx.get(pass);
-    if (exists) {
-      if (exists.hash === obj.RowHash) { unchanged++; return; }
-      var rowValsU = _vm_rowValues_(colOrder, obj, nowISO);
-      toWrite.push([exists.rowIndex + 1, rowValsU]); // +1: entête
+    var ex = existingIdx.get(pass);
+    if (ex) {
+      if (ex.hash === obj.RowHash) { unchanged++; return; }
+      toWrite.push([ex.rowIndex + 1, buildRow_(obj)]);
       updated++;
     } else {
-      var rowValsA = _vm_rowValues_(colOrder, obj, nowISO);
-      toAppend.push(rowValsA);
+      toAppend.push(buildRow_(obj));
       created++;
     }
   });
 
-  // Écritures batchées
   if (toWrite.length) {
-    toWrite.sort(function(a,b){ return a[0]-b[0]; });
-    var runs = _vm_groupRuns_(toWrite);
+    toWrite.sort(function(a,b){ return a[0] - b[0]; });
+    var runs = (typeof _vm_groupRuns_ === 'function') ? _vm_groupRuns_(toWrite) : [toWrite];
     runs.forEach(function(run){
       var startRow = run[0][0];
       var block = run.map(function(x){ return x[1]; });
@@ -187,561 +469,391 @@ function importValidationMembresToGlobal_(targetSpreadsheetId) {
     sh.getRange(start, 1, toAppend.length, colOrder.length).setValues(toAppend);
   }
 
-  log_('VM_IMPORT_SUMMARY', 'created=' + created + ', updated=' + updated + ', unchanged=' + unchanged + ', total=' + targetByPassport.size);
-  _vm_notifyImportMembres_(ssSeason, file, {created:created, updated:updated, unchanged:unchanged});
+  if (typeof log_ === 'function') log_('VM_IMPORT_SUMMARY', 'created=' + created + ', updated=' + updated + ', unchanged=' + unchanged);
+  if (typeof _vm_notifyImportMembres_ === 'function') {
+    try { _vm_notifyImportMembres_({created:created, updated:updated, unchanged:unchanged}); } catch(_) {}
+  }
 
-  return {created: created, updated: updated, unchanged: unchanged};
-}
-/** Initialiser la saison si membres_global est vide (l'onglet de la saison) */
-
-function runSyncMembresGlobalSubsetFromCentral(){
-  var seasonId = getSeasonId_();
-  var centralId = readParamValue('GLOBAL_MEMBRES_SHEET_ID');
-  if (!centralId) throw new Error('GLOBAL_MEMBRES_SHEET_ID manquant dans PARAMS.');
-  var res = syncMembresGlobalSubsetFromCentral_(seasonId, centralId);
-  appendImportLog_({ type:'MEMBRES_GLOBAL_SUBSET_OK', details: res });
-  return res;
+  return { created: created, updated: updated, unchanged: unchanged };
 }
 
-function syncMembresGlobalSubsetFromCentral_(seasonId, centralId){
+/* ────────────────────────────────────────────────────────────────────────── */
+/* SUBSET SAISON: GLOBAL → MEMBRES_GLOBAL_SAISON (filtré par passeports)     */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+// GLOBAL -> (filtré) -> SAISON.MEMBRES_GLOBAL
+function syncMembresGlobalSubsetFromCentral_(seasonId, centralId) {
   var ssSeason = SpreadsheetApp.openById(seasonId);
-  var ssCentral = SpreadsheetApp.openById(centralId);
+  var ssGlobal = SpreadsheetApp.openById(centralId);
 
-  // Collecter les passeports de la saison (inscriptions + coachs)
-  var need = buildSeasonPassportSet_(ssSeason);
+  var globalSheetName  = (typeof readParam_==='function' ? readParam_(ssSeason,'SHEET_MEMBRES_GLOBAL') : '') || 'MEMBRES_GLOBAL';
+  var seasonSheetName  = globalSheetName; // 👈 même nom dans la SAISON
+  var joueursSheetName = (typeof readParam_==='function' ? readParam_(ssSeason,'SHEET_JOUEURS') : '') || 'JOUEURS';
 
-  var shC = ssCentral.getSheetByName('MEMBRES_GLOBAL');
-  if (!shC || shC.getLastRow() < 2) throw new Error('MEMBRES_GLOBAL central vide.');
-  var VC = shC.getDataRange().getValues();
-  var HC = VC[0];
+  var shGlobal  = ssGlobal.getSheetByName(globalSheetName);
+  if (!shGlobal) throw new Error('GLOBAL: feuille "' + globalSheetName + '" introuvable.');
+  var shJoueurs = ssSeason.getSheetByName(joueursSheetName);
+  if (!shJoueurs) throw new Error('SAISON: feuille "' + joueursSheetName + '" introuvable.');
 
-  function col_(name){ return HC.indexOf(name); }
-  var cPass = col_('Passeport'),
-      cPre  = col_('Prenom'),
-      cNom  = col_('Nom'),
-      cDOB  = col_('DateNaissance'),
-      cGen  = col_('Genre'),
-      cStat = col_('StatutMembre'),
-      cPh   = col_('PhotoExpireLe'),
-      cPid  = col_('PhotoInvalideDuesLe'),
-      cPif  = col_('PhotoInvalide'),
-      cCas  = col_('CasierExpiré');
+  // Lire global + joueurs
+  var lrG = shGlobal.getLastRow(), lcG = shGlobal.getLastColumn();
+  if (lrG < 1 || lcG < 1) throw new Error('GLOBAL vide.');
+  var valsG = shGlobal.getRange(1,1,lrG,lcG).getValues();
+  var header = valsG.shift();
 
-  var mapC = {};
-  for (var r=1; r<VC.length; r++){
-    var p = normalizePassportPlain8_(VC[r][cPass]);
-    if (p) mapC[p] = VC[r];
-  }
+  var lrJ = shJoueurs.getLastRow(), lcJ = shJoueurs.getLastColumn();
+  if (lrJ < 1 || lcJ < 1) throw new Error('JOUEURS vide.');
+  var valsJ = shJoueurs.getRange(1,1,lrJ,lcJ).getValues();
+  var HJ = valsJ[0]; valsJ.shift();
 
-  var sheetNameLocal = readParamValue('SHEET_MEMBRES_GLOBAL') || 'MEMBRES_GLOBAL';
-  var shL = ssSeason.getSheetByName(sheetNameLocal) || ssSeason.insertSheet(sheetNameLocal);
-  shL.clear();
-  var header = ['Passeport','Prenom','Nom','DateNaissance','Genre','StatutMembre',
-                'PhotoExpireLe','PhotoInvalideDuesLe','PhotoInvalide','CasierExpiré'];
-  shL.getRange(1,1,1,header.length).setValues([header]);
-
-  var out = [];
-  need.forEach(function(p){
-    var row = mapC[p];
-    if (!row) return; // passeport non trouvé dans central
-    out.push([
-      p,
-      row[cPre], row[cNom], row[cDOB], row[cGen], row[cStat],
-      row[cPh], row[cPid], row[cPif], row[cCas]
-    ]);
-  });
-
-  if (out.length) {
-    shL.getRange(2,1,out.length, header.length).setValues(out);
-  }
-
-  return {written: out.length, sheet: sheetNameLocal};
-}
-function buildSeasonPassportSet_(ss){
-  var set = new Set();
-
-  function collect_(sheetName){
-    var sh = ss.getSheetByName(sheetName);
-    if (!sh || sh.getLastRow() < 2) return;
-    var vals = sh.getDataRange().getValues();
-    var header = vals[0];
-    var ciP = header.indexOf('Passeport #');
-    if (ciP < 0) return;
-    for (var r=1; r<vals.length; r++){
-      var p = normalizePassportPlain8_(vals[r][ciP]);
-      if (p) set.add(p);
+  // index colonnes "Passeport"
+  function idxOf(H, list) {
+    var low = {}; H.forEach(function(h,i){ low[String(h).trim().toLowerCase()] = i; });
+    for (var k=0;k<list.length;k++) {
+      var n = String(list[k]).toLowerCase(); if (n in low) return low[n];
     }
+    for (var k2=0;k2<list.length;k2++) {
+      var needle = String(list[k2]).toLowerCase();
+      for (var key in low) if (key.indexOf(needle) !== -1) return low[key];
+    }
+    return -1;
+  }
+  var iPassG = idxOf(header, ['passeport #','passeport','passport','no passeport']);
+  var iPassJ = idxOf(HJ,     ['passeport #','passeport','passport','no passeport']);
+  if (iPassG < 0) throw new Error('GLOBAL: colonne Passeport # introuvable.');
+  if (iPassJ < 0) throw new Error('JOUEURS: colonne Passeport # introuvable.');
+
+  var seasonPass = new Set(valsJ.map(function(r){ return String(r[iPassJ]||'').trim(); }).filter(Boolean));
+
+  // Filtrer global
+  var filtered = [];
+  for (var i=0;i<valsG.length;i++) {
+    var p = String(valsG[i][iPassG]||'').trim();
+    if (p && seasonPass.has(p)) filtered.push(valsG[i]);
   }
 
-  collect_('INSCRIPTIONS');
-  collect_('INSCRIPTIONS_ENTRAINEURS');
-  return set;
+  // Écrire dans SAISON.MEMBRES_GLOBAL (même nom), en remplaçant le contenu
+  var shSeasonMG = ssSeason.getSheetByName(seasonSheetName) || ssSeason.insertSheet(seasonSheetName);
+  shSeasonMG.clearContents();
+  shSeasonMG.getRange(1,1,1,header.length).setValues([header]);
+  if (filtered.length) {
+    shSeasonMG.getRange(2,1,filtered.length,header.length).setValues(filtered);
+  }
+
+  return { sheet: seasonSheetName, kept: filtered.length, totalGlobal: valsG.length };
 }
 
 
-/** Upsert depuis le classeur central pour une liste de passeports
- *  - On lit la ligne centrale si elle existe et on remplace/insère la ligne locale correspondante
- *  - Conserve l’entête locale utilisée par ton subset (Passeport, Prenom, Nom, DOB, Genre, PhotoExpireLe, PhotoInvalideFlag, PhotoInvalideDuesLe, CasierExpiré, CasierExpireFlag)
- */
-function upsertMembresFromCentralByPassports_(passports) {
-  if (!passports || passports.length === 0) return { upserted: 0, missing: 0 };
+/* ────────────────────────────────────────────────────────────────────────── */
+/* APPLY → JOUEURS: met à jour PhotoExpireLe (+ flag Photo expirée si présent)*/
+/* ────────────────────────────────────────────────────────────────────────── */
 
+function applySeasonVMToJoueurs_() {
   var seasonId = getSeasonId_();
   var ssSeason = SpreadsheetApp.openById(seasonId);
-  var globalId = readParamValue('GLOBAL_MEMBRES_SHEET_ID');
-  if (!globalId) throw new Error('GLOBAL_MEMBRES_SHEET_ID manquant dans PARAMS.');
-  var ssGlobal = SpreadsheetApp.openById(globalId);
 
-  var sheetNameLocal  = readParamValue('SHEET_MEMBRES_GLOBAL') || 'MEMBRES_GLOBAL';
-  var sheetNameGlobal = 'MEMBRES_GLOBAL';
+  var subsetSheetName  = _readParamFromSeasonOrGlobal_(ssSeason, 'SHEET_MEMBRES_GLOBAL_SAISON', 'MEMBRES_GLOBAL_SAISON');
+  var joueursSheetName = _readParamFromSeasonOrGlobal_(ssSeason, 'SHEET_JOUEURS', 'JOUEURS');
 
-  var shG = ssGlobal.getSheetByName(sheetNameGlobal);
-  if (!shG || shG.getLastRow() < 2) throw new Error('MEMBRES_GLOBAL introuvable dans le classeur central.');
+  var shSubset  = ssSeason.getSheetByName(subsetSheetName);
+  var shJoueurs = ssSeason.getSheetByName(joueursSheetName);
+  if (!shSubset)  throw new Error('Subset "' + subsetSheetName + '" introuvable.');
+  if (!shJoueurs) throw new Error('JOUEURS "' + joueursSheetName + '" introuvable.');
 
-  var VG = shG.getDataRange().getValues();
-  var HG = VG[0];
-  function colG_(name){ return HG.indexOf(name); }
+  var S = _readSheet_(shSubset);
+  var J = _readSheet_(shJoueurs);
+  if (!S.headers.length || !S.rows.length) return { updated: 0, reason: 'subset vide' };
+  if (!J.headers.length) return { updated: 0, reason: 'joueurs vide' };
 
-  var gPass = colG_('Passeport'),
-      gPre  = colG_('Prenom'),
-      gNom  = colG_('Nom'),
-      gDOB  = colG_('DateNaissance'),
-      gGen  = colG_('Genre'),
-      gPh   = colG_('PhotoExpireLe'),
-      gCas  = colG_('CasierExpiré');
+  var idxS_pass = _indexByHeader_(S.headers, ['Passeport #','Passeport','Passport','No passeport']);
+  var idxS_exp  = _indexByHeader_(S.headers, ['PhotoExpireLe',"Date d'expiration de la photo","Photo expire le","Photo Expire Le"]);
+  if (idxS_pass < 0) throw new Error('Subset: colonne Passeport # introuvable.');
+  if (idxS_exp  < 0) throw new Error('Subset: colonne PhotoExpireLe introuvable.');
 
-  if (gPass < 0) throw new Error("Colonne 'Passeport' manquante dans le global.");
+  var idxJ_pass      = _indexByHeader_(J.headers, ['Passeport #','Passeport','Passport','No passeport']);
+  var idxJ_photoDate = _indexByHeader_(J.headers, ['PhotoExpireLe',"Date d'expiration de la photo","Photo expire le"]);
+  var idxJ_photoFlag = _indexByHeader_(J.headers, ['Photo expirée','Photo est expirée','Statut photo','PhotoStatus']);
 
-  // Index global par passeport
-  var mapG = {};
-  for (var r=1; r<VG.length; r++){
-    var p = normalizePassportPlain8_(VG[r][gPass]);
-    if (p) mapG[p] = VG[r];
+  if (idxJ_pass < 0) throw new Error('JOUEURS: colonne Passeport # introuvable.');
+  if (idxJ_photoDate < 0 && idxJ_photoFlag < 0) return { updated: 0, reason: 'aucune colonne cible photo dans JOUEURS' };
+
+  var mapExp = new Map();
+  for (var i = 0; i < S.rows.length; i++) {
+    var r = S.rows[i];
+    var p = String(r[idxS_pass] || '').trim();
+    var d = r[idxS_exp];
+    mapExp.set(p, d);
   }
 
-  // Prépare la feuille locale (créée si absente)
-  var shL = ssSeason.getSheetByName(sheetNameLocal);
-  if (!shL) {
-    shL = ssSeason.insertSheet(sheetNameLocal);
-    shL.getRange(1,1,1,10).setValues([[
-      'Passeport','Prenom','Nom','DateNaissance','Genre',
-      'PhotoExpireLe','PhotoInvalideFlag','PhotoInvalideDuesLe',
-      'CasierExpiré','CasierExpireFlag'
-    ]]);
-  }
-  var VL = shL.getDataRange().getValues();
-  var HL = VL[0];
-  function colL_(name){ return HL.indexOf(name); }
+  var today = new Date();
+  var td = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
-  var lPass = colL_('Passeport'),
-      lPre  = colL_('Prenom'),
-      lNom  = colL_('Nom'),
-      lDOB  = colL_('DateNaissance'),
-      lGen  = colL_('Genre'),
-      lPh   = colL_('PhotoExpireLe'),
-      lPif  = colL_('PhotoInvalideFlag'),
-      lPid  = colL_('PhotoInvalideDuesLe'),
-      lCas  = colL_('CasierExpiré'),
-      lCfl  = colL_('CasierExpireFlag');
+  var updates = 0;
+  var out = J.rows.map(function(row){
+    var p = String(row[idxJ_pass] || '').trim();
+    if (!p) return row;
+    if (!mapExp.has(p)) return row;
 
-  // Index local par passeport → N° de ligne (1-based)
-  var rowIndexLocal = {};
-  for (var r2=1; r2<VL.length; r2++){
-    var p2 = normalizePassportPlain8_(VL[r2][lPass]);
-    if (p2) rowIndexLocal[p2] = r2 + 1;
-  }
+    var exp = mapExp.get(p);
+    var changed = false;
 
-  var seasonYear = Number(readParamValue('SEASON_YEAR') || new Date().getFullYear());
-  var mmdd = (readParamValue('PHOTO_INVALID_FROM_MMDD') || '04-01').trim();
-  var dueDate = seasonYear + '-' + mmdd;
-  var cutoffNextJan1 = (seasonYear + 1) + '-01-01';
-
-  var upserted = 0, missing = 0;
-  passports.forEach(function(pp){
-    var p = normalizePassportPlain8_(pp);
-    if (!p) return;
-    var rowG = mapG[p];
-    if (!rowG) { missing++; return; }
-
-    var prenom = String(rowG[gPre]||''),
-        nom    = String(rowG[gNom]||''),
-        dob    = String(rowG[gDOB]||''),
-        gen    = String(rowG[gGen]||''),
-        photo  = String(rowG[gPh] || ''),
-        casExp = Number(rowG[gCas]||0);
-
-    var pFlag  = (photo && photo < cutoffNextJan1) ? 1 : 0;
-    var pDue   = pFlag ? dueDate : '';
-    var cFlag  = (casExp === 1) ? 1 : 0;
-
-    var rowValues = [ p, prenom, nom, dob, gen, photo, pFlag, pDue, casExp, cFlag ];
-
-    var targetRow = rowIndexLocal[p];
-    if (targetRow) {
-      shL.getRange(targetRow, 1, 1, rowValues.length).setValues([rowValues]);
-    } else {
-      shL.appendRow(rowValues);
-      rowIndexLocal[p] = shL.getLastRow();
+    if (idxJ_photoDate >= 0) {
+      var cur = row[idxJ_photoDate];
+      var same = (cur && exp && String(cur) === String(exp)) || (!cur && !exp);
+      if (!same) { row[idxJ_photoDate] = exp || ''; changed = true; }
     }
-    upserted++;
-  });
 
-  return { upserted: upserted, missing: missing };
-}
-
-/** Job planifié : rafraîchir MEMBRES_GLOBAL saison depuis le central (full subset) */
-function nightlyRefreshMembresGlobalSubset(){
-  var seasonId = getSeasonId_();
-  var centralId = readParamValue('GLOBAL_MEMBRES_SHEET_ID');
-  if (!centralId) throw new Error('GLOBAL_MEMBRES_SHEET_ID manquant dans PARAMS.');
-
-  try {
-    var res = syncMembresGlobalSubsetFromCentral_(seasonId, centralId);
-    appendImportLog_({ type:'NIGHTLY_MEMBRES_GLOBAL_SUBSET_OK', details: res });
-    return res;
-  } catch(e) {
-    appendImportLog_({ type:'NIGHTLY_MEMBRES_GLOBAL_SUBSET_FAIL', details: { error: String(e) } });
-    throw e;
-  }
-}
-
-
-
-/* === Helpers spécifiques Validation_Membres === */
-
-/***** === Helpers d’ouverture/convert .xlsx → Google Sheet (autonomes) === *****/
-
-// Conversion .xlsx -> Google Sheets (compatible Drive Advanced v2 et v3).
-// Nécessite le service avancé "Drive API" activé (Éditeur > Services avancés de Google > Drive API).
-function _vm_convertXlsxBlobToSpreadsheet_(blob, name) {
-  var filename = (name || 'TMP_Import') + '';
-
-  // v3: Drive.Files.create(resource, mediaData)
-  if (typeof Drive !== 'undefined' &&
-      Drive.Files &&
-      typeof Drive.Files.create === 'function') {
-    var resourceV3 = { name: filename, mimeType: MimeType.GOOGLE_SHEETS };
-    var fileV3 = Drive.Files.create(resourceV3, blob);
-    return SpreadsheetApp.openById(fileV3.id);
-  }
-
-  // v2: Drive.Files.insert(resource, mediaData)
-  if (typeof Drive !== 'undefined' &&
-      Drive.Files &&
-      typeof Drive.Files.insert === 'function') {
-    var resourceV2 = { title: filename, mimeType: MimeType.GOOGLE_SHEETS };
-    var fileV2 = Drive.Files.insert(resourceV2, blob);
-    return SpreadsheetApp.openById(fileV2.id);
-  }
-
-  // Service pas dispo -> message explicite
-  throw new Error('Le service avancé Drive n’est pas activé (ou API non disponible). ' +
-                  'Active Drive API dans "Services avancés de Google" et réessaie.');
-}
-
-// Ouvre un Spreadsheet à partir d’un Blob .xlsx OU d’un fichier Drive.
-// - Si Google Sheet: ouvre direct
-// - Si .xlsx: convertit via _vm_convertXlsxBlobToSpreadsheet_
-function _vm_ensureSpreadsheetFromFile_(srcFileOrBlob, optName) {
-  try {
-    // 1) Fichier Drive ? Ouvre direct si déjà un Google Sheet.
-    if (srcFileOrBlob && typeof srcFileOrBlob.getId === 'function') {
-      var f = srcFileOrBlob;
-      var ct = (f.getMimeType && f.getMimeType()) || (f.getBlob && f.getBlob().getContentType()) || '';
-      if (String(ct).indexOf('application/vnd.google-apps.spreadsheet') >= 0) {
-        return SpreadsheetApp.openById(f.getId());
+    if (idxJ_photoFlag >= 0) {
+      var isExpired = false;
+      if (exp instanceof Date) {
+        var ed = new Date(exp.getFullYear(), exp.getMonth(), exp.getDate());
+        isExpired = ed < td;
+      } else if (exp) {
+        var parsed = new Date(exp);
+        if (!isNaN(parsed.getTime())) {
+          var ed2 = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+          isExpired = ed2 < td;
+        }
       }
-      // sinon convertit le blob
-      var b = f.getBlob();
-      return _vm_convertXlsxBlobToSpreadsheet_(b, f.getName());
-    }
-  } catch (e) {
-    // on tentera la voie blob
-  }
-
-  // 2) Blob ?
-  if (srcFileOrBlob && typeof srcFileOrBlob.getContentType === 'function') {
-    var blob = srcFileOrBlob;
-    var name = optName || 'TMP_Import.xlsx';
-    var ct2  = (blob.getContentType && blob.getContentType()) || '';
-
-    if (String(ct2).indexOf('spreadsheetml') >= 0 || /\.xlsx$/i.test(name)) {
-      return _vm_convertXlsxBlobToSpreadsheet_(blob, name);
+      var curFlag = row[idxJ_photoFlag];
+      var nextFlag = isExpired ? 1 : 0;
+      if (String(curFlag) !== String(nextFlag)) { row[idxJ_photoFlag] = nextFlag; changed = true; }
     }
 
-    // fallback: créer un fichier, puis ouvrir (rare)
-    var tmp = DriveApp.createFile(blob);
-    try {
-      return SpreadsheetApp.openById(tmp.getId());
-    } finally {
-      try { tmp.setTrashed(true); } catch (_) {}
-    }
-  }
-
-  throw new Error('Format non supporté pour _vm_ensureSpreadsheetFromFile_.');
-}
-
-
-function _vm_findLatestActiveFile_(folderId) {
-  const folder = DriveApp.getFolderById(folderId);
-  // Exclure sous-dossier "Archives"
-  const files = [];
-  const it = folder.getFiles();
-  while (it.hasNext()) {
-    const f = it.next();
-    files.push(f);
-  }
-  if (!files.length) return { file: null, source: null };
-  // Choisir le plus récent par date de dernière mise à jour
-  files.sort((a,b) => b.getLastUpdated() - a.getLastUpdated());
-  const file = files[0];
-  return { file, source: 'folder' };
-}
-
-function _vm_readFileAsSheetValues_(file) {
-  // Ouvre le fichier Drive (Google Sheet ou .xlsx) et retourne les valeurs de la 1re feuille.
-  // Requiert les helpers _vm_ensureSpreadsheetFromFile_ et _vm_convertXlsxBlobToSpreadsheet_ si .xlsx.
-  if (!file) throw new Error('Aucun fichier fourni à _vm_readFileAsSheetValues_.');
-
-  var blob, name, contentType;
-  try {
-    blob = file.getBlob();
-    name = file.getName ? file.getName() : 'Fichier';
-    contentType = (blob && blob.getContentType && blob.getContentType().toLowerCase()) || '';
-  } catch (e) {
-    // Si jamais getBlob() échoue, on tente l’ouverture directe
-    contentType = '';
-    name = (file && file.getName && file.getName()) || 'Fichier';
-  }
-
-  // Cas .xlsx (Office Open XML)
-  if (contentType.indexOf('spreadsheetml') >= 0 || /\.xlsx$/i.test(String(name))) {
-    var ssTmp = _vm_ensureSpreadsheetFromFile_(blob || file, name); // conversion si besoin
-    var sh1 = ssTmp.getSheets()[0];
-    var rng1 = sh1.getDataRange();
-    return rng1 ? rng1.getValues() : [];
-  }
-
-  // Cas Google Sheet natif
-  try {
-    var ss = SpreadsheetApp.openById(file.getId());
-    var sh = ss.getSheets()[0];
-    var rng = sh.getDataRange();
-    return rng ? rng.getValues() : [];
-  } catch (e) {
-    // Dernier recours : si on n’a pas pu ouvrir par Id, on tente via conversion
-    var ssFallback = _vm_ensureSpreadsheetFromFile_(blob || file, name);
-    var shFallback = ssFallback.getSheets()[0];
-    var rngFallback = shFallback.getDataRange();
-    return rngFallback ? rngFallback.getValues() : [];
-  }
-}
-
-function _vm_indexCols_(headers, names) {
-  const map = {};
-  names.forEach(n => {
-    const idx = headers.findIndex(h => String(h).trim().toLowerCase() === String(n).trim().toLowerCase());
-    if (idx < 0) throw new Error('Colonne introuvable: ' + n);
-    map[n] = idx;
-  });
-  return map;
-}
-
-function _vm_toISODate_(val) {
-  if (!val) return '';
-  try {
-    if (val instanceof Date) return Utilities.formatDate(val, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-    const s = String(val).trim().replace(/\//g,'-');
-    // formats possibles: yyyy-mm-dd, dd-mm-yyyy, etc. — on laisse simple
-    const d = new Date(s);
-    if (!isNaN(d.getTime())) return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-  } catch(e){}
-  return '';
-}
-
-function _vm_to01_(v) {
-  const s = String(v).trim().toLowerCase();
-  if (s === '1' || s === 'true' || s === 'oui' || s === 'yes') return 1;
-  return 0;
-}
-
-function _vm_hashRow_(obj) {
-  const payload = [
-    obj.Passeport, obj.Prenom, obj.Nom, obj.DateNaissance, obj.Genre, obj.StatutMembre,
-    obj.PhotoExpireLe, obj.PhotoInvalideDuesLe, obj.PhotoInvalide,
-    obj.CasierExpire, obj.SeasonYear
-  ].map(x => String(x ?? '')).join('|');
-  return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, payload))
-         .substring(0, 22); // raccourci
-}
-
-function _vm_nowISO_() {
-  return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
-}
-
-function _vm_rowValues_(order, obj, nowISO) {
-  const map = {
-    'Passeport': obj.Passeport,
-    'Prenom': obj.Prenom,
-    'Nom': obj.Nom,
-    'DateNaissance': obj.DateNaissance,
-    'Genre': obj.Genre,
-    'StatutMembre': obj.StatutMembre,
-    'PhotoExpireLe': obj.PhotoExpireLe,
-    'PhotoInvalideDuesLe': obj.PhotoInvalideDuesLe,
-    'PhotoInvalide': obj.PhotoInvalide,
-    'CasierExpiré': obj.CasierExpire,
-    'SeasonYear': obj.SeasonYear,
-    'RowHash': obj.RowHash,
-    'LastUpdate': nowISO
-  };
-  return order.map(k => map[k] ?? '');
-}
-
-function _vm_ensureHeader_(sh, order) {
-  if (sh.getLastRow() === 0) {
-    sh.getRange(1,1,1,order.length).setValues([order]);
-    return;
-  }
-  const hdr = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
-  const same = hdr.length === order.length && hdr.every((h,i)=>String(h)===order[i]);
-  if (!same) {
-    sh.clear();
-    sh.getRange(1,1,1,order.length).setValues([order]);
-  }
-}
-
-function _vm_groupRuns_(pairs /* [rowIndex, rowValues] trié par rowIndex */) {
-  const runs = [];
-  let cur = [];
-  for (let i=0;i<pairs.length;i++){
-    if (!cur.length) { cur.push(pairs[i]); continue; }
-    const prevRow = cur[cur.length-1][0];
-    const thisRow = pairs[i][0];
-    if (thisRow === prevRow + 1) cur.push(pairs[i]);
-    else { runs.push(cur); cur = [pairs[i]]; }
-  }
-  if (cur.length) runs.push(cur);
-  return runs;
-}
-
-function _vm_notifyImportMembres_(ss, file, stats) {
-  try {
-    const to = readParam_(ss, 'MAIL_ON_IMPORT_MEMBRES');
-    if (!to) return;
-    const subject = 'Validation_Membres — Import complété';
-    const body = `Fichier: ${file.getName()}\ncreated=${stats.created}\nupdated=${stats.updated}\nunchanged=${stats.unchanged}`;
-    MailApp.sendEmail(to, subject, body);
-  } catch(e){
-    log_('VM_NOTIFY_FAIL', String(e));
-  }
-}
-
-function apiListJoueursPage(opt){
-  opt = opt || {};
-  var offset = Number(opt.offset||0), limit = Math.min(Number(opt.limit||50), 200);
-  var search = String(opt.search||'').trim().toLowerCase();
-  var band   = String(opt.band||'').toUpperCase();    // U4-U8 | U9-U12 | U13-U18 | Adulte | ''
-  var adapte = String(opt.adapte||'').toLowerCase();  // '1'|'0'|''
-  var photo  = String(opt.photo||'').toLowerCase();   // 'missing'|'expired'|'soon'|''
-
-  var ss  = getSeasonSpreadsheet_(getSeasonId_());
-  var tab = readSheetAsObjects_(ss.getId(), 'JOUEURS'); // {header, rows}
-  var H = tab.header||[], rows = tab.rows||[];
-
-  var iPass = H.indexOf('Passeport #');
-  var iNom  = H.indexOf('Nom'), iPre = H.indexOf('Prénom');
-  var iCour = H.indexOf('Courriels'), iBand = H.indexOf('AgeBracket')>=0?H.indexOf('AgeBracket'):H.indexOf('ProgramBand');
-  var iAda  = H.indexOf('isAdapte'), iPhoStr = H.indexOf('PhotoStr'), iPhoDate = H.indexOf('PhotoExpireLe');
-
-  function match(r){
-    // search nom/prenom/passeport/courriel
-    if (search){
-      var blob = (String(r[iPass]||'')+' '+String(r[iNom]||'')+' '+String(r[iPre]||'')+' '+String(r[iCour]||'')).toLowerCase();
-      if (blob.indexOf(search) === -1) return false;
-    }
-    if (band && String(r[iBand]||'').toUpperCase() !== band) return false;
-    if (adapte){
-      var a = String(r[iAda]||'').toLowerCase();
-      var yes = (a==='1'||a==='true'||a==='oui');
-      if (adapte==='1' && !yes) return false;
-      if (adapte==='0' && yes)  return false;
-    }
-    if (photo){
-      var s = String(r[iPhoStr]||'').toLowerCase();
-      var d = String(r[iPhoDate]||'');
-      if (photo==='missing' && !(s.indexOf('aucune')!==-1 || (!d && !s))) return false;
-      if (photo==='expired' && s.indexOf('expir')===-1) return false;
-      if (photo==='soon'    && s.indexOf('bient')===-1) return false;
-    }
-    return true;
-  }
-
-  var all = rows.filter(match);
-  var page = all.slice(offset, offset+limit).map(function(r){
-    return {
-      passeport: r[iPass]||'',
-      nom: r[iNom]||'',
-      prenom: r[iPre]||'',
-      courriels: r[iCour]||'',
-      band: r[iBand]||'',
-      adapte: r[iAda]||'',
-      photo: r[iPhoStr]||'',
-      photoDate: r[iPhoDate]||''
-    };
+    if (changed) updates++;
+    return row;
   });
 
-  return { total: all.length, offset: offset, limit: limit, rows: page };
+  if (updates > 0) {
+    shJoueurs.getRange(2, 1, out.length, J.headers.length).setValues(out);
+  }
+
+  return { updated: updates, rows: out.length };
 }
 
-function apiGetJoueurDetail(passeport){
-  var ss = getSeasonSpreadsheet_(getSeasonId_());
-  var J = readSheetAsObjects_(ss.getId(), 'JOUEURS');
-  var L = readSheetAsObjects_(ss.getId(), 'ACHATS_LEDGER');
-  function norm(p){ return String(p||'').replace(/\D/g,'').padStart(8,'0'); }
-  var p8 = norm(passeport);
+/* ────────────────────────────────────────────────────────────────────────── */
+/* APIs chaînées                                                             */
+/* ────────────────────────────────────────────────────────────────────────── */
 
-  var H=J.header||[], R=J.rows||[];
-  var idx = {
-    pass: H.indexOf('Passeport #'), nom:H.indexOf('Nom'), pre:H.indexOf('Prénom'),
-    dob:H.indexOf('DateNaissance'), genre:H.indexOf('Genre'), cour:H.indexOf('Courriels'),
-    band: H.indexOf('AgeBracket')>=0?H.indexOf('AgeBracket'):H.indexOf('ProgramBand'),
-    adapte:H.indexOf('isAdapte'), photo:H.indexOf('PhotoStr'), photoDate:H.indexOf('PhotoExpireLe')
-  };
-  var rec = null;
-  for (var i=0;i<R.length;i++){
-    var rp = norm(R[i][idx.pass]||''); if (rp===p8){ rec = R[i]; break; }
+function API_VM_importToGlobal(force) {
+  if (typeof _getFlag_ === 'function' && _getFlag_('PHENIX_IMPORT_LOCK') === '1') {
+    return { ok: false, busy: true, reason: 'import-running' };
   }
-  if (!rec) return { notFound:true };
+  var seasonId = getSeasonId_();
+  var ssSeason = SpreadsheetApp.openById(seasonId);
+  var centralId = _readParamFromSeasonOrGlobal_(ssSeason, 'GLOBAL_MEMBRES_SHEET_ID', '');
+  if (!centralId) throw new Error('GLOBAL_MEMBRES_SHEET_ID manquant dans PARAMS.');
 
-  var detail = {
-    passeport: rec[idx.pass]||'',
-    nom: rec[idx.nom]||'',
-    prenom: rec[idx.pre]||'',
-    dob: rec[idx.dob]||'',
-    genre: rec[idx.genre]||'',
-    courriels: rec[idx.cour]||'',
-    band: rec[idx.band]||'',
-    adapte: rec[idx.adapte]||'',
-    photo: rec[idx.photo]||'',
-    photoDate: rec[idx.photoDate]||''
-  };
+  // Détection de nouveauté côté fichier VM
+  var folderId = _readParamFromSeasonOrGlobal_(ssSeason, 'DRIVE_FOLDER_VALIDATION_MEMBRES', '');
+  if (!folderId) throw new Error('DRIVE_FOLDER_VALIDATION_MEMBRES manquant dans PARAMS (saison).');
 
-  // activités actives, saison courante, non ignorées
-  var saison = readParam_(ss, 'SEASON_LABEL')||'';
-  var acts = (L.rows||[]).filter(function(r){
-    if (String(r['Saison']||'')!==saison) return false;
-    if ((+r['Status']||0)!==1) return false;
-    if ((+r['isIgnored']||0)===1) return false;
-    return norm(r['Passeport #']||r['Passeport']||'')===p8;
-  }).map(function(r){
-    return {
-      type: r['Type'],
-      nom: r['NomFrais'] || r['Nom du frais'] || r['Frais'] || r['Produit'] || '',
-      tags: r['Tags'] || '',
-      band: r['ProgramBand'] || ''
-    };
-  });
+  var found = _vm_findLatestActiveFile_(folderId);
+  var file  = found && found.file;
+  if (!file) return { ok: true, skipped: true, reason: 'Aucun fichier VM' };
 
-  return { joueur: detail, activites: acts };
+  var sp = PropertiesService.getScriptProperties();
+  var lastId  = sp.getProperty('VM_LAST_FILE_ID') || '';
+  var lastMts = Number(sp.getProperty('VM_LAST_FILE_MTIME') || '0');
+  var thisId  = file.getId();
+  var thisMts = (file.getLastUpdated && +file.getLastUpdated()) || 0;
+
+  if (!force && lastId === thisId && thisMts <= lastMts) {
+    return { ok: true, skipped: true, reason: 'Déjà à jour (même fichier VM)' };
+  }
+
+  var res = importValidationMembresToGlobal_(centralId);
+
+  sp.setProperty('VM_LAST_FILE_ID', thisId);
+  if (thisMts) sp.setProperty('VM_LAST_FILE_MTIME', String(thisMts));
+
+  return { ok: true, skipped: false, import: res };
+}
+
+function API_VM_refreshSeasonSubset() {
+  if (typeof _getFlag_ === 'function' && _getFlag_('PHENIX_IMPORT_LOCK') === '1') {
+    return { ok: false, busy: true, reason: 'import-running' };
+  }
+  var seasonId  = getSeasonId_();
+  var ssSeason  = SpreadsheetApp.openById(seasonId);
+  var centralId = (typeof readParam_==='function' ? readParam_(ssSeason,'GLOBAL_MEMBRES_SHEET_ID') : '') || '';
+  if (!centralId) throw new Error('GLOBAL_MEMBRES_SHEET_ID manquant dans PARAMS.');
+
+  // 1) filtre → écrit SAISON.MEMBRES_GLOBAL (même nom)
+  var subsetRes = syncMembresGlobalSubsetFromCentral_(seasonId, centralId);
+
+  // 2) propage vers JOUEURS (PhotoExpireLe)
+  var applied   = applySeasonMembresToJoueurs_();
+
+  // 3) recalc PhotoStr
+  var photoRefreshed = null;
+  try {
+    if (typeof refreshPhotoStrInJoueurs_ === 'function') {
+      photoRefreshed = refreshPhotoStrInJoueurs_(ssSeason);
+      // Si la fonction n'a rien écrit (ou a échoué silencieusement), fallback
+      if (!photoRefreshed || photoRefreshed.updated === 0) {
+        photoRefreshed = _fallbackRefreshPhotoStr_(ssSeason);
+      }
+    } else if (typeof refreshJoueursPhotoStr_ === 'function') {
+      photoRefreshed = refreshJoueursPhotoStr_(ssSeason);
+      if (!photoRefreshed || photoRefreshed.updated === 0) {
+        photoRefreshed = _fallbackRefreshPhotoStr_(ssSeason);
+      }
+    } else {
+      photoRefreshed = _fallbackRefreshPhotoStr_(ssSeason);
+    }
+  } catch (e) {
+    // quoi qu’il arrive, on assure un recalcul
+    photoRefreshed = _fallbackRefreshPhotoStr_(ssSeason);
+  }
+
+  return { ok: true, subset: subsetRes, appliedToJoueurs: applied, photoStatus: photoRefreshed };
+}
+
+function API_VM_fullRefresh(force) {
+  if (typeof _getFlag_ === 'function' && _getFlag_('PHENIX_IMPORT_LOCK') === '1') {
+    return { ok: false, busy: true, reason: 'import-running' };
+  }
+  var r1 = API_VM_importToGlobal(!!force);   // peut retourner skipped:true
+  var r2 = API_VM_refreshSeasonSubset();     // subset + application JOUEURS
+  return { ok: true, steps: { importGlobal: r1, refreshSubset: r2 } };
+}
+
+// MEMBRES_GLOBAL (saison) -> JOUEURS : met à jour PhotoExpireLe + (optionnel) flag/texte
+function applySeasonMembresToJoueurs_() {
+  var seasonId = getSeasonId_();
+  var ss = SpreadsheetApp.openById(seasonId);
+
+  var mgName = (typeof readParam_==='function' ? readParam_(ss, 'SHEET_MEMBRES_GLOBAL') : '') || 'MEMBRES_GLOBAL';
+  var jName  = (typeof readParam_==='function' ? readParam_(ss, 'SHEET_JOUEURS') : '') || 'JOUEURS';
+
+  var shMG = ss.getSheetByName(mgName);
+  var shJ  = ss.getSheetByName(jName);
+  if (!shMG) throw new Error('SAISON: "'+mgName+'" introuvable.');
+  if (!shJ)  throw new Error('SAISON: "'+jName+'" introuvable.');
+
+  var lrM = shMG.getLastRow(), lcM = shMG.getLastColumn();
+  if (lrM < 2) return { updated: 0, reason: 'MEMBRES_GLOBAL vide' };
+  var MG = shMG.getRange(1,1,lrM,lcM).getValues(); var HM = MG.shift();
+
+  var lrJ = shJ.getLastRow(), lcJ = shJ.getLastColumn();
+  if (lrJ < 2) return { updated: 0, reason: 'JOUEURS vide' };
+  var J = shJ.getRange(1,1,lrJ,lcJ).getValues(); var HJ = J.shift();
+
+  function idxOf(H, list) {
+    var low = {}; H.forEach(function(h,i){ low[String(h).trim().toLowerCase()] = i; });
+    for (var k=0;k<list.length;k++) { var n = String(list[k]).toLowerCase(); if (n in low) return low[n]; }
+    for (var k2=0;k2<list.length;k2++) { var needle = String(list[k2]).toLowerCase(); for (var key in low) if (key.indexOf(needle)!==-1) return low[key]; }
+    return -1;
+  }
+
+  var iPassM = idxOf(HM, ['passeport #','passeport','passport','no passeport']);
+  var iExpM  = idxOf(HM, ['photoexpirele',"date d'expiration de la photo","photo expire le"]);
+  if (iPassM < 0 || iExpM < 0) return { updated: 0, reason: 'colonnes manquantes dans MEMBRES_GLOBAL' };
+
+  var iPassJ = idxOf(HJ, ['passeport #','passeport','passport','no passeport']);
+  var iExpJ  = idxOf(HJ, ['photoexpirele',"date d'expiration de la photo","photo expire le"]);
+  var iStrJ  = idxOf(HJ, ['photostr','photo str','statut photo']);
+  if (iPassJ < 0) return { updated: 0, reason: 'colonne Passeport # introuvable dans JOUEURS' };
+
+  // index MEMBRES_GLOBAL par passeport
+  var m = new Map();
+  for (var r=0;r<MG.length;r++) {
+    var p = String(MG[r][iPassM]||'').trim(); if (!p) continue;
+    m.set(p, MG[r][iExpM]);
+  }
+
+  // MAJ JOUEURS
+  var updates = 0;
+  for (var r2=0;r2<J.length;r2++) {
+    var p2 = String(J[r2][iPassJ]||'').trim(); if (!p2 || !m.has(p2)) continue;
+    var exp = m.get(p2);
+
+    var changed = false;
+    if (iExpJ >= 0) {
+      var cur = J[r2][iExpJ];
+      var same = (cur && exp && String(cur)===String(exp)) || (!cur && !exp);
+      if (!same) { J[r2][iExpJ] = exp || ''; changed = true; }
+    }
+
+    // si on a aussi une colonne PhotoStr, on la recalculera après via source.js
+    if (changed) updates++;
+  }
+
+  if (updates) {
+    shJ.getRange(2,1,J.length,HJ.length).setValues(J);
+  }
+  return { updated: updates, rows: J.length };
+}
+// -- Helpers d'entêtes souples
+function _idxOfHeaderSoft_(H, wantedList) {
+  var map = {};
+  H.forEach(function(h,i){ map[String(h||'').trim().toLowerCase()] = i; });
+  // exact
+  for (var k=0;k<wantedList.length;k++) {
+    var w = String(wantedList[k]).trim().toLowerCase();
+    if (w in map) return map[w];
+  }
+  // contains
+  for (var j=0;j<wantedList.length;j++) {
+    var needle = String(wantedList[j]).trim().toLowerCase();
+    for (var key in map) if (key.indexOf(needle) !== -1) return map[key];
+  }
+  return -1;
+}
+
+// -- Fallback: recalcule et écrit PhotoStr si la fonction de source.js n'a pas pu le faire.
+function _fallbackRefreshPhotoStr_(ss) {
+  ss = ss || SpreadsheetApp.openById(getSeasonId_());
+  var sh = ss.getSheetByName('JOUEURS');
+  if (!sh || sh.getLastRow() < 2) return { ok:false, reason:'JOUEURS vide' };
+
+  var n = sh.getLastRow() - 1, lc = sh.getLastColumn();
+  var H  = sh.getRange(1,1,1,lc).getValues()[0];
+  var V  = sh.getRange(2,1,n,lc).getValues();
+
+  var iExp  = _idxOfHeaderSoft_(H, ['PhotoExpireLe',"Date d'expiration de la photo","Photo expire le"]);
+  var iAge  = _idxOfHeaderSoft_(H, ['Age','Âge']);
+  var iAda  = _idxOfHeaderSoft_(H, ['isAdapte','Adapté','Programme adapté']);
+  var iHasI = _idxOfHeaderSoft_(H, ['hasInscription','Inscription','A une inscription']);
+  var iStr  = _idxOfHeaderSoft_(H, ['PhotoStr','Statut photo','Photo Str']);
+
+  if (iStr < 0) return { ok:false, reason:'colonne PhotoStr/Statut photo introuvable' };
+
+  // cutoff: on réutilise ta logique si dispo, sinon aujourd’hui
+  var cutoffAbs = (typeof readParam_==='function' && typeof PARAM_KEYS!=='undefined')
+    ? (readParam_(ss, PARAM_KEYS.RETRO_PHOTO_WARN_ABS_DATE) || '')
+    : '';
+  var cutoff = cutoffAbs ? new Date(cutoffAbs)
+              : (typeof _getPhotoCutoffDate_==='function' ? _getPhotoCutoffDate_(ss) : new Date());
+
+  function truthy(v){
+    v = String(v||'').toUpperCase();
+    return v==='1'||v==='TRUE'||v==='OUI'||v==='YES';
+  }
+  function needPhoto(ageVal, adapteVal, hasInsVal) {
+    var age = parseInt(String(ageVal||''),10);
+    if (!isNaN(age) && age < 8) return false;
+    if (truthy(adapteVal)) return false;
+    if (iHasI >= 0) return truthy(hasInsVal);
+    return true; // si la colonne n’existe pas, on assume requis
+  }
+  function statusFor(expVal) {
+    if (!expVal && expVal !== 0) return 'Aucune photo';
+    var d = (expVal instanceof Date) ? expVal : new Date(expVal);
+    if (isNaN(+d)) return 'Aucune photo';
+    return (d < cutoff) ? 'Expirée' : 'Valide';
+  }
+
+  var out = new Array(n);
+  for (var r=0;r<n;r++){
+    var age  = (iAge>=0)  ? V[r][iAge]  : '';
+    var ada  = (iAda>=0)  ? V[r][iAda]  : '';
+    var hasI = (iHasI>=0) ? V[r][iHasI] : '1';
+    var exp  = (iExp>=0)  ? V[r][iExp]  : '';
+    out[r] = [ needPhoto(age,ada,hasI) ? statusFor(exp) : 'Non requis' ];
+  }
+
+  sh.getRange(2, iStr+1, n, 1).setValues(out);
+  return { ok:true, updated:n };
 }
